@@ -3,7 +3,6 @@
   "defaultModel": "deepseek-flash",
   "defaultThinkingLevel": "medium",
   "defaultTools": [
-    "read",
     "subagent"
   ],
   "packages": [

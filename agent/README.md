@@ -1,7 +1,7 @@
-<!-- forge:generated v1 sha256=04279e704ad0106c05835301622244a7397c4c48c1ac113600691175fdff1da1 -->
+<!-- forge:generated v1 sha256=bebac4c377563102aedb1318bb2a887a9b27d900702e7bb73530ad182497664f -->
 # revisor
 
-Tests web apps end to end with Playwright and returns the results with screenshots.
+Tests web apps and command-line programs end to end and returns the results with receipts.
 
 ## Run
 

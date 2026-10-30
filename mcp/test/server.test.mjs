@@ -28,6 +28,7 @@ const b = JSON.parse(fs.readFileSync('behaviour.json', 'utf8'));
 const receipts = args.find(a => a.startsWith('receipts=')).slice('receipts='.length);
 fs.mkdirSync(receipts, { recursive: true });
 fs.writeFileSync(path.join(receipts, 'scenario-01-home.png'), Buffer.from(${JSON.stringify(PNG)}, 'base64'));
+fs.writeFileSync(path.join(receipts, 'scenario-02-help.txt'), '$ tool --help\\nexit: 0\\n');
 const finish = () => { console.log('pi output'); console.log(JSON.stringify({ workflow: 'test', runId: 'run-1', status: b.status, answer: b.answer, toolErrors: 0 })); process.exit(b.code); };
 process.on('SIGTERM', () => { fs.writeFileSync('cancelled', 'yes'); console.log(JSON.stringify({ workflow: 'test', runId: 'run-1', status: 'cancelled', answer: '', toolErrors: 0 })); process.exit(1); });
 setTimeout(finish, b.delay ?? 0);
@@ -48,7 +49,7 @@ test('run_web_test runs the workflow and returns the verdict, report and screens
   const dir = agent(t, { status: 'ok', answer: report('FAIL'), code: 0 });
   const client = await connect(t, dir);
   const { tools } = await client.listTools();
-  assert.deepEqual(tools.map(tool => tool.name), ['run_web_test']);
+  assert.deepEqual(tools.map(tool => tool.name).sort(), ['run_cli_test', 'run_web_test']);
   const result = await client.callTool({ name: 'run_web_test', arguments: {
     url: 'https://staging.example.test', what: 'The home page',
     scenarios: [{ name: 'home', steps: 'Open the page', expected: 'The heading says Welcome' }],
@@ -68,7 +69,26 @@ test('run_web_test runs the workflow and returns the verdict, report and screens
   assert.deepEqual(args.slice(0, 5), ['--workflow', 'test', '--timeout', '5m', '--allow-concurrent']);
   const request = args.find(a => a.startsWith('request=')).slice('request='.length);
   for (const part of ['https://staging.example.test', 'The home page', 'home', 'Open the page', 'The heading says Welcome', 'TEST_USER']) assert.ok(request.includes(part), part);
-  assert.match(args.find(a => a.startsWith('receipts=')), /^receipts=data\/receipts\/[0-9a-f-]{36}$/, 'a folder per call, so parallel calls never mix receipts');
+  assert.equal(args.find(a => a.startsWith('receipts=')), `receipts=${result.structuredContent.receipts}`);
+  assert.match(result.structuredContent.receipts, new RegExp(`^${dir}/data/receipts/[0-9a-f-]{36}$`), 'absolute, and a folder per call, so parallel calls never mix receipts');
+});
+
+test('run_cli_test describes the program and working folder, and returns every receipt', async t => {
+  const dir = agent(t, { status: 'ok', answer: 'Verdict: PASS\n\n## Scenarios', code: 0 });
+  const client = await connect(t, dir);
+  const result = await client.callTool({ name: 'run_cli_test', arguments: {
+    workdir: '/srv/project', program: 'node apps/cli/dist/bin.js', what: 'The help output',
+    scenarios: [{ name: 'help', steps: 'Run it with --help', expected: 'Exit code 0 and the commands are listed' }],
+    secrets: ['API_KEY'],
+  } });
+  assert.equal(result.isError, false);
+  assert.equal(result.structuredContent.verdict, 'PASS');
+  assert.deepEqual(result.structuredContent.files.map(f => f.split('/').at(-1)), ['scenario-01-home.png', 'scenario-02-help.txt']);
+  assert.equal(result.content.some(c => c.type === 'image'), false, 'CLI tests attach no images');
+  const args = JSON.parse(readFileSync(join(dir, 'args.json'), 'utf8'));
+  const request = args.find(a => a.startsWith('request=')).slice('request='.length);
+  for (const part of ['/srv/project', 'node apps/cli/dist/bin.js', 'The help output', 'Run it with --help', 'API_KEY']) assert.ok(request.includes(part), part);
+  assert.match(request, /command-line program/);
 });
 
 test('runs that could not complete are tool errors with the runner message', async t => {
@@ -81,7 +101,15 @@ test('runs that could not complete are tool errors with the runner message', asy
 });
 
 test('the verdict is read whatever the heading level, and UNKNOWN when missing', async t => {
-  for (const [answer, verdict] of [['# Verdict\n\nERROR\n\nThe site was down.', 'ERROR'], ['### Verdict\n**PASS**', 'PASS'], ['All good.', 'UNKNOWN']]) {
+  for (const [answer, verdict] of [
+    ['Verdict: FAIL\n\n## Scenarios', 'FAIL'],
+    ['# Verdict\n\nERROR\n\nThe site was down.', 'ERROR'],
+    ['### Verdict\n**PASS**', 'PASS'],
+    ['**Verdict**\n\nFAIL\nScenario 2 failed.', 'FAIL'],
+    ['**Verdict:** PASS', 'PASS'],
+    ['All good.', 'UNKNOWN'],
+    ['The verdict depends on the scenarios; one passed.', 'UNKNOWN'],
+  ]) {
     const client = await connect(t, agent(t, { status: 'ok', answer, code: 0 }));
     const result = await client.callTool({ name: 'run_web_test', arguments: { url: 'https://staging.example.test', what: 'Home', screenshots: 'paths' } });
     assert.equal(result.structuredContent.verdict, verdict, answer);

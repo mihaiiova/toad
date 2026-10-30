@@ -2,7 +2,6 @@
 name: web-tester
 description: "Runs one web test scenario in a real headless browser and reports pass or fail with screenshots"
 tools:
-  - read
   - mcp:playwright
 model: deepseek/deepseek-flash
 thinking: medium
@@ -18,7 +17,7 @@ systemPrompt: |
   
   Generated from this system's declarations; it changes when they do. Use only what is listed here.
   
-  - **Built-in tools:** read
+  - **Built-in tools:** none
   - **MCP servers:**
     - `playwright` (all tools; tools named `mcp__playwright__<tool>`) — A real headless Chromium browser driven by Playwright
   - **Skills:**
@@ -27,4 +26,4 @@ systemPrompt: |
   If a task needs something not listed, report what is missing to the orchestrator instead of working around it.
 ---
 
-<!-- forge:generated v1 sha256=6d73742f091e44ed9396a787651615a98f191cc1b353d5c9af454e96972eab0c -->
+<!-- forge:generated v1 sha256=471dfc0193cce6ddd7b887762a37015f53411efa7f0ca33e636945c63f94c097 -->

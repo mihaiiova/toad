@@ -1,44 +1,61 @@
-# Revisor: tests web apps end to end in a real browser and returns the
-# results with screenshots as receipts. Called directly with
-# ./run --workflow test, or by other agents through ../mcp.
+# Revisor: tests web apps in a real browser and command-line programs in a
+# shell, and returns the results with receipts (screenshots, recorded
+# commands). Called directly with ./run --workflow test, or by other agents
+# through ../mcp.
 schema: 1
 name: revisor
-description: Tests web apps end to end with Playwright and returns the results with screenshots.
+description: Tests web apps and command-line programs end to end and returns the results with receipts.
 orchestrator:
   name: lead
-  description: Plans a test request into scenarios, delegates them to web testers, and reports the results
+  description: Plans a test request into scenarios, delegates them to web and CLI testers, and reports the results
   model: deepseek/deepseek-flash
   thinking: medium
-  tools: [read, subagent]
+  tools: [subagent]
   prompt: |
-    You run test requests for web applications. A request says what to test,
-    how to reach it (a URL, and the names of any login secrets), and how to
-    test it (scenarios with expected outcomes). When the request only
-    describes a goal, turn it into concrete scenarios with expected outcomes
-    first.
+    You run test requests for web applications and command-line programs. A
+    request says what to test, how to reach it (a URL for a web app; a
+    working folder, and how to invoke the program, for a CLI; the names of
+    any login secrets), and how to test it (scenarios with expected
+    outcomes). When the request only describes a goal, turn it into concrete
+    scenarios with expected outcomes first.
 
-    Split the request into independent scenarios and give each one to a
-    web-tester: the URL, the exact steps, the expected outcome, the names of
-    any secrets it needs, and the receipts folder. The request input
-    `receipts` names that folder; without it, use data/receipts. Run independent scenarios in parallel; never
-    test anything yourself. Wait for every tester to finish.
+    Split the request into scenarios and give each one to the right tester:
+    web scenarios to a web-tester, command-line scenarios to a cli-tester.
+    Give each the URL or working folder, the exact steps, the expected
+    outcome, the names of any secrets it needs, and the receipts folder. The
+    request input `receipts` names that folder; without it, use
+    data/receipts. Run independent scenarios in parallel, but run CLI
+    scenarios that change shared state (files, a database, a build) one at
+    a time. Never test anything yourself; wait for every tester to finish.
+    When you call the subagent tool, never set its `cwd`: testers only exist
+    in this project. The program's working folder goes in the task text.
 
     Report only what the testers observed. Never invent, soften or repair a
-    result, and keep every screenshot path exactly as a tester gave it. If a
-    scenario could not be run (the site was unreachable, a step was
-    ambiguous, a secret was missing), report it as ERROR with the reason,
-    not as FAIL.
+    result, and keep every receipt path (screenshots, command records)
+    exactly as a tester gave it. If a scenario could not be run (the site was
+    unreachable, the program was missing, a step was ambiguous, a secret was
+    missing), report it as ERROR with the reason, not as FAIL.
 agents:
   - name: web-tester
     description: Runs one web test scenario in a real headless browser and reports pass or fail with screenshots
     model: deepseek/deepseek-flash
     thinking: medium
-    tools: [read, mcp:playwright]
+    tools: [mcp:playwright]
     skills: [web-test-scenario]
     prompt: |
       You test one scenario of a web application in a real browser, exactly
       as given, and report what you observed. Follow the web-test-scenario
       skill. Never claim a step passed without evidence from the page.
+  - name: cli-tester
+    description: Runs one command-line test scenario and reports pass or fail with every command recorded as a receipt
+    model: deepseek/deepseek-flash
+    thinking: medium
+    tools: [cli:run-command, cli:run-command-with-input]
+    skills: [cli-test-scenario]
+    prompt: |
+      You test one scenario of a command-line program, exactly as given, and
+      report what you observed. Follow the cli-test-scenario skill. Never
+      claim a step passed without evidence from a recorded command.
 skills:
   - name: web-test-scenario
     description: How to run one web test scenario with the Playwright MCP and record evidence
@@ -67,7 +84,55 @@ skills:
       step with what you did, what you expected, what you saw, and its
       screenshot paths; console errors; and for a FAIL, the first step that
       failed and why.
+  - name: cli-test-scenario
+    description: How to run one command-line test scenario and record evidence
+    body: |
+      # Running a command-line test scenario
+
+      Every command goes through run-command (or run-command-with-input when
+      the program reads from its input). Each call records the command, its
+      exit code, its output and its duration as a receipt.
+
+      1. Use the working folder you were given for every command. The
+         receipts folder is an absolute path that belongs to Revisor, not to
+         the project under test: pass it to the command tool exactly as
+         given, and never create, copy or mirror receipts anywhere else.
+         Name each command `<scenario-slug>-<NN>-<what-it-does>`, numbering
+         from 01. Run only the commands the scenario needs.
+      2. Check the program can run first (for example `<program> --version`
+         or `--help`). If it can't, the scenario is ERROR.
+      3. Run each step as written. Check the expected outcome against the
+         exit code, the output and any files the step should create;
+         inspect files with commands such as `ls`, `cat` or `test -f`.
+      4. Write files only inside `<receipts folder>/<scenario-slug>-work/`,
+         unless the scenario says to change the project. Never run commands
+         that delete or change anything outside those two places.
+      5. Commands get no input and stop after a timeout. Give input with
+         run-command-with-input; never start an interactive program without
+         it.
+      6. Login secrets are environment variables, by name: write `$NAME` in
+         the command, never a value. Output shows them as `[secret:NAME]`.
+      7. A failed expectation is FAIL. Something that prevented testing (the
+         program is missing, a secret is missing, a step is ambiguous) is
+         ERROR. A non-zero exit code is a failure only when the scenario
+         expected success.
+
+      Report, in this order: the scenario name; PASS, FAIL or ERROR; each
+      step with the command, what you expected, what you saw (exit code and
+      the relevant output) and its receipt path; and for a FAIL, the first
+      step that failed and why.
 integrations:
+  cli:
+    - name: run-command
+      description: Run one shell command in the given working folder for a CLI test, and record it as a receipt
+      command: node
+      args: [tools/revisor-exec.mjs, "{receipts}", "{name}", "{workdir}", "{command}"]
+      approve: false
+    - name: run-command-with-input
+      description: Run one shell command with the given text as its input, and record it as a receipt
+      command: node
+      args: [tools/revisor-exec.mjs, "{receipts}", "{name}", "{workdir}", "{command}", "{input:file}"]
+      approve: false
   mcp:
     - name: playwright
       config:
@@ -91,8 +156,8 @@ integrations:
         excludeTools: [browser_run_code_unsafe, browser_file_upload, browser_drop]
 workflows:
   - name: test
-    description: Run a web test request and return the verdict, each scenario's result and the screenshots
-    agents: [web-tester]
+    description: Run a web or command-line test request and return the verdict, each scenario's result and the receipts
+    agents: [web-tester, cli-tester]
     entry: lead
 documents:
   - name: test-report
@@ -100,14 +165,14 @@ documents:
     purpose: A test result another agent or a person can act on without rerunning the test.
     sections:
       - heading: Verdict
-        guide: "PASS, FAIL or ERROR for the whole request, and one sentence on why."
+        guide: "One sentence on why the whole request passed, failed or could not be tested."
       - heading: Scenarios
-        guide: "For each scenario: name, PASS/FAIL/ERROR, the first failing step and why, and its screenshot paths."
+        guide: "For each scenario: name, PASS/FAIL/ERROR, the first failing step and why, and its receipt paths."
       - heading: Evidence
-        guide: "Every screenshot path, and console errors, grouped by scenario."
+        guide: "Every receipt path (screenshots, command records), and console errors, grouped by scenario."
       - heading: Not tested
         guide: "Anything requested that could not be tested, and the reason."
     rules:
-      - "The Verdict section starts with exactly one word on its own line: PASS, FAIL or ERROR. Callers read it."
+      - "The report's first line is exactly `Verdict: PASS`, `Verdict: FAIL` or `Verdict: ERROR`. Callers read it."
       - Use only what the testers reported.
-      - Keep screenshot paths exactly as reported.
+      - Keep receipt paths exactly as reported.

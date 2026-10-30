@@ -18,7 +18,7 @@ cd "$ROOT"
 if [[ ! -f ".pi/system.yaml" ]]; then
   if [[ "${1:-}" == "--workflow" ]]; then
     if [[ ! -f "$ROOT/.pi/git/github.com/mihaiiova/pi-forge/skills/forge/workflow-runner.mjs" ]]; then echo '{"workflow":null,"runId":null,"status":"configuration_error","answer":"","message":"The Forge package is not installed in this project yet. Run ./run once, then retry."}'; exit 2; fi
-    exec node "$ROOT/.pi/git/github.com/mihaiiova/pi-forge/skills/forge/workflow-runner.mjs" 'W3sibmFtZSI6InRlc3QiLCJkZXNjcmlwdGlvbiI6IlJ1biBhIHdlYiB0ZXN0IHJlcXVlc3QgYW5kIHJldHVybiB0aGUgdmVyZGljdCwgZWFjaCBzY2VuYXJpbydzIHJlc3VsdCBhbmQgdGhlIHNjcmVlbnNob3RzIiwiYWdlbnRzIjpbIndlYi10ZXN0ZXIiXSwiZW50cnkiOiJsZWFkIiwibGVhZCI6ImxlYWQifV0=' -- "$@"
+    exec node "$ROOT/.pi/git/github.com/mihaiiova/pi-forge/skills/forge/workflow-runner.mjs" 'W3sibmFtZSI6InRlc3QiLCJkZXNjcmlwdGlvbiI6IlJ1biBhIHdlYiBvciBjb21tYW5kLWxpbmUgdGVzdCByZXF1ZXN0IGFuZCByZXR1cm4gdGhlIHZlcmRpY3QsIGVhY2ggc2NlbmFyaW8ncyByZXN1bHQgYW5kIHRoZSByZWNlaXB0cyIsImFnZW50cyI6WyJ3ZWItdGVzdGVyIiwiY2xpLXRlc3RlciJdLCJlbnRyeSI6ImxlYWQiLCJsZWFkIjoibGVhZCJ9XQ==' -- "$@"
   fi
   echo "run: .pi/system.yaml not found in $ROOT" >&2
   exit 1
@@ -36,6 +36,6 @@ for f in .pi/APPEND_SYSTEM.md .pi/CAPABILITIES.md; do
 done
 if [[ "${1:-}" == "--workflow" ]]; then
   if [[ ! -f "$ROOT/.pi/git/github.com/mihaiiova/pi-forge/skills/forge/workflow-runner.mjs" ]]; then echo '{"workflow":null,"runId":null,"status":"configuration_error","answer":"","message":"The Forge package is not installed in this project yet. Run ./run once, then retry."}'; exit 2; fi
-  exec node "$ROOT/.pi/git/github.com/mihaiiova/pi-forge/skills/forge/workflow-runner.mjs" 'W3sibmFtZSI6InRlc3QiLCJkZXNjcmlwdGlvbiI6IlJ1biBhIHdlYiB0ZXN0IHJlcXVlc3QgYW5kIHJldHVybiB0aGUgdmVyZGljdCwgZWFjaCBzY2VuYXJpbydzIHJlc3VsdCBhbmQgdGhlIHNjcmVlbnNob3RzIiwiYWdlbnRzIjpbIndlYi10ZXN0ZXIiXSwiZW50cnkiOiJsZWFkIiwibGVhZCI6ImxlYWQifV0=' "${prompts[@]}" -- "$@"
+  exec node "$ROOT/.pi/git/github.com/mihaiiova/pi-forge/skills/forge/workflow-runner.mjs" 'W3sibmFtZSI6InRlc3QiLCJkZXNjcmlwdGlvbiI6IlJ1biBhIHdlYiBvciBjb21tYW5kLWxpbmUgdGVzdCByZXF1ZXN0IGFuZCByZXR1cm4gdGhlIHZlcmRpY3QsIGVhY2ggc2NlbmFyaW8ncyByZXN1bHQgYW5kIHRoZSByZWNlaXB0cyIsImFnZW50cyI6WyJ3ZWItdGVzdGVyIiwiY2xpLXRlc3RlciJdLCJlbnRyeSI6ImxlYWQiLCJsZWFkIjoibGVhZCJ9XQ==' "${prompts[@]}" -- "$@"
 fi
 exec pi --approve --no-context-files ${prompts[@]+"${prompts[@]}"} "$@"
