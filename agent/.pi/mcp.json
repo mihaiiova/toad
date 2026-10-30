@@ -1,0 +1,29 @@
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@playwright/mcp@0.0.83",
+        "--headless",
+        "--browser",
+        "chromium",
+        "--isolated",
+        "--viewport-size",
+        "1280,800",
+        "--output-dir",
+        "data/receipts",
+        "--secrets",
+        ".forge/test-secrets.env"
+      ],
+      "description": "A real headless Chromium browser driven by Playwright",
+      "exposure": "deferred",
+      "toolExposure": {
+        "browser_run_code_unsafe": "hidden",
+        "browser_file_upload": "hidden",
+        "browser_drop": "hidden"
+      }
+    }
+  },
+  "autoEnableCodemode": false
+}

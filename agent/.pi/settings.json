@@ -1,0 +1,13 @@
+{
+  "defaultProvider": "deepseek",
+  "defaultModel": "deepseek-flash",
+  "defaultThinkingLevel": "medium",
+  "defaultTools": [
+    "read",
+    "subagent"
+  ],
+  "packages": [
+    "git:github.com/mihaiiova/pi-forge@v0.21.0",
+    "npm:pi-subagents@0.83.1"
+  ]
+}
