@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /** Deterministic scenario preparation and recorded Bubblewrap command execution. */
 import { spawn } from 'node:child_process';
-import { constants, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs';
-import { join, relative, resolve, sep } from 'node:path';
+import { constants, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
+import { isAbsolute, join, resolve, sep } from 'node:path';
 import { isReservedSecretName, prepare, sandboxArgs, sandboxEnv, scenarioPath } from './toad-sandbox.mjs';
 
 const root = process.cwd();
@@ -20,11 +20,17 @@ if (operation === 'prepare') {
 if (operation !== 'run') fail('usage: run <receipts-folder> <name> <scenario-id> <command> [input-file]');
 const [receipts, name, id, command, inputFile] = args;
 if (!receipts || !name || !id || !command || args.length > 5) fail('usage: run <receipts-folder> <name> <scenario-id> <command> [input-file]');
-const receiptsDir = resolve(root, receipts), receiptsRoot = resolve(root, 'data/receipts');
-if (receiptsDir !== receiptsRoot && !receiptsDir.startsWith(receiptsRoot + sep)) fail('the receipts folder must be inside data/receipts');
+// The MCP wrapper names this run's receipts folder (inside the project's
+// .toad/runs/<id>/); direct ./run calls fall back to the agent's data/receipts.
+const allowed = process.env.TOAD_RECEIPTS_DIR;
+if (allowed !== undefined && !isAbsolute(allowed)) fail('TOAD_RECEIPTS_DIR must be absolute');
+const receiptsDir = resolve(root, receipts), receiptsRoot = allowed ? resolve(allowed) : resolve(root, 'data/receipts');
+if (receiptsDir !== receiptsRoot && !receiptsDir.startsWith(receiptsRoot + sep)) fail(`the receipts folder must be inside ${receiptsRoot}`);
 if (!/^[a-z0-9][a-z0-9-]{0,99}$/.test(name)) fail('invalid receipt name');
 let workspace;
 try { workspace = scenarioPath(root, id); } catch (error) { fail(error.message); }
+// Mark the workspace as in use so the cache pruning keeps it.
+try { const now = new Date(); utimesSync(workspace, now, now); } catch {}
 if (inputFile !== undefined && !existsSync(inputFile)) fail('input file not found');
 function secrets() {
   if (Object.hasOwn(process.env, 'TOAD_CLI_SECRETS_FILE')) {
@@ -87,7 +93,7 @@ child.on('close', (code, signal) => {
   const receipt = join(receiptsDir, `${name}.txt`);
   writeFileSync(receipt, [`$ ${redact(command)}`, `scenario: ${id}`, `workspace: ${workspace}`, ...(inputFile !== undefined ? [`input: ${redact(readFileSync(inputFile, 'utf8'))}`] : []), `result: ${outcome}`, `duration: ${seconds}s`, '--- stdout ---', stdout, '--- stderr ---', stderr].join('\n'));
   const clip = (text, max) => text.length > max ? `${text.slice(0, max)}\n… ${text.length - max} more characters in the receipt` : text;
-  process.stdout.write([`${outcome} in ${seconds}s; receipt: ${relative(root, receipt)}`, '--- stdout ---', clip(stdout, 8000), '--- stderr ---', clip(stderr, 4000)].join('\n') + '\n');
+  process.stdout.write([`${outcome} in ${seconds}s; receipt: ${receipt}`, '--- stdout ---', clip(stdout, 8000), '--- stderr ---', clip(stderr, 4000)].join('\n') + '\n');
   if (infrastructureError) process.exitCode = 2;
   else if (interrupted) process.exitCode = 1;
 });

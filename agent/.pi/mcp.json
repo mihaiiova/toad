@@ -11,9 +11,7 @@
         "chromium",
         "--isolated",
         "--viewport-size",
-        "1280,800",
-        "--output-dir",
-        "data/receipts"
+        "1280,800"
       ],
       "description": "A real headless Chromium browser driven by Playwright",
       "exposure": "deferred",

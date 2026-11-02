@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, symlinkSync, readdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, symlinkSync, readdirSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
@@ -13,13 +13,15 @@ function setup(t, secrets = '') {
   writeFileSync(join(root, '.forge/test-secrets.env'), secrets);
   const target = join(root, 'target'); mkdirSync(target);
   writeFileSync(join(target, 'hello.txt'), 'hello from project\n');
-  const run = (args, opts = {}) => spawnSync(process.execPath, [recorder, ...args], { cwd: root, encoding: 'utf8', timeout: 30000, ...opts });
+  // Scenario workspaces live in the per-user cache; keep each test's apart.
+  const cache = join(root, 'cache');
+  const run = (args, opts = {}) => spawnSync(process.execPath, [recorder, ...args], { cwd: root, encoding: 'utf8', timeout: 30000, ...opts, env: { ...(opts.env ?? process.env), TOAD_CACHE_DIR: cache } });
   const prepare = () => {
     const result = run(['prepare', target]);
     assert.equal(result.status, 0, result.stderr);
     return /Scenario ID: (.+)/.exec(result.stdout)[1];
   };
-  return { root, target, run, prepare };
+  return { root, target, run, prepare, cache };
 }
 
 test('PASS and FAIL commands share persistent isolated workspace and receipts', t => {
@@ -30,7 +32,7 @@ test('PASS and FAIL commands share persistent isolated workspace and receipts', 
   const failure = run(['run', 'data/receipts/r1', 'scenario-02', id, 'cat saved; exit 3']);
   assert.equal(failure.status, 0); assert.match(failure.stdout, /exit 3/); assert.match(failure.stdout, /changed/);
   assert.equal(existsSync(join(target, 'saved')), false);
-  assert.equal(readFileSync(join(root, '.forge/scenarios', id, 'project/saved'), 'utf8'), 'changed\n');
+  assert.equal(readFileSync(join(root, 'cache/scenarios', id, 'project/saved'), 'utf8'), 'changed\n');
   assert.match(readFileSync(join(root, 'data/receipts/r1/scenario-02.txt'), 'utf8'), /result: exit 3/);
 });
 
@@ -44,7 +46,7 @@ test('copy excludes secrets, receipts and symlinks without following them', t =>
   writeFileSync(join(target, 'server.key'), 'private');
   mkdirSync(join(target, 'receipts')); writeFileSync(join(target, 'receipts', 'secret'), 'private');
   symlinkSync(join(root, '.forge'), join(target, 'external'));
-  const project = join(root, '.forge/scenarios', prepare(), 'project');
+  const project = join(root, 'cache/scenarios', prepare(), 'project');
   for (const name of ['.env', '.env.local', '.toad', '.ssh', 'server.key', 'receipts', 'external']) assert.equal(existsSync(join(project, name)), false, name);
   assert.equal(existsSync(join(project, '.env.example')), true);
 });
@@ -94,13 +96,13 @@ test('scenarios use different workspaces', t => {
   const { root, run, prepare } = setup(t); const a = prepare(), b = prepare(); assert.notEqual(a, b);
   run(['run', 'data/receipts/r3', 'write', a, 'echo first > one']);
   const read = run(['run', 'data/receipts/r3', 'read', b, 'test ! -e one']);
-  assert.match(read.stdout, /exit 0/); assert.ok(readdirSync(join(root, '.forge/scenarios')).includes(a));
+  assert.match(read.stdout, /exit 0/); assert.ok(readdirSync(join(root, 'cache/scenarios')).includes(a));
 });
 
 test('concurrent preparation creates distinct isolated workspaces', async t => {
   const { root, target } = setup(t);
   const prepare = () => new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [recorder, 'prepare', target], { cwd: root });
+    const child = spawn(process.execPath, [recorder, 'prepare', target], { cwd: root, env: { ...process.env, TOAD_CACHE_DIR: join(root, 'cache') } });
     let out = '', err = '';
     child.stdout.on('data', data => { out += data; });
     child.stderr.on('data', data => { err += data; });
@@ -109,7 +111,7 @@ test('concurrent preparation creates distinct isolated workspaces', async t => {
   });
   const ids = await Promise.all([prepare(), prepare(), prepare()]);
   assert.equal(new Set(ids).size, 3);
-  for (const id of ids) assert.equal(readFileSync(join(root, '.forge/scenarios', id, 'project/hello.txt'), 'utf8'), 'hello from project\n');
+  for (const id of ids) assert.equal(readFileSync(join(root, 'cache/scenarios', id, 'project/hello.txt'), 'utf8'), 'hello from project\n');
 });
 
 test('ERROR invalid ID and preflight failure never execute a host command', t => {
@@ -120,4 +122,38 @@ test('ERROR invalid ID and preflight failure never execute a host command', t =>
   const bin = join(root, 'fakebin'); mkdirSync(bin); writeFileSync(join(bin, 'bwrap'), '#!/bin/sh\necho unavailable >&2\nexit 1\n', { mode: 0o755 });
   const failed = run(['prepare', target], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
   assert.equal(failed.status, 2); assert.match(failed.stderr, /infrastructure error/); assert.equal(existsSync(marker), false);
+});
+
+test('scenario workspaces live in the cache, never in the agent folder', t => {
+  const { root, prepare } = setup(t);
+  const id = prepare();
+  assert.ok(existsSync(join(root, 'cache/scenarios', id, 'project/hello.txt')));
+  assert.equal(existsSync(join(root, '.forge/scenarios')), false);
+});
+
+test('receipts go to the folder the wrapper names, and nowhere else', t => {
+  const { root, run, prepare } = setup(t);
+  const id = prepare();
+  const project = join(root, 'project-run', 'receipts');
+  mkdirSync(project, { recursive: true });
+  const env = { ...process.env, TOAD_RECEIPTS_DIR: project };
+  const inside = run(['run', join(project, 'scenario'), 'ok', id, 'echo hi'], { env });
+  assert.equal(inside.status, 0, inside.stderr);
+  assert.match(inside.stdout, new RegExp(`receipt: ${join(project, 'scenario', 'ok.txt')}`));
+  assert.match(readFileSync(join(project, 'scenario', 'ok.txt'), 'utf8'), /result: exit 0/);
+  const legacy = run(['run', 'data/receipts/r5', 'legacy', id, 'echo hi'], { env });
+  assert.equal(legacy.status, 2); assert.match(legacy.stderr, /must be inside/);
+  assert.equal(existsSync(join(root, 'data/receipts/r5')), false);
+});
+
+test('preparing prunes workspaces left unused past the cache lifetime', t => {
+  const { root, run, prepare } = setup(t);
+  const old = prepare(), recent = prepare();
+  const past = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+  utimesSync(join(root, 'cache/scenarios', old), past, past);
+  utimesSync(join(root, 'cache/scenarios', recent), past, past);
+  run(['run', 'data/receipts/r6', 'touch', recent, 'true']); // using a workspace keeps it
+  prepare();
+  assert.equal(existsSync(join(root, 'cache/scenarios', old)), false);
+  assert.equal(existsSync(join(root, 'cache/scenarios', recent)), true);
 });

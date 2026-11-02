@@ -194,8 +194,6 @@ integrations:
           - --isolated
           - --viewport-size
           - "1280,800"
-          - --output-dir
-          - data/receipts
         description: A real headless Chromium browser driven by Playwright
         # Tools that reach outside the page under test: arbitrary code on this
         # machine, and sending local files to the site.
@@ -230,9 +228,9 @@ documents:
       - Use only what the testers reported.
       - Keep receipt paths exactly as reported.
       - Write every receipt, screenshot and artifact path as a full absolute
-        path starting at / (for example
-        /home/ops/projects/toad/agent/data/receipts/<scenario>/<receipt>.txt);
-        never a path relative to the project directory.
+        path starting at /, inside the receipts folder the request named
+        (for example <receipts folder>/<scenario>/<receipt>.txt); never a
+        path relative to the project directory.
   - writer: web-tester
     purpose: One scenario's observed result and the evidence for it, in a shape the
       lead can assemble into the final report without opening any evidence file.

@@ -1,7 +1,8 @@
 import { spawnSync } from 'node:child_process';
-import { cpSync, existsSync, lstatSync, mkdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { privateDir, toadDirs } from './toad-dirs.mjs';
 
 const idPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 export function sandboxArgs(workspace, workload) {
@@ -18,10 +19,30 @@ export function isReservedSecretName(name) {
 export function sandboxEnv(secret = {}) {
   return { ...secret, PATH: '/usr/local/bin:/usr/bin:/bin', LANG: 'C.UTF-8' };
 }
-function scenariosRoot(root) { return join(root, '.forge', 'scenarios'); }
+// Workspaces live in the per-user cache, not in the TOaD install.
+export function scenariosRoot() { return join(toadDirs().cache, 'scenarios'); }
+const DAY = 24 * 60 * 60 * 1000;
+/** Remove workspaces untouched for TOAD_SCENARIO_TTL_DAYS (default 7; 0 keeps them). */
+export function pruneScenarios(base = scenariosRoot(), now = Date.now()) {
+  const days = Number(process.env.TOAD_SCENARIO_TTL_DAYS ?? 7);
+  if (!Number.isFinite(days) || days <= 0) return [];
+  const removed = [];
+  let entries;
+  try { entries = readdirSync(base, { withFileTypes: true }); } catch { return removed; }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !idPattern.test(entry.name)) continue;
+    const path = join(base, entry.name);
+    try {
+      if (now - lstatSync(path).mtimeMs < days * DAY) continue;
+      rmSync(path, { recursive: true, force: true });
+      removed.push(entry.name);
+    } catch { /* in use or already gone */ }
+  }
+  return removed;
+}
 export function scenarioPath(root, id) {
   if (!idPattern.test(id)) throw new Error('Invalid scenario ID');
-  const base = scenariosRoot(root), path = join(base, id);
+  const base = scenariosRoot(), path = join(base, id);
   if (!existsSync(path) || !lstatSync(path).isDirectory() || realpathSync(path) !== path) throw new Error('Scenario ID not found or unsafe');
   for (const child of ['project', 'home']) if (!lstatSync(join(path, child)).isDirectory()) throw new Error('Scenario workspace is unsafe');
   return path;
@@ -32,9 +53,9 @@ export function prepare(root, sourcePath, networkUrl) {
   if (networkUrl) { const u = new URL(networkUrl); if (!['http:', 'https:'].includes(u.protocol) || u.username || u.password) throw new Error('Network preflight requires an HTTP(S) URL without credentials'); }
   const version = spawnSync('bwrap', ['--version'], { encoding: 'utf8', timeout: 5000 });
   if (version.status !== 0 || version.stdout.trim() !== 'bubblewrap 0.12.0') throw new Error('Bubblewrap 0.12.0 is required');
-  const base = scenariosRoot(root);
-  mkdirSync(base, { recursive: true, mode: 0o700 });
+  const base = privateDir(scenariosRoot());
   if (realpathSync(base) !== base) throw new Error('Scenario root must not contain symlinks');
+  pruneScenarios(base);
   const id = randomUUID(), workspace = join(base, id);
   mkdirSync(workspace, { mode: 0o700 });
   try {

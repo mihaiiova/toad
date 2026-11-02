@@ -10,17 +10,21 @@
  */
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { readdirSync, readFileSync, statSync, lstatSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, copyFileSync, realpathSync, openSync, closeSync, constants, fstatSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readdirSync, readFileSync, statSync, lstatSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, realpathSync, openSync, closeSync, constants, fstatSync } from 'node:fs';
 import { resolveSecretReferences } from './project-secrets.mjs';
 import { isReservedSecretName } from '../agent/tools/toad-sandbox.mjs';
+import { privateDir, toadDirs } from '../agent/tools/toad-dirs.mjs';
+import { acquireSlot } from './slots.mjs';
+import { CONFIG_TEMPLATE, readProjectConfig, registerProject, withDefaults } from './projects.mjs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 
-const AGENT = resolve(process.env.TOAD_AGENT_DIR ?? join(dirname(fileURLToPath(import.meta.url)), '../agent'));
+const HERE = dirname(fileURLToPath(import.meta.url));
+const AGENT = resolve(process.env.TOAD_AGENT_DIR ?? join(HERE, '../agent'));
+const CLI = join(HERE, 'cli.mjs');
 const MAX_IMAGES = 8;
 const MAX_IMAGE_BYTES = 1024 * 1024;
 
@@ -81,49 +85,59 @@ function receiptsIn(dir) {
 
 /** Run one test request through the bot and map its result onto a tool result. */
 async function runTest(text, input, extra, { attachImages, projectRun, secretValues }) {
-  // The current agent only permits receipts under its own data/receipts.
-  const folder = join(AGENT, 'data/receipts', randomUUID());
+  // Project runs write receipts straight into .toad/runs/<id>/receipts; the
+  // legacy tools, which have no project, keep the agent's own data/receipts.
+  const folder = projectRun ? join(projectRun, 'receipts') : join(AGENT, 'data/receipts', randomUUID());
   const args = ['--workflow', 'test', '--timeout', `${input.timeout_minutes ?? 15}m`, '--allow-concurrent', '--input', `request=${text}`, '--input', `receipts=${folder}`];
   const token = extra._meta?.progressToken;
   const started = Date.now();
+  let message = 'Waiting for a free test slot…';
   // Progress keeps clients' request timeouts from expiring during long tests.
-  const tick = () => token !== undefined && extra.sendNotification({ method: 'notifications/progress', params: { progressToken: token, progress: Math.round((Date.now() - started) / 1000), message: 'Testing…' } }).catch(() => {});
-  let secretDir;
-  const env = { ...process.env };
-  // Legacy tools must not accidentally inherit another caller's selector.
-  delete env.TOAD_PLAYWRIGHT_SECRETS_FILE;
-  delete env.TOAD_CLI_SECRETS_FILE;
-  if (secretValues) {
-    const cli = input.handoff?.kind === 'cli';
-    secretDir = mkdtempSync(join(tmpdir(), cli ? 'toad-cli-' : 'toad-browser-'));
-    const secretFile = join(secretDir, cli ? 'secrets.json' : 'secrets.env');
-    try {
-      const data = cli ? JSON.stringify(secretValues) : Object.entries(secretValues).map(([key, value]) => `${key}=${JSON.stringify(value)}`).join('\n') + '\n';
-      writeFileSync(secretFile, data, { flag: 'wx', mode: 0o600 });
-    } catch (error) { rmSync(secretDir, { recursive: true, force: true }); throw error; }
-    env[cli ? 'TOAD_CLI_SECRETS_FILE' : 'TOAD_PLAYWRIGHT_SECRETS_FILE'] = secretFile;
-  }
-  const result = await runWorkflow(args, extra.signal, tick, env);
-  const redact = value => typeof value === 'string' ? Object.values(secretValues ?? {}).filter(Boolean).reduce((text, secret) => text.split(secret).join('[REDACTED]'), value) : value;
-  result.answer = redact(result.answer);
-  result.message = redact(result.message);
-  if (secretDir) {
-    if (result.cleanup === 'incomplete') result.message = [result.message, `Cleanup incomplete; sensitive secrets retained at ${secretDir}`].filter(Boolean).join('. ');
-    else {
-      try { rmSync(secretDir, { recursive: true, force: true }); }
-      catch { result.message = [result.message, `Cleanup incomplete; sensitive secrets retained at ${secretDir}`].filter(Boolean).join('. '); result.cleanup = 'incomplete'; }
+  const tick = () => token !== undefined && extra.sendNotification({ method: 'notifications/progress', params: { progressToken: token, progress: Math.round((Date.now() - started) / 1000), message } }).catch(() => {});
+  // Runs from every TOaD server on this machine share a small number of slots.
+  let lastTick = 0;
+  const release = await acquireSlot({ signal: extra.signal, onWait: () => { if (Date.now() - lastTick >= 15000) { lastTick = Date.now(); tick(); } } });
+  if (!release) return finish(input, { status: 'cancelled', answer: '', message: 'Cancelled while waiting for a free test slot' }, folder, { attachImages, projectRun });
+  message = 'Testing…';
+  try { return await launch(); } finally { release(); }
+
+  async function launch() {
+    let secretDir;
+    const env = { ...process.env, TOAD_RECEIPTS_DIR: folder };
+    // Legacy tools must not accidentally inherit another caller's selector.
+    delete env.TOAD_PLAYWRIGHT_SECRETS_FILE;
+    delete env.TOAD_CLI_SECRETS_FILE;
+    if (secretValues) {
+      const cli = input.handoff?.kind === 'cli';
+      secretDir = mkdtempSync(join(privateDir(join(toadDirs().runtime, 'secrets')), cli ? 'toad-cli-' : 'toad-browser-'));
+      const secretFile = join(secretDir, cli ? 'secrets.json' : 'secrets.env');
+      try {
+        const data = cli ? JSON.stringify(secretValues) : Object.entries(secretValues).map(([key, value]) => `${key}=${JSON.stringify(value)}`).join('\n') + '\n';
+        writeFileSync(secretFile, data, { flag: 'wx', mode: 0o600 });
+      } catch (error) { rmSync(secretDir, { recursive: true, force: true }); throw error; }
+      env[cli ? 'TOAD_CLI_SECRETS_FILE' : 'TOAD_PLAYWRIGHT_SECRETS_FILE'] = secretFile;
     }
+    const result = await runWorkflow(args, extra.signal, tick, env);
+    const redact = value => typeof value === 'string' ? Object.values(secretValues ?? {}).filter(Boolean).reduce((text, secret) => text.split(secret).join('[REDACTED]'), value) : value;
+    result.answer = redact(result.answer);
+    result.message = redact(result.message);
+    if (secretDir) {
+      if (result.cleanup === 'incomplete') result.message = [result.message, `Cleanup incomplete; sensitive secrets retained at ${secretDir}`].filter(Boolean).join('. ');
+      else {
+        try { rmSync(secretDir, { recursive: true, force: true }); }
+        catch { result.message = [result.message, `Cleanup incomplete; sensitive secrets retained at ${secretDir}`].filter(Boolean).join('. '); result.cleanup = 'incomplete'; }
+      }
+    }
+    return finish(input, result, folder, { attachImages, projectRun });
   }
+}
+
+/** Map a workflow result, and the receipts it left, onto a tool result. */
+function finish(input, result, folder, { attachImages, projectRun }) {
   const verdict = verdictOf(result.answer);
-  let files = receiptsIn(folder);
+  // Regular files only: agent-created symlinks are never followed.
+  const files = receiptsIn(folder);
   if (projectRun) {
-    // Copy only regular files, never follow agent-created symlinks.
-    files = files.filter(f => lstatSync(f).isFile()).map(f => {
-      const destination = join(projectRun, 'receipts', f.slice(folder.length + 1));
-      mkdirSync(dirname(destination), { recursive: true, mode: 0o700 });
-      copyFileSync(f, destination);
-      return destination;
-    });
     writeFileSync(join(projectRun, 'reports', 'report.md'), [
       `# TOaD run`, `Status: ${result.status}`, `Verdict: ${verdict}`,
       result.answer ?? '', result.message ?? '',
@@ -143,7 +157,7 @@ async function runTest(text, input, extra, { attachImages, projectRun, secretVal
       { type: 'text', text: [heading, result.answer, files.length ? `Receipts:\n${files.join('\n')}` : ''].filter(Boolean).join('\n\n') },
       ...images,
     ],
-    structuredContent: { verdict, status: result.status, runId: result.runId ?? null, receipts: projectRun ? join(projectRun, 'receipts') : folder, files, screenshots },
+    structuredContent: { verdict, status: result.status, runId: result.runId ?? null, receipts: folder, files, screenshots },
   };
 }
 
@@ -222,7 +236,7 @@ function createIfMissing(path, text, mode = 0o600) {
 
 server.registerTool('setup_project', {
   title: 'Set up TOaD in a project',
-  description: 'Initialize .toad in an existing project. Call get_toad_guide for testing and credential guidance. Keep all handoffs, receipts and reports in .toad/runs. Put secret values only in .toad/.env and reference them by name in handoffs. Writes history.mjs, a localhost web viewer for past runs. Existing files are never overwritten.',
+  description: 'Initialize .toad in an existing project. Call get_toad_guide for testing and credential guidance. Keep all handoffs, receipts and reports in .toad/runs. Put secret values only in .toad/.env and reference them by name in handoffs. Writes toad.yaml for project defaults (app URL, CLI program, timeout) and adds the project to the machine-wide run viewer. Existing files are never overwritten.',
   inputSchema: { project_path: z.string().min(1).describe('Absolute path to the project directory') },
 }, ({ project_path }) => {
   const folder = projectFolder(project_path);
@@ -235,15 +249,18 @@ server.registerTool('setup_project', {
   createIfMissing(join(folder, '.env'), '', 0o600);
   if (!lstatSync(join(folder, '.env')).isFile()) throw new Error('Project .env must be a regular file, not a symlink');
   createIfMissing(join(folder, '.env.example'), '# Add secret variable names and descriptions here; never add values.\n', 0o644);
-  createIfMissing(join(folder, 'history.mjs'), readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), 'history.mjs'), 'utf8'), 0o755);
-  return { content: [{ type: 'text', text: `TOaD project initialized at ${folder}. Store secrets in .env, never in handoffs. Runs are stored in runs/<run-id>/. View results in a browser with: node ${join(folder, 'history.mjs')}. Handoffs reference credentials as {env: NAME}; trusted runs only.` }] };
+  createIfMissing(join(folder, 'toad.yaml'), CONFIG_TEMPLATE, 0o644);
+  readProjectConfig(folder);
+  registerProject(dirname(folder));
+  return { content: [{ type: 'text', text: `TOaD project initialized at ${folder}. Store secrets in .env, never in handoffs. Put defaults such as the app URL or CLI program in toad.yaml. Runs are stored in runs/<run-id>/. View every project's runs in a browser with: node ${CLI} ui. Handoffs reference credentials as {env: NAME}; trusted runs only.` }] };
 });
 
 const valueOrEnv = z.object({ env: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/) }).strict();
 const handoffSchema = z.object({
   version: z.literal(1),
   kind: z.enum(['web', 'cli']),
-  target: z.object({ url: z.string().url().optional(), workdir: z.string().optional(), program: z.string().optional() }).strict(),
+  target: z.object({ url: z.string().url().optional(), workdir: z.string().optional(), program: z.string().optional() }).strict().optional()
+    .describe('Omitted fields come from the project\'s .toad/toad.yaml'),
   request: z.object({ goal: z.string().min(1), scenarios }).strict(),
   credentials: z.record(z.string(), valueOrEnv).optional(),
   limitations: z.array(z.string()).optional(),
@@ -251,16 +268,19 @@ const handoffSchema = z.object({
 
 server.registerTool('run_project_test', {
   title: 'Run a project test from a handoff',
-  description: 'Run a project handoff. First call get_toad_guide for setup and safety guidance. Credentials must be references {env: NAME}, never values. Project runs use a per-run secrets file. Trusted runs only: agents, tools and same-user processes can access credentials; artifacts may expose them.',
+  description: 'Run a project handoff. First call get_toad_guide for setup and safety guidance. Target fields and the timeout default to the project\'s .toad/toad.yaml. Credentials must be references {env: NAME}, never values. Project runs use a per-run secrets file. Trusted runs only: agents, tools and same-user processes can access credentials; artifacts may expose them.',
   inputSchema: { project_path: z.string().min(1), handoff: handoffSchema, timeout_minutes: timeout, screenshots: z.enum(['inline', 'paths']).optional() },
   outputSchema,
 }, async (input, extra) => {
   const folder = projectFolder(input.project_path);
   if (!lstatSync(folder).isDirectory() || !lstatSync(join(folder, 'runs')).isDirectory()) throw new Error('Run setup_project first');
   checkIgnore(join(folder, '.gitignore'));
-  const h = input.handoff;
-  if (h.kind === 'web' && !h.target.url) throw new Error('A web handoff requires target.url');
-  if (h.kind === 'cli' && (!h.target.workdir || !h.target.program)) throw new Error('A CLI handoff requires target.workdir and target.program');
+  const config = readProjectConfig(folder);
+  const h = withDefaults(input.handoff, config, dirname(folder));
+  input = { ...input, timeout_minutes: input.timeout_minutes ?? config.timeout_minutes };
+  registerProject(dirname(folder));
+  if (h.kind === 'web' && !h.target.url) throw new Error('A web handoff requires target.url, in the handoff or as web.url in .toad/toad.yaml');
+  if (h.kind === 'cli' && (!h.target.workdir || !h.target.program)) throw new Error('A CLI handoff requires target.workdir and target.program, in the handoff or under cli: in .toad/toad.yaml');
   if (h.kind === 'cli' && Object.values(h.credentials ?? {}).some(ref => isReservedSecretName(ref.env))) throw new Error('CLI credentials contain a reserved environment name');
   const secretValues = resolveSecretReferences(folder, h.credentials);
   const id = `${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID()}`;

@@ -24,6 +24,8 @@ const fs = require('fs'), path = require('path');
 const args = process.argv.slice(2);
 fs.writeFileSync('args.json', JSON.stringify(args));
 fs.writeFileSync('pid', String(process.pid));
+fs.writeFileSync('receipts-env', process.env.TOAD_RECEIPTS_DIR || '');
+fs.appendFileSync('spans', JSON.stringify({ start: Date.now() }) + '\\n');
 const b = JSON.parse(fs.readFileSync('behaviour.json', 'utf8'));
 const secretFile = process.env.TOAD_CLI_SECRETS_FILE || process.env.TOAD_PLAYWRIGHT_SECRETS_FILE;
 if (secretFile) {
@@ -36,16 +38,23 @@ fs.mkdirSync(receipts, { recursive: true });
 fs.writeFileSync(path.join(receipts, 'scenario-01-home.png'), Buffer.from(${JSON.stringify(PNG)}, 'base64'));
 fs.writeFileSync(path.join(receipts, 'scenario-02-help.txt'), '$ tool --help\\nexit: 0\\n');
 if (b.nested) { fs.mkdirSync(path.join(receipts, 'scenario')); fs.writeFileSync(path.join(receipts, 'scenario', '01.txt'), 'nested evidence'); }
-const finish = () => { console.log('pi output'); console.log(JSON.stringify({ workflow: 'test', runId: 'run-1', status: b.status, answer: b.answer, toolErrors: 0, ...(b.cleanup ? {cleanup: b.cleanup} : {}) })); process.exit(b.code); };
+const finish = () => { fs.appendFileSync('spans', JSON.stringify({ end: Date.now() }) + '\\n'); console.log('pi output'); console.log(JSON.stringify({ workflow: 'test', runId: 'run-1', status: b.status, answer: b.answer, toolErrors: 0, ...(b.cleanup ? {cleanup: b.cleanup} : {}) })); process.exit(b.code); };
 process.on('SIGTERM', () => { fs.writeFileSync('cancelled', 'yes'); console.log(JSON.stringify({ workflow: 'test', runId: 'run-1', status: 'cancelled', answer: '', toolErrors: 0 })); process.exit(1); });
 setTimeout(finish, b.delay ?? 0);
 `, { mode: 0o755 });
   return dir;
 }
 
-async function connect(t, dir) {
+/** Per-user state (project list, cache, run slots, secret files) for one test. */
+function home(t) {
+  const dir = mkdtempSync(join(tmpdir(), 'toad-home-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  return { TOAD_CONFIG_DIR: join(dir, 'config'), TOAD_CACHE_DIR: join(dir, 'cache'), TOAD_RUNTIME_DIR: join(dir, 'runtime') };
+}
+
+async function connect(t, dir, env = home(t)) {
   const client = new Client({ name: 'toad-test', version: '1.0.0' });
-  await client.connect(new StdioClientTransport({ command: process.execPath, args: [server], env: { ...process.env, TOAD_AGENT_DIR: dir } }));
+  await client.connect(new StdioClientTransport({ command: process.execPath, args: [server], env: { ...process.env, TOAD_AGENT_DIR: dir, ...env } }));
   t.after(() => client.close());
   return client;
 }
@@ -66,20 +75,23 @@ test('project setup and handoff persist project-local evidence without overwriti
   const dir = agent(t, { status: 'ok', answer: 'Verdict: PASS', code: 0 });
   const project = mkdtempSync(join(tmpdir(), 'toad-project-'));
   t.after(() => rmSync(project, { recursive: true, force: true }));
-  const client = await connect(t, dir);
+  const env = home(t);
+  const client = await connect(t, dir, env);
   const setup = () => client.callTool({ name: 'setup_project', arguments: { project_path: project } });
-  assert.notEqual((await setup()).isError, true);
+  const first = await setup();
+  assert.notEqual(first.isError, true);
+  assert.match(first.content[0].text, /cli\.mjs ui/);
   writeFileSync(join(project, '.toad', '.env'), 'PASSWORD=s3cr3t-sentinel\n');
   await setup();
   assert.equal(readFileSync(join(project, '.toad', '.env'), 'utf8'), 'PASSWORD=s3cr3t-sentinel\n');
-  const viewerPath = join(project, '.toad', 'history.mjs');
-  const viewer = readFileSync(viewerPath, 'utf8');
-  assert.match(viewer, /^#!\/usr\/bin\/env node/);
-  assert.match(viewer, /\/api\/runs/);
-  assert.notEqual(statSync(viewerPath).mode & 0o100, 0);
-  writeFileSync(viewerPath, 'sentinel-viewer\n');
+  assert.equal(existsSync(join(project, '.toad', 'history.mjs')), false, 'the viewer is no longer copied into projects');
+  const configPath = join(project, '.toad', 'toad.yaml');
+  assert.match(readFileSync(configPath, 'utf8'), /# web:/);
+  writeFileSync(configPath, '# mine\n');
   await setup();
-  assert.equal(readFileSync(viewerPath, 'utf8'), 'sentinel-viewer\n');
+  assert.equal(readFileSync(configPath, 'utf8'), '# mine\n');
+  const listed = JSON.parse(readFileSync(join(env.TOAD_CONFIG_DIR, 'projects.json'), 'utf8')).projects;
+  assert.deepEqual(listed.map(p => p.path), [project], 'set up once, listed once');
   const handoff = { version: 1, kind: 'cli', target: { workdir: project, program: 'example' }, request: { goal: 'Check help' } };
   const result = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff, screenshots: 'paths' } });
   assert.equal(result.isError, false);
@@ -88,6 +100,9 @@ test('project setup and handoff persist project-local evidence without overwriti
   assert.deepEqual(JSON.parse(readFileSync(join(run, 'handoff.yaml'), 'utf8')), handoff);
   assert.match(readFileSync(join(run, 'reports', 'report.md'), 'utf8'), /PASS/);
   assert.ok(existsSync(result.structuredContent.screenshots[0]));
+  const args = JSON.parse(readFileSync(join(dir, 'args.json'), 'utf8'));
+  assert.equal(args.find(a => a.startsWith('receipts=')), `receipts=${join(run, 'receipts')}`, 'receipts are written straight into the project');
+  assert.equal(existsSync(join(dir, 'data', 'receipts')), false, 'no global copy');
   const web = { version: 1, kind: 'web', target: { url: 'https://example.test' }, request: { goal: 'Check home' }, credentials: { password: { env: 'PASSWORD' } } };
   const resultWeb = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff: web } });
   assert.equal(resultWeb.isError, false);
@@ -379,4 +394,77 @@ test('a cancelled call stops the workflow', async t => {
   await assert.rejects(call);
   for (let i = 0; i < 100 && !existsSync(join(dir, 'cancelled')); i++) await new Promise(r => setTimeout(r, 20));
   assert.ok(existsSync(join(dir, 'cancelled')), 'the workflow received SIGTERM');
+});
+
+test('project defaults in toad.yaml fill in what a handoff leaves out', async t => {
+  const dir = agent(t, { status: 'ok', answer: 'Verdict: PASS', code: 0 });
+  const project = mkdtempSync(join(tmpdir(), 'toad-defaults-'));
+  t.after(() => rmSync(project, { recursive: true, force: true }));
+  const client = await connect(t, dir);
+  await client.callTool({ name: 'setup_project', arguments: { project_path: project } });
+  writeFileSync(join(project, '.toad', 'toad.yaml'), 'web:\n  url: http://localhost:3000\ncli:\n  workdir: apps/cli\n  program: node dist/bin.js\ntimeout_minutes: 7\n');
+  const web = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff: { version: 1, kind: 'web', request: { goal: 'Home' } }, screenshots: 'paths' } });
+  assert.equal(web.isError, false, JSON.stringify(web));
+  let args = JSON.parse(readFileSync(join(dir, 'args.json'), 'utf8'));
+  assert.equal(args[args.indexOf('--timeout') + 1], '7m');
+  assert.match(args.find(a => a.startsWith('request=')), /Test http:\/\/localhost:3000\./);
+  const run = resolve(web.structuredContent.receipts, '..');
+  assert.equal(JSON.parse(readFileSync(join(run, 'handoff.yaml'), 'utf8')).target.url, 'http://localhost:3000', 'the effective handoff is recorded');
+  assert.equal(readFileSync(join(dir, 'receipts-env'), 'utf8'), join(run, 'receipts'));
+  const cli = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff: { version: 1, kind: 'cli', target: { program: 'other' }, request: { goal: 'Help' } }, timeout_minutes: 3 } });
+  assert.equal(cli.isError, false);
+  args = JSON.parse(readFileSync(join(dir, 'args.json'), 'utf8'));
+  assert.equal(args[args.indexOf('--timeout') + 1], '3m', 'the call overrides the default');
+  const request = args.find(a => a.startsWith('request=')).slice('request='.length);
+  assert.ok(request.includes(`working folder ${join(project, 'apps/cli')}`), request);
+  assert.ok(request.includes('Invoke it as: other'), 'the handoff overrides the default');
+});
+
+test('an invalid toad.yaml is reported before anything runs', async t => {
+  const dir = agent(t, { status: 'ok', answer: 'Verdict: PASS', code: 0 });
+  const project = mkdtempSync(join(tmpdir(), 'toad-badconfig-'));
+  t.after(() => rmSync(project, { recursive: true, force: true }));
+  const client = await connect(t, dir);
+  await client.callTool({ name: 'setup_project', arguments: { project_path: project } });
+  const handoff = { version: 1, kind: 'web', request: { goal: 'Home' } };
+  const missing = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff } });
+  assert.equal(missing.isError, true); assert.match(JSON.stringify(missing), /web\.url in \.toad\/toad\.yaml/);
+  writeFileSync(join(project, '.toad', 'toad.yaml'), 'web:\n  adress: http://x\n');
+  const typo = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff } });
+  assert.equal(typo.isError, true); assert.match(JSON.stringify(typo), /toad\.yaml/);
+  writeFileSync(join(project, '.toad', 'toad.yaml'), 'web: [\n');
+  const broken = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff } });
+  assert.equal(broken.isError, true); assert.match(JSON.stringify(broken), /not valid YAML/);
+  assert.equal(existsSync(join(dir, 'pid')), false);
+});
+
+test('runs from separate servers share the machine-wide slot limit', async t => {
+  const dir = agent(t, { status: 'ok', answer: 'Verdict: PASS', code: 0, delay: 300 });
+  const env = { ...home(t), TOAD_MAX_CONCURRENT_RUNS: '1' };
+  const clients = [await connect(t, dir, env), await connect(t, dir, env)];
+  const call = client => client.callTool({ name: 'run_web_test', arguments: { url: 'https://example.test', what: 'Home', screenshots: 'paths' } });
+  const results = await Promise.all([call(clients[0]), call(clients[1]), call(clients[0])]);
+  assert.ok(results.every(r => !r.isError));
+  // With one slot, every run must end before the next one starts.
+  let running = 0, peak = 0;
+  for (const line of readFileSync(join(dir, 'spans'), 'utf8').trim().split('\n')) {
+    running += JSON.parse(line).start ? 1 : -1;
+    peak = Math.max(peak, running);
+  }
+  assert.equal(peak, 1);
+});
+
+test('a call cancelled while waiting for a slot never starts', async t => {
+  const dir = agent(t, { status: 'ok', answer: 'Verdict: PASS', code: 0, delay: 2000 });
+  const env = { ...home(t), TOAD_MAX_CONCURRENT_RUNS: '1' };
+  const client = await connect(t, dir, env);
+  const first = client.callTool({ name: 'run_web_test', arguments: { url: 'https://example.test', what: 'Home', screenshots: 'paths' } });
+  for (let i = 0; i < 100 && !existsSync(join(dir, 'pid')); i++) await new Promise(r => setTimeout(r, 20));
+  const controller = new AbortController();
+  const second = client.callTool({ name: 'run_web_test', arguments: { url: 'https://example.test', what: 'Other', screenshots: 'paths' } }, undefined, { signal: controller.signal });
+  await new Promise(r => setTimeout(r, 200));
+  controller.abort(); await assert.rejects(second);
+  assert.equal((await first).isError, false);
+  const starts = readFileSync(join(dir, 'spans'), 'utf8').trim().split('\n').filter(line => JSON.parse(line).start);
+  assert.equal(starts.length, 1);
 });

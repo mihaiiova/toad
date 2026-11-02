@@ -1,58 +1,51 @@
-#!/usr/bin/env node
 /**
- * TOaD history viewer: a dependency-free web interface over `.toad/runs`.
+ * TOaD run viewer: one localhost web interface over the runs of every project
+ * TOaD has been set up in (the list in ~/.config/toad/projects.json).
  *
- * Run it from inside a project that TOaD has set up:
- *   node .toad/history.mjs            # http://127.0.0.1:8787
- *   node .toad/history.mjs 9000       # or: --port 9000 / --port=9000
+ *   toad ui                # http://127.0.0.1:8787, or the next free port
+ *   toad ui --port 9000    # exactly this port
  *
  * It binds to localhost only; run artifacts can contain sensitive data.
  */
 import { createServer } from 'node:http';
 import { readdirSync, readFileSync, existsSync, lstatSync } from 'node:fs';
-import { dirname, join, extname, basename } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join, extname } from 'node:path';
+import { listProjects } from './projects.mjs';
 
-const SELF = fileURLToPath(import.meta.url);
-const ROOT = dirname(SELF); // the `.toad` directory this file lives in
-const RUNS = process.env.TOAD_RUNS_DIR ?? join(ROOT, 'runs');
 const HOST = '127.0.0.1';
-const PORT = Number(process.env.TOAD_VIEW_PORT ?? portFromArgs());
-
-function portFromArgs() {
-  const argv = process.argv.slice(2);
-  if (argv[0] && /^\d+$/.test(argv[0])) return Number(argv[0]);
-  const i = argv.indexOf('--port');
-  if (i !== -1 && argv[i + 1]) return Number(argv[i + 1]);
-  const eq = argv.find(a => a.startsWith('--port='));
-  if (eq) return Number(eq.slice('--port='.length));
-  return 8787;
-}
 
 const MIME = {
   '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif',
   '.webp': 'image/webp', '.svg': 'image/svg+xml', '.txt': 'text/plain; charset=utf-8',
   '.md': 'text/markdown; charset=utf-8', '.json': 'application/json; charset=utf-8',
   '.log': 'text/plain; charset=utf-8', '.yaml': 'text/plain; charset=utf-8',
-  '.yml': 'text/plain; charset=utf-8', '.html': 'text/html; charset=utf-8',
-  '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
+  '.yml': 'text/plain; charset=utf-8', '.html': 'text/plain; charset=utf-8',
+  '.css': 'text/plain; charset=utf-8', '.js': 'text/plain; charset=utf-8',
 };
 
 function httpError(status, message) { const e = new Error(message); e.status = status; return e; }
 
-function runDirs() {
-  if (!existsSync(RUNS)) return [];
-  return readdirSync(RUNS, { withFileTypes: true })
+function projects() { return listProjects().filter(p => p.present); }
+
+function requireProject(id) {
+  const project = projects().find(p => p.id === id);
+  if (!project) throw httpError(404, 'Project not found');
+  return project;
+}
+
+function runDirs(project) {
+  if (!existsSync(project.runs)) return [];
+  return readdirSync(project.runs, { withFileTypes: true })
     .filter(entry => entry.isDirectory())
     .map(entry => entry.name)
     .sort()
     .reverse(); // run ids start with a fixed-width timestamp, so newest first
 }
 
-function requireRun(id) {
+function requireRun(project, id) {
   const decoded = decodeURIComponent(id);
   if (decoded === '.' || decoded === '..' || decoded.includes('/') || decoded.includes('\\')) throw httpError(404, 'Run not found');
-  const dir = join(RUNS, decoded);
+  const dir = join(project.runs, decoded);
   if (!existsSync(dir) || !lstatSync(dir).isDirectory()) throw httpError(404, 'Run not found');
   return dir;
 }
@@ -79,24 +72,25 @@ function targetOf(handoff) {
   return '';
 }
 
-function listRuns() {
-  return runDirs().map(id => {
-    const dir = join(RUNS, id);
+function listRuns(only) {
+  return projects().filter(p => !only || p.id === only).flatMap(project => runDirs(project).map(id => {
+    const dir = join(project.runs, id);
     const handoff = readJson(join(dir, 'handoff.yaml'));
     const meta = metaOf(readText(join(dir, 'reports', 'report.md')));
     return {
       id, time: timeOf(id), kind: handoff?.kind ?? '', goal: handoff?.request?.goal ?? '',
       target: targetOf(handoff), verdict: meta.verdict, status: meta.status,
+      project: project.id, projectName: project.name,
     };
-  });
+  })).sort((a, b) => b.id.localeCompare(a.id));
 }
 
-function detail(id) {
-  const dir = requireRun(id);
+function detail(project, id) {
+  const dir = requireRun(project, id);
   const handoff = readJson(join(dir, 'handoff.yaml')) ?? {};
   const report = readText(join(dir, 'reports', 'report.md'));
   const meta = metaOf(report);
-  return { id, time: timeOf(id), verdict: meta.verdict, status: meta.status, handoff, report, files: receiptFiles(dir) };
+  return { id, project: project.id, projectName: project.name, projectPath: project.path, time: timeOf(id), verdict: meta.verdict, status: meta.status, handoff, report, files: receiptFiles(dir) };
 }
 
 function receiptFiles(dir) {
@@ -113,8 +107,8 @@ function receiptFiles(dir) {
   return files;
 }
 
-function serveFile(res, id, rel) {
-  const dir = requireRun(id);
+function serveFile(res, project, id, rel) {
+  const dir = requireRun(project, id);
   const decoded = decodeURIComponent(rel);
   if (decoded.startsWith('/') || decoded.includes('\\') || decoded.split('/').includes('..')) throw httpError(400, 'Invalid path');
   const target = join(dir, decoded);
@@ -139,36 +133,46 @@ function sendHtml(res, html) {
   res.end(html);
 }
 
-const server = createServer((req, res) => {
+function handler(req, res) {
   try {
     if (req.method !== 'GET') return sendJson(res, { error: 'Method not allowed' }, 405);
-    const path = new URL(req.url ?? '/', `http://${HOST}:${PORT}`).pathname;
+    const url = new URL(req.url ?? '/', `http://${HOST}`);
+    const path = url.pathname;
     if (path === '/') return sendHtml(res, HTML);
-    if (path === '/api/runs') return sendJson(res, listRuns());
+    if (path === '/api/projects') return sendJson(res, projects().map(({ id, name, path }) => ({ id, name, path })));
+    if (path === '/api/runs') return sendJson(res, listRuns(url.searchParams.get('project')));
     let m;
-    if ((m = /^\/api\/runs\/([^/]+)$/.exec(path))) return sendJson(res, detail(m[1]));
-    if ((m = /^\/api\/runs\/([^/]+)\/file\/(.+)$/.exec(path))) return serveFile(res, m[1], m[2]);
+    if ((m = /^\/api\/projects\/([0-9a-f]{12})\/runs\/([^/]+)$/.exec(path))) return sendJson(res, detail(requireProject(m[1]), m[2]));
+    if ((m = /^\/api\/projects\/([0-9a-f]{12})\/runs\/([^/]+)\/file\/(.+)$/.exec(path))) return serveFile(res, requireProject(m[1]), m[2], m[3]);
     return sendJson(res, { error: 'Not found' }, 404);
   } catch (error) {
     if (!res.headersSent) sendJson(res, { error: error.message ?? 'Internal error' }, error.status ?? 500);
   }
-});
+}
 
-server.listen(PORT, HOST, () => console.log(`TOaD history: http://${HOST}:${PORT}/  (runs: ${RUNS})`));
-server.on('error', error => {
-  if (error.code === 'EADDRINUSE') {
-    console.error(`Port ${PORT} is already in use. Run with a different one: node ${basename(SELF)} --port <port>`);
-    process.exit(1);
-  }
-  throw error;
-});
+/**
+ * Serve the viewer. Without an explicit port it starts at 8787 and moves up
+ * to the next free one, so several viewers can run at once.
+ */
+export function startUi({ port, host = HOST } = {}) {
+  const explicit = port !== undefined;
+  let candidate = explicit ? port : 8787;
+  return new Promise((done, fail) => {
+    const server = createServer(handler);
+    server.on('error', error => {
+      if (error.code === 'EADDRINUSE' && !explicit && candidate < 8787 + 20) { candidate += 1; server.listen(candidate, host); return; }
+      fail(error.code === 'EADDRINUSE' ? new Error(`Port ${candidate} is already in use. Choose another with --port <port>.`) : error);
+    });
+    server.listen(candidate, host, () => done({ server, url: `http://${host}:${server.address().port}/` }));
+  });
+}
 
 const HTML = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>TOaD history</title>
+<title>TOaD runs</title>
 <style>
 :root { --bg:#0f1115; --panel:#171a21; --border:#262b36; --text:#e6e8ee; --muted:#8b93a7; --accent:#58a6ff; --pass:#2ea043; --fail:#f85149; --error:#d29922; }
 * { box-sizing: border-box; }
@@ -176,7 +180,7 @@ body { margin:0; font:14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, san
 header { display:flex; align-items:center; gap:12px; padding:12px 16px; border-bottom:1px solid var(--border); }
 header h1 { font-size:16px; margin:0; font-weight:600; }
 header .path { color:var(--muted); font-size:12px; }
-header button { margin-left:auto; }
+header select { margin-left:auto; background:#21262f; color:var(--text); border:1px solid var(--border); border-radius:6px; padding:6px 8px; font:inherit; max-width:40vw; }
 button { background:#21262f; color:var(--text); border:1px solid var(--border); border-radius:6px; padding:6px 12px; cursor:pointer; font:inherit; }
 button:hover { background:#2b313d; }
 main { display:grid; grid-template-columns:320px 1fr; height:calc(100vh - 49px); }
@@ -191,7 +195,8 @@ main { display:grid; grid-template-columns:320px 1fr; height:calc(100vh - 49px);
 .badge.fail { background:rgba(248,81,73,.15); color:var(--fail); }
 .badge.error { background:rgba(210,153,34,.15); color:var(--error); }
 .badge.unknown { background:rgba(110,118,129,.2); color:var(--muted); }
-.kind { color:var(--muted); font-size:12px; }
+.kind, .proj { color:var(--muted); font-size:12px; }
+.proj { margin-left:6px; }
 #detail { overflow-y:auto; padding:20px 24px; }
 .empty { color:var(--muted); padding:40px; text-align:center; }
 h2 { font-size:18px; margin:0 0 8px; }
@@ -213,8 +218,9 @@ a { color:var(--accent); }
 </head>
 <body>
 <header>
-  <h1>TOaD history</h1>
+  <h1>TOaD runs</h1>
   <span class="path" id="path"></span>
+  <select id="project" aria-label="Project"><option value="">All projects</option></select>
   <button id="refresh">Refresh</button>
 </header>
 <main>
@@ -225,33 +231,46 @@ a { color:var(--accent); }
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const $ = sel => document.querySelector(sel);
 const badge = v => '<span class="badge ' + esc(String(v).toLowerCase()) + '">' + esc(v) + '</span>';
-let current = null;
+let current = null; // { project, id }
+let projects = [];
+
+async function loadProjects() {
+  try { projects = await (await fetch('/api/projects')).json(); } catch (e) { projects = []; }
+  const select = $('#project'), chosen = select.value;
+  select.innerHTML = '<option value="">All projects</option>' + projects.map(p => '<option value="' + esc(p.id) + '">' + esc(p.name) + '</option>').join('');
+  select.value = projects.some(p => p.id === chosen) ? chosen : '';
+  const one = projects.find(p => p.id === select.value);
+  $('#path').textContent = one ? one.path : projects.length + ' project' + (projects.length === 1 ? '' : 's');
+}
+
+async function refresh() { await loadProjects(); await loadRuns(); }
 
 async function loadRuns() {
   let runs;
-  try { runs = await (await fetch('/api/runs')).json(); }
+  const only = $('#project').value;
+  try { runs = await (await fetch('/api/runs' + (only ? '?project=' + encodeURIComponent(only) : ''))).json(); }
   catch (e) { $('#runs').innerHTML = '<div class="empty">Could not load runs.</div>'; return; }
   const box = $('#runs');
   if (!runs.length) {
     box.innerHTML = '<div class="empty">No runs yet.</div>';
-    $('#detail').innerHTML = '<div class="empty">Run a TOaD test, then refresh.</div>';
+    $('#detail').innerHTML = '<div class="empty">' + (projects.length ? 'Run a TOaD test, then refresh.' : 'No projects yet. Set one up with the setup_project tool.') + '</div>';
     return;
   }
   box.innerHTML = runs.map(r =>
-    '<div class="run' + (r.id === current ? ' active' : '') + '" data-id="' + esc(r.id) + '">' +
+    '<div class="run' + (current && r.id === current.id && r.project === current.project ? ' active' : '') + '" data-project="' + esc(r.project) + '" data-id="' + esc(r.id) + '">' +
       '<div class="time">' + esc(r.time) + '</div>' +
       '<div class="goal">' + esc(r.goal || r.target || '(no goal)') + '</div>' +
-      '<div>' + badge(r.verdict) + '<span class="kind">' + esc(r.kind || '') + '</span></div>' +
+      '<div>' + badge(r.verdict) + '<span class="kind">' + esc(r.kind || '') + '</span>' + (only ? '' : '<span class="proj">' + esc(r.projectName) + '</span>') + '</div>' +
     '</div>').join('');
-  box.querySelectorAll('.run').forEach(el => el.addEventListener('click', () => loadDetail(el.dataset.id)));
-  if (!current && runs.length) loadDetail(runs[0].id);
+  box.querySelectorAll('.run').forEach(el => el.addEventListener('click', () => loadDetail(el.dataset.project, el.dataset.id)));
+  if ((!current || !runs.some(r => r.id === current.id && r.project === current.project)) && runs.length) loadDetail(runs[0].project, runs[0].id);
 }
 
-async function loadDetail(id) {
-  current = id;
-  document.querySelectorAll('#runs .run').forEach(el => el.classList.toggle('active', el.dataset.id === id));
+async function loadDetail(project, id) {
+  current = { project, id };
+  document.querySelectorAll('#runs .run').forEach(el => el.classList.toggle('active', el.dataset.id === id && el.dataset.project === project));
   let d;
-  try { d = await (await fetch('/api/runs/' + encodeURIComponent(id))).json(); }
+  try { d = await (await fetch(runUrl(project, id))).json(); }
   catch (e) { $('#detail').innerHTML = '<div class="empty">Could not load this run.</div>'; return; }
   const h = d.handoff || {};
   const scenarios = (h.request && h.request.scenarios) || [];
@@ -260,30 +279,34 @@ async function loadDetail(id) {
     '<h2>' + esc(h.request && h.request.goal ? h.request.goal : 'Run ' + id) + '</h2>' +
     '<div class="meta">' + badge(d.verdict) +
       '<span class="time">' + esc(d.time) + '</span>' +
+      '<span class="kind" title="' + esc(d.projectPath) + '">' + esc(d.projectName) + '</span>' +
       (h.kind ? '<span class="kind">' + esc(h.kind) + '</span>' : '') +
       (d.status && d.status !== 'ok' ? '<span class="status">status: ' + esc(d.status) + '</span>' : '') +
     '</div>' +
     (target ? '<div class="field"><span class="label">Target:</span> ' + esc(target) + '</div>' : '') +
     (scenarios.length ? '<h3>Scenarios</h3>' + scenarios.map(s => '<div class="scenario"><div class="name">' + esc(s.name) + '</div><div class="steps">Steps: ' + esc(s.steps) + '</div><div class="expected">Expected: ' + esc(s.expected) + '</div></div>').join('') : '') +
     '<h3>Report</h3><pre>' + esc(d.report || 'No report') + '</pre>' +
-    (d.files.length ? '<h3>Receipts</h3>' + d.files.map(f => fileNode(id, f)).join('') : '');
+    (d.files.length ? '<h3>Receipts</h3>' + d.files.map(f => fileNode(project, id, f)).join('') : '');
   document.querySelectorAll('pre[data-text]').forEach(async el => {
     try { const res = await fetch(el.dataset.text); el.textContent = await res.text(); }
     catch (e) { el.textContent = '(failed to load)'; }
   });
 }
 
-function fileNode(id, rel) {
+function runUrl(project, id) { return '/api/projects/' + encodeURIComponent(project) + '/runs/' + encodeURIComponent(id); }
+
+function fileNode(project, id, rel) {
   const lower = rel.toLowerCase();
-  const url = '/api/runs/' + encodeURIComponent(id) + '/file/' + encodeURIComponent(rel);
+  const url = runUrl(project, id) + '/file/' + encodeURIComponent(rel);
   if (/\.(png|jpe?g|gif|webp|svg)$/.test(lower)) return '<div class="file"><div class="name">' + esc(rel) + '</div><img loading="lazy" src="' + url + '" alt="' + esc(rel) + '"></div>';
   if (/\.(txt|md|json|log|ya?ml|html|css|js|sh)$/.test(lower)) return '<div class="file"><div class="name">' + esc(rel) + '</div><pre data-text="' + esc(url) + '"></pre></div>';
   return '<div class="file"><div class="name">' + esc(rel) + '</div><a href="' + url + '" download>Download</a></div>';
 }
 
-$('#refresh').addEventListener('click', loadRuns);
-window.addEventListener('focus', loadRuns);
-loadRuns();
+$('#refresh').addEventListener('click', refresh);
+$('#project').addEventListener('change', () => { current = null; refresh(); });
+window.addEventListener('focus', refresh);
+refresh();
 </script>
 </body>
 </html>

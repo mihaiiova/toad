@@ -24,7 +24,8 @@ Two parts, kept separate:
 
 CLI scenarios use Bubblewrap 0.12.0 on Linux. The `prepare-scenario` tool
 copies the requested project to a unique retained workspace under
-`agent/.forge/scenarios/<id>`, skipping all symlinks, `.git`, `.forge`,
+`~/.cache/toad/scenarios/<id>` (`TOAD_CACHE_DIR`, or `$XDG_CACHE_HOME/toad`),
+skipping all symlinks, `.git`, `.forge`,
 `.toad`, `receipts`, `.env` and `.env.*` (except `.env.example`), common
 credential directories and private-key extensions. This is a name-based
 filter, not detection of every possible secret: users must remove other
@@ -48,7 +49,9 @@ including localhost and reachable LAN services, and there is no seccomp
 filter or resource quota. The host `/usr` and selected system configuration
 are mounted read-only. Copying and workspace validation assume no hostile
 same-user process racing filesystem operations. Workspaces persist and may
-contain sensitive data; remove them manually when no longer needed.
+contain sensitive data. Each new preparation removes workspaces unused for
+more than 7 days (`TOAD_SCENARIO_TTL_DAYS`; `0` keeps them); remove others
+manually when no longer needed.
 
 ## Setup (once, Linux or macOS)
 
@@ -93,9 +96,31 @@ the verdict.
 Register the server with any MCP client, for example:
 
 ```sh
-pi mcp add toad -- node /path/to/toad/mcp/server.mjs
-claude mcp add toad -- node /path/to/toad/mcp/server.mjs
+pi mcp add toad -- node /path/to/toad/mcp/cli.mjs mcp
+claude mcp add toad -- node /path/to/toad/mcp/cli.mjs mcp
 ```
+
+Register it once per machine; every project uses the same server, and each
+call names its project. `mcp/server.mjs` still works as the command for
+existing registrations.
+
+### One machine, many projects
+
+TOaD is installed once; everything about a project lives in that project:
+
+| Where | What |
+|---|---|
+| `<project>/.toad/` | `toad.yaml` (defaults), `.env` (secret values), `runs/` (handoffs, receipts, reports) |
+| `~/.config/toad/projects.json` | the projects that have been set up, for the viewer |
+| `~/.cache/toad/scenarios/` | CLI scenario workspaces, pruned after 7 days |
+| `$XDG_RUNTIME_DIR/toad/` | run slots and per-run secret files (falls back to a private folder in the system temp directory) |
+
+`TOAD_CONFIG_DIR`, `TOAD_CACHE_DIR` and `TOAD_RUNTIME_DIR` move these.
+
+At most two runs execute at once across every TOaD server on the machine
+(`TOAD_MAX_CONCURRENT_RUNS`, set where the server is registered); further calls
+wait, reporting progress, until a slot frees up. The limit is a resource cap,
+not a security boundary.
 
 ### Instructions for coding agents
 
@@ -111,9 +136,24 @@ native skill into the client's own skill directory.
 
 Call `setup_project` with an absolute `project_path` before using
 `run_project_test`. Setup creates `.toad/.env`, `.env.example`, `.gitignore`,
-`runs/`, and `history.mjs` without overwriting existing files. If an existing
-`.gitignore` does not explicitly ignore `.env` and `runs/`, setup asks you to
-add those rules. The run tool takes the same `project_path` and a structured `handoff`:
+`toad.yaml` and `runs/` without overwriting existing files, and adds the
+project to the viewer's list. If an existing `.gitignore` does not explicitly
+ignore `.env` and `runs/`, setup asks you to add those rules.
+
+`toad.yaml` holds the project's defaults and no secrets, so it can be
+committed. Handoffs fill in whatever they leave out from it, and a relative
+`cli.workdir` is resolved against the project:
+
+```yaml
+web:
+  url: http://localhost:3000
+cli:
+  workdir: .
+  program: node dist/cli.js
+timeout_minutes: 15
+```
+
+The run tool takes the same `project_path` and a structured `handoff`:
 
 ```json
 {
@@ -131,16 +171,25 @@ add those rules. The run tool takes the same `project_path` and a structured `ha
 }
 ```
 
-For `kind: "cli"`, use `target.workdir` and `target.program`. Each run stores
-`handoff.yaml` (JSON, which is valid YAML 1.2), `receipts/`, and
-`reports/report.md` under `.toad/runs/<timestamp-and-id>/`. Treat all run
-artifacts as sensitive; screenshots and output can contain private data.
+For `kind: "cli"`, use `target.workdir` and `target.program`. With defaults
+in `toad.yaml`, `target` can be left out entirely. Each run stores the
+effective `handoff.yaml` (JSON, which is valid YAML 1.2), `receipts/`, and
+`reports/report.md` under `.toad/runs/<timestamp-and-id>/`. The browser and
+the command recorder write receipts straight into that `receipts/` folder;
+there is no other copy. Treat all run artifacts as sensitive; screenshots and
+output can contain private data.
 
-Browse all past runs in a browser (localhost only):
+Browse every project's runs in one browser page (localhost only):
 
 ```sh
-node .toad/history.mjs   # http://127.0.0.1:8787 (set TOAD_VIEW_PORT to change)
+node /path/to/toad/mcp/cli.mjs ui            # http://127.0.0.1:8787, or the next free port
+node /path/to/toad/mcp/cli.mjs ui --port 9000
+node /path/to/toad/mcp/cli.mjs projects      # list set-up projects; `projects forget <path>` removes one
 ```
+
+Projects set up before this viewer existed have a `.toad/history.mjs` copy;
+it still works, and can be deleted. Run any test there (or `setup_project`)
+to add the project to the list.
 
 Set values locally by editing `.toad/.env` yourself, for example by using
 an editor; do not give values to the coding agent in chat. The supported format
@@ -163,7 +212,7 @@ After Forge reports completion and cleanup, the wrapper removes the temporary
 file. If Forge reports incomplete cleanup or produces no result, it retains the
 file and reports its directory; inspect and remove it only after confirming
 all processes have stopped. Abrupt wrapper termination can also leave a file
-in the system temporary directory (`toad-browser-*` or `toad-cli-*`). Forge's cleanup
+in the runtime directory's `secrets/` folder (`toad-browser-*` or `toad-cli-*`). Forge's cleanup
 report is not proof against all detached or same-user processes.
 
 Project CLI handoffs use the same credential references. The wrapper creates a
@@ -174,9 +223,8 @@ to the shared store. Environment names that affect process startup, such as
 transmit credentials over the shared network or write them into the retained
 workspace; use trusted code and a restricted test key.
 
-The legacy tools below continue to use the shared agent store. The agent currently writes
-its original receipts under `agent/data/receipts`; project-local receipts are
-copies, not the only evidence on disk. Cancelled or abruptly terminated calls
+The legacy tools below continue to use the shared agent store, and keep their
+receipts under `agent/data/receipts`. Cancelled or abruptly terminated calls
 may not produce a consolidated report.
 
 An explicit canonical project path is authorization by the MCP caller, not an
@@ -215,7 +263,7 @@ Both return the report as text and structured content: `verdict`, `status`,
 `runId`, `receipts` (the run's folder, absolute), `files` (every receipt) and
 `screenshots`. `run_web_test` also attaches screenshots as images. A run that
 couldn't complete is a tool error; a failing test is not.
-Calls run in parallel, each with its own receipts folder. The server sends
+Calls run in parallel, up to the machine-wide limit, each with its own receipts folder. The server sends
 progress every 15 seconds, so clients that reset their timeout on progress
 won't give up on long tests; cancelling a call stops the test.
 
@@ -225,6 +273,6 @@ Point it at test or staging environments.
 ## Tests
 
 ```sh
-cd mcp && npm test                              # the MCP layer, with a stand-in for the bot
+cd mcp && npm test                            # the MCP layer and viewer, with a stand-in for the bot
 node --test agent/tools/toad-exec.test.mjs   # the command recorder
 ```
