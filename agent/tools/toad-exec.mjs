@@ -1,9 +1,11 @@
 #!/usr/bin/env node
-/** Deterministic scenario preparation and recorded Bubblewrap command execution. */
+/** Deterministic scenario preparation and recorded, sandboxed command execution (container or Bubblewrap). */
 import { spawn } from 'node:child_process';
-import { constants, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
+import { constants, closeSync, existsSync, fstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { isAbsolute, join, resolve, sep } from 'node:path';
-import { isReservedSecretName, prepare, sandboxArgs, sandboxEnv, scenarioPath } from './toad-sandbox.mjs';
+import { containerArgs, isReservedSecretName, prepare, sandboxArgs, sandboxEnv, scenarioPath, scenarioSandbox } from './toad-sandbox.mjs';
+import { privateDir, toadDirs } from './toad-dirs.mjs';
 
 const root = process.cwd();
 const fail = message => { process.stderr.write(`toad-exec: infrastructure error: ${message}\n`); process.exit(2); };
@@ -13,7 +15,8 @@ if (operation === 'prepare') {
   if (!source || args.length > 2) fail('usage: prepare <project-directory> [network-url]');
   try {
     const result = prepare(root, source, network);
-    process.stdout.write(`Scenario ID: ${result.id}\nWorkspace: ${result.workspace}\n`);
+    const where = result.sandbox.sandbox === 'container' ? `${result.sandbox.runtime} container (${result.sandbox.image})` : 'Bubblewrap';
+    process.stdout.write(`Scenario ID: ${result.id}\nWorkspace: ${result.workspace}\nSandbox: ${where}\n`);
   } catch (error) { fail(error.message); }
   process.exit(0);
 }
@@ -63,35 +66,58 @@ const values = Object.entries(secret).filter(([, value]) => value.length > 0).so
 const redact = text => values.reduce((result, [key, value]) => result.split(value).join(`[secret:${key}]`), text);
 const timeoutS = Number(process.env.TOAD_COMMAND_TIMEOUT_S ?? 120);
 if (!Number.isFinite(timeoutS) || timeoutS <= 0) fail('invalid timeout');
+const sandbox = scenarioSandbox(workspace);
+// Secrets reach a container through a private env file, never its command line.
+let envDir, envFile;
+if (sandbox.sandbox === 'container' && Object.keys(secret).length) {
+  if (Object.values(secret).some(value => /[\r\n]/.test(value))) fail('credential values cannot contain line breaks in container runs');
+  envDir = mkdtempSync(join(privateDir(join(toadDirs().runtime, 'secrets')), 'toad-cli-env-'));
+  envFile = join(envDir, 'cli.env');
+  writeFileSync(envFile, Object.entries(secret).map(([key, value]) => `${key}=${value}`).join('\n') + '\n', { mode: 0o600 });
+}
+const containerName = `toad-${randomUUID()}`;
+const input = inputFile !== undefined ? openSync(inputFile, 'r') : 'ignore';
 const started = Date.now();
-// The info pipe is written only after Bubblewrap has initialized the sandbox.
-const child = spawn('bwrap', ['--info-fd', '3', ...sandboxArgs(workspace, ['/bin/sh', '-c', command])], {
-  env: sandboxEnv(secret), stdio: [inputFile !== undefined ? openSync(inputFile, 'r') : 'ignore', 'pipe', 'pipe', 'pipe'], detached: true,
-});
+// Bubblewrap writes the info pipe only after it has initialized the sandbox.
+const child = sandbox.sandbox === 'container'
+  ? spawn(sandbox.runtime, containerArgs(sandbox, workspace, { name: containerName, envFile, interactive: inputFile !== undefined }, [command]), { stdio: [input, 'pipe', 'pipe'] })
+  : spawn('bwrap', ['--info-fd', '3', ...sandboxArgs(workspace, ['/bin/sh', '-c', command])], {
+    env: sandboxEnv(secret), stdio: [input, 'pipe', 'pipe', 'pipe'], detached: true,
+  });
 const out = { stdout: '', stderr: '', info: '' };
 for (const [key, stream] of [['stdout', child.stdout], ['stderr', child.stderr], ['info', child.stdio[3]]]) {
+  if (!stream) continue;
   stream.setEncoding('utf8');
   stream.on('data', chunk => { if (out[key].length < 2 * 1024 * 1024) out[key] += chunk; });
 }
 let timedOut = false, interrupted = false, spawnError;
 child.on('error', error => { spawnError = error; });
-const stopGroup = () => {
+const stop = () => {
+  if (sandbox.sandbox === 'container') {
+    // Killing the client would leave the container running; stop it by name.
+    spawn(sandbox.runtime, ['kill', containerName], { stdio: 'ignore' }).on('error', () => {});
+    setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, 5000).unref();
+    return;
+  }
   try { process.kill(-child.pid, 'SIGTERM'); } catch {}
   setTimeout(() => { try { process.kill(-child.pid, 'SIGKILL'); } catch {} }, 2000).unref();
 };
-const timer = setTimeout(() => { timedOut = true; stopGroup(); }, timeoutS * 1000);
-for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => { interrupted = true; stopGroup(); });
+const timer = setTimeout(() => { timedOut = true; stop(); }, timeoutS * 1000);
+for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => { interrupted = true; stop(); });
 child.on('close', (code, signal) => {
   clearTimeout(timer);
+  if (envDir) rmSync(envDir, { recursive: true, force: true });
   let initialized = false;
-  try { initialized = Number.isInteger(JSON.parse(out.info)['child-pid']); } catch {}
-  const infrastructureError = !!spawnError || !initialized;
+  if (sandbox.sandbox === 'container') initialized = code !== 125 && !(timedOut && code === null);
+  else try { initialized = Number.isInteger(JSON.parse(out.info)['child-pid']); } catch {}
+  const infrastructureError = !!spawnError || (!initialized && !timedOut);
   const seconds = ((Date.now() - started) / 1000).toFixed(1);
+  // A killed container exits 137; report it as the timeout it was.
   const outcome = infrastructureError ? 'infrastructure error: sandbox did not start' : timedOut ? `timed out after ${timeoutS}s` : `exit ${code ?? signal}`;
   const stdout = redact(out.stdout), stderr = redact(out.stderr);
   mkdirSync(receiptsDir, { recursive: true });
   const receipt = join(receiptsDir, `${name}.txt`);
-  writeFileSync(receipt, [`$ ${redact(command)}`, `scenario: ${id}`, `workspace: ${workspace}`, ...(inputFile !== undefined ? [`input: ${redact(readFileSync(inputFile, 'utf8'))}`] : []), `result: ${outcome}`, `duration: ${seconds}s`, '--- stdout ---', stdout, '--- stderr ---', stderr].join('\n'));
+  writeFileSync(receipt, [`$ ${redact(command)}`, `scenario: ${id}`, `workspace: ${workspace}`, `sandbox: ${sandbox.sandbox === 'container' ? `${sandbox.runtime} ${sandbox.image}` : 'bubblewrap'}`, ...(inputFile !== undefined ? [`input: ${redact(readFileSync(inputFile, 'utf8'))}`] : []), `result: ${outcome}`, `duration: ${seconds}s`, '--- stdout ---', stdout, '--- stderr ---', stderr].join('\n'));
   const clip = (text, max) => text.length > max ? `${text.slice(0, max)}\n… ${text.length - max} more characters in the receipt` : text;
   process.stdout.write([`${outcome} in ${seconds}s; receipt: ${receipt}`, '--- stdout ---', clip(stdout, 8000), '--- stderr ---', clip(stderr, 4000)].join('\n') + '\n');
   if (infrastructureError) process.exitCode = 2;

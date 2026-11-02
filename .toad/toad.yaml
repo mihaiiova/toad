@@ -1,0 +1,7 @@
+# TOaD settings for this project. Commit this file; it holds no secrets.
+# Handoffs fill in anything they leave out from here.
+cli:
+  workdir: .
+  program: node mcp/cli.mjs          # the `toad` command, from this checkout
+  image: node:22-bookworm
+timeout_minutes: 20

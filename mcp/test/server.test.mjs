@@ -1,10 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, symlinkSync, readdirSync, statSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, symlinkSync, readdirSync, statSync, realpathSync } from 'node:fs';
+import { tmpdir as osTmpdir } from 'node:os';
+// Project paths must be canonical; on macOS the temp folder is behind a symlink.
+const tmpdir = () => realpathSync(osTmpdir());
+import { dirname, join, resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { chooseSandbox } from '../../agent/tools/toad-sandbox.mjs';
 
 const server = resolve(import.meta.dirname, '../server.mjs');
 // A 1×1 PNG.
@@ -15,13 +18,23 @@ const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwA
  * screenshot into the receipts folder it was given, and prints the result the
  * workflow runner would, as configured by `behaviour`.
  */
+const RUNNER = '.pi/git/github.com/mihaiiova/pi-forge/skills/forge/workflow-runner.mjs';
+/** Install `code` as the agent's workflow runner, launched the way ./run would. */
+function standIn(dir, code) {
+  mkdirSync(join(dir, dirname(RUNNER)), { recursive: true });
+  writeFileSync(join(dir, RUNNER), code);
+  const manifest = Buffer.from(JSON.stringify([{ name: 'test', entry: 'lead', lead: 'lead' }])).toString('base64');
+  writeFileSync(join(dir, 'run'), `exec node "$ROOT/${RUNNER}" '${manifest}' "\${prompts[@]}" -- "$@"\n`);
+}
+
 function agent(t, behaviour) {
   const dir = mkdtempSync(join(tmpdir(), 'toad-agent-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   writeFileSync(join(dir, 'behaviour.json'), JSON.stringify(behaviour));
-  writeFileSync(join(dir, 'run'), `#!/usr/bin/env node
-const fs = require('fs'), path = require('path');
-const args = process.argv.slice(2);
+  standIn(dir, `import fs from 'node:fs'; import path from 'node:path';
+const all = process.argv.slice(2);
+const args = all.slice(all.indexOf('--') + 1);
+fs.writeFileSync('launch.json', JSON.stringify({ all, piHome: process.env.PI_CODING_AGENT_DIR }));
 fs.writeFileSync('args.json', JSON.stringify(args));
 fs.writeFileSync('pid', String(process.pid));
 fs.writeFileSync('receipts-env', process.env.TOAD_RECEIPTS_DIR || '');
@@ -41,7 +54,7 @@ if (b.nested) { fs.mkdirSync(path.join(receipts, 'scenario')); fs.writeFileSync(
 const finish = () => { fs.appendFileSync('spans', JSON.stringify({ end: Date.now() }) + '\\n'); console.log('pi output'); console.log(JSON.stringify({ workflow: 'test', runId: 'run-1', status: b.status, answer: b.answer, toolErrors: 0, ...(b.cleanup ? {cleanup: b.cleanup} : {}) })); process.exit(b.code); };
 process.on('SIGTERM', () => { fs.writeFileSync('cancelled', 'yes'); console.log(JSON.stringify({ workflow: 'test', runId: 'run-1', status: 'cancelled', answer: '', toolErrors: 0 })); process.exit(1); });
 setTimeout(finish, b.delay ?? 0);
-`, { mode: 0o755 });
+`);
   return dir;
 }
 
@@ -174,28 +187,30 @@ test('project CLI handoffs select referenced credentials and empty selections ex
   assert.equal(missing.isError, true); assert.match(JSON.stringify(missing), /Missing/);
 });
 
-test('MCP CLI run delivers only selected variables through the actual Bubblewrap recorder', async t => {
+let sandboxAvailable = true;
+try { chooseSandbox(); } catch { sandboxAvailable = false; }
+test('MCP CLI run delivers only selected variables through the actual sandboxed recorder', { skip: !sandboxAvailable && 'no CLI sandbox on this machine' }, async t => {
   const dir = agent(t, { status: 'ok', answer: 'unused', code: 0 });
   const project = mkdtempSync(join(tmpdir(), 'toad-real-cli-'));
   t.after(() => rmSync(project, { recursive: true, force: true }));
   mkdirSync(join(dir, '.forge'));
   writeFileSync(join(dir, '.forge/test-secrets.env'), 'SHARED=should-not-reach-command\n');
   const recorder = resolve(import.meta.dirname, '../../agent/tools/toad-exec.mjs');
-  writeFileSync(join(dir, 'run'), `#!/usr/bin/env node
-const { spawnSync } = require('child_process');
-const fs = require('fs');
-const args = process.argv.slice(2);
+  standIn(dir, `import { spawnSync } from 'node:child_process';
+const all = process.argv.slice(2);
+const args = all.slice(all.indexOf('--') + 1);
 const prep = spawnSync(process.execPath, [${JSON.stringify(recorder)}, 'prepare', ${JSON.stringify(project)}], { encoding: 'utf8' });
 if (prep.status !== 0) { console.log(JSON.stringify({status:'error', message:prep.stderr, answer:''})); process.exit(1); }
 const id = /Scenario ID: (.+)/.exec(prep.stdout)[1];
 const receipts = args.find(a => a.startsWith('receipts=')).slice(9);
 const run = spawnSync(process.execPath, [${JSON.stringify(recorder)}, 'run', receipts, 'env', id, 'printf "%s %s %s" "$API_KEY" "\u0024{SHARED-unset}" "\u0024{OTHER-unset}"'], { encoding: 'utf8' });
 console.log(JSON.stringify({status:run.status === 0 ? 'ok' : 'error', answer:'Verdict: PASS\\n' + run.stdout, message:run.stderr}));
-`, { mode: 0o755 });
+`);
   const client = await connect(t, dir);
   await client.callTool({ name: 'setup_project', arguments: { project_path: project } });
   writeFileSync(join(project, '.toad', '.env'), 'API_KEY=test-sentinel-927\nOTHER=other-secret\n');
-  const handoff = { version: 1, kind: 'cli', target: { workdir: project, program: 'test' }, request: { goal: 'Check env' }, credentials: { key: { env: 'API_KEY' } } };
+  // A small image that is commonly present; the handoff picks it per project.
+  const handoff = { version: 1, kind: 'cli', target: { workdir: project, program: 'test', image: process.env.TOAD_TEST_IMAGE || 'node:22-slim' }, request: { goal: 'Check env' }, credentials: { key: { env: 'API_KEY' } } };
   const result = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff } });
   assert.equal(result.isError, false, JSON.stringify(result));
   assert.match(result.content[0].text, /\[secret:API_KEY\] unset unset/);
@@ -467,4 +482,23 @@ test('a call cancelled while waiting for a slot never starts', async t => {
   assert.equal((await first).isError, false);
   const starts = readFileSync(join(dir, 'spans'), 'utf8').trim().split('\n').filter(line => JSON.parse(line).start);
   assert.equal(starts.length, 1);
+});
+
+test('the agent runs through the Forge runner with its own Pi home, without ./run', async t => {
+  const dir = agent(t, { status: 'ok', answer: 'Verdict: PASS', code: 0 });
+  const client = await connect(t, dir);
+  await client.callTool({ name: 'run_web_test', arguments: { url: 'https://example.test', what: 'Home', screenshots: 'paths' } });
+  const launch = JSON.parse(readFileSync(join(dir, 'launch.json'), 'utf8'));
+  assert.equal(launch.piHome, join(dir, '.forge', 'pi-home'));
+  assert.equal(launch.all[0], Buffer.from(JSON.stringify([{ name: 'test', entry: 'lead', lead: 'lead' }])).toString('base64'));
+  assert.deepEqual(launch.all.slice(launch.all.indexOf('--') + 1, launch.all.indexOf('--') + 3), ['--workflow', 'test']);
+});
+
+test('an agent that is not set up is a clear error', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'toad-empty-agent-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const client = await connect(t, dir);
+  const result = await client.callTool({ name: 'run_web_test', arguments: { url: 'https://example.test', what: 'Home' } });
+  assert.equal(result.isError, true);
+  assert.match(JSON.stringify(result), /toad setup/);
 });

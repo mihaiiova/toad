@@ -17,7 +17,6 @@ orchestrator:
     - read
     - ls
     - find
-    - cli:herdr-pane-rename
   prompt: |
     You run test requests for web applications and command-line programs. A
     request says what to test, how to reach it (a URL for a web app; a
@@ -171,21 +170,12 @@ integrations:
           "{input:file}"
         ]
       approve: false
-    - command: herdr
-      args:
-        - pane
-        - rename
-        - "{pane}"
-        - "{name}"
-      description: Rename this Herdr pane (wC:pJ) to toad-agent; the earlier
-        attempt failed only because cli:pane:current is not a pane id.
-      name: herdr-pane-rename
   mcp:
     - name: playwright
       config:
-        command: bash
+        command: node
         args:
-          - tools/playwright-mcp.sh
+          - tools/playwright-mcp.mjs
           - -y
           - "@playwright/mcp@0.0.83"
           - --headless

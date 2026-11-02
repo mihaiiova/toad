@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, realpathSync } from 'node:fs';
+import { tmpdir as osTmpdir } from 'node:os';
+// Project paths must be canonical; on macOS the temp folder is behind a symlink.
+const tmpdir = () => realpathSync(osTmpdir());
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { acquireSlot, slotLimit } from '../slots.mjs';

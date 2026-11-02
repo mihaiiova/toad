@@ -69,12 +69,13 @@ export const CONFIG_TEMPLATE = `# TOaD settings for this project. Commit this fi
 # cli:
 #   workdir: .                       # relative to the project, or absolute
 #   program: node dist/cli.js        # how to invoke the program there
+#   image: node:22-bookworm          # the container CLI tests run in
 # timeout_minutes: 15
 `;
 
 const configSchema = z.object({
   web: z.object({ url: z.string().url() }).strict().optional(),
-  cli: z.object({ workdir: z.string().min(1).optional(), program: z.string().min(1).optional() }).strict().optional(),
+  cli: z.object({ workdir: z.string().min(1).optional(), program: z.string().min(1).optional(), image: z.string().min(1).optional() }).strict().optional(),
   timeout_minutes: z.number().int().min(1).max(60).optional(),
 }).strict();
 

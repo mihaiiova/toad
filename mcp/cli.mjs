@@ -1,16 +1,17 @@
 #!/usr/bin/env node
-/**
- * toad: the command-line entry point.
- *
- *   toad mcp                      run the MCP server over stdio
- *   toad ui [--port <port>]       browse every project's runs on localhost
- *   toad projects                 list the projects TOaD has been set up in
- *   toad projects forget <path>   remove one from the list (its files stay)
- */
+/** toad: the command-line entry point. See USAGE. */
 import { forgetProject, listProjects } from './projects.mjs';
 
 const USAGE = `Usage:
-  toad mcp                      run the MCP server over stdio
+  toad setup [options]          prepare the agent, browser, model key and coding agents
+      --yes                       accept every default without asking
+      --no-register               do not register TOaD with coding agents
+      --skip-browser              do not download the browser
+      --skip-image                do not download the CLI test image
+      --force                     prepare the agent again from scratch
+  toad doctor                   check that everything TOaD needs is in place
+  toad update [--from <dir>]    install the latest version (or a local checkout's) and prepare it
+  toad mcp                      run the MCP server over stdio (coding agents start this)
   toad ui [--port <port>]       browse every project's runs on localhost
   toad projects                 list the projects TOaD has been set up in
   toad projects forget <path>   remove one from the list (its files stay)`;
@@ -27,6 +28,21 @@ function portOf(args) {
 const [command, ...args] = process.argv.slice(2);
 try {
   if (command === 'mcp') await import('./server.mjs');
+  else if (command === 'setup') {
+    const known = ['--yes', '--no-register', '--skip-browser', '--skip-image', '--force'];
+    const unknown = args.filter(a => !known.includes(a));
+    if (unknown.length) throw new Error(`Unknown option: ${unknown[0]}`);
+    const { setup } = await import('./setup.mjs');
+    await setup({ yes: args.includes('--yes'), noRegister: args.includes('--no-register'), skipBrowser: args.includes('--skip-browser'), skipImage: args.includes('--skip-image'), force: args.includes('--force') });
+  } else if (command === 'doctor') { const { doctor } = await import('./setup.mjs'); await doctor(); }
+  else if (command === 'update') {
+    const i = args.indexOf('--from');
+    if (i !== -1 && !args[i + 1]) throw new Error('--from needs a folder');
+    const { resolve } = await import('node:path');
+    const { update } = await import('./setup.mjs');
+    await update({ from: i !== -1 ? resolve(args[i + 1]) : undefined });
+  }
+  else if (command === '--version' || command === '-v') { const { VERSION } = await import('./agent.mjs'); console.log(VERSION); }
   else if (command === 'ui') {
     const { startUi } = await import('./ui.mjs');
     const { url } = await startUi({ port: portOf(args) });

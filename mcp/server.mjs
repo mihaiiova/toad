@@ -5,8 +5,8 @@
  * It holds no testing logic. Each call builds a test request, runs the bot's
  * declared workflow (`<agent>/run --workflow test`), and maps the workflow's
  * JSON result onto the tool result: the verdict, the report, and the
- * screenshots the bot saved as receipts. The bot lives in ../agent (a Pi
- * Forge project); TOAD_AGENT_DIR points elsewhere.
+ * screenshots the bot saved as receipts. The bot is a Pi Forge project;
+ * agent.mjs finds the prepared copy (TOAD_AGENT_DIR points elsewhere).
  */
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -16,15 +16,23 @@ import { isReservedSecretName } from '../agent/tools/toad-sandbox.mjs';
 import { privateDir, toadDirs } from '../agent/tools/toad-dirs.mjs';
 import { acquireSlot } from './slots.mjs';
 import { CONFIG_TEMPLATE, readProjectConfig, registerProject, withDefaults } from './projects.mjs';
-import { dirname, join, resolve } from 'node:path';
+import { resolveAgent, workflowCommand, workflowEnv, VERSION } from './agent.mjs';
+import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const AGENT = resolve(process.env.TOAD_AGENT_DIR ?? join(HERE, '../agent'));
 const CLI = join(HERE, 'cli.mjs');
+/** `toad ui` when that command is this install, else the full node command. */
+function viewerCommand() {
+  for (const dir of (process.env.PATH ?? '').split(delimiter)) {
+    try { if (realpathSync(join(dir, 'toad')) === realpathSync(CLI)) return 'toad ui'; } catch {}
+  }
+  return `node ${CLI} ui`;
+}
+const NOT_SET_UP = 'The TOaD agent is not set up on this machine. Run `toad setup`, then retry.';
 const MAX_IMAGES = 8;
 const MAX_IMAGE_BYTES = 1024 * 1024;
 
@@ -39,10 +47,12 @@ function request(target, { what, scenarios = [], secrets = [] }) {
 }
 
 /** Run the workflow; resolves with its JSON result, or a synthesized one if it printed none. */
-function runWorkflow(args, signal, onTick, env = process.env) {
+function runWorkflow(agent, args, signal, onTick, env = process.env) {
   return new Promise(done => {
     if (signal.aborted) return done({ status: 'cancelled', answer: '', cleanup: 'incomplete', message: 'Cancelled before launch' });
-    const child = spawn(join(AGENT, 'run'), args, { cwd: AGENT, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const launch = workflowCommand(agent, args);
+    if (launch.error) return done({ status: 'configuration_error', answer: '', message: launch.error });
+    const child = spawn(launch.command, launch.args, { cwd: agent, env: workflowEnv(agent, env), stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '', err = '';
     child.stdout.setEncoding('utf8').on('data', d => { out += d; });
     child.stderr.setEncoding('utf8').on('data', d => { err = (err + d).slice(-4000); });
@@ -84,10 +94,12 @@ function receiptsIn(dir) {
 }
 
 /** Run one test request through the bot and map its result onto a tool result. */
-async function runTest(text, input, extra, { attachImages, projectRun, secretValues }) {
+async function runTest(text, input, extra, { attachImages, projectRun, secretValues, cliImage }) {
+  const agent = resolveAgent();
+  if (!agent) throw new Error(NOT_SET_UP);
   // Project runs write receipts straight into .toad/runs/<id>/receipts; the
   // legacy tools, which have no project, keep the agent's own data/receipts.
-  const folder = projectRun ? join(projectRun, 'receipts') : join(AGENT, 'data/receipts', randomUUID());
+  const folder = projectRun ? join(projectRun, 'receipts') : join(agent, 'data', 'receipts', randomUUID());
   const args = ['--workflow', 'test', '--timeout', `${input.timeout_minutes ?? 15}m`, '--allow-concurrent', '--input', `request=${text}`, '--input', `receipts=${folder}`];
   const token = extra._meta?.progressToken;
   const started = Date.now();
@@ -96,7 +108,9 @@ async function runTest(text, input, extra, { attachImages, projectRun, secretVal
   const tick = () => token !== undefined && extra.sendNotification({ method: 'notifications/progress', params: { progressToken: token, progress: Math.round((Date.now() - started) / 1000), message } }).catch(() => {});
   // Runs from every TOaD server on this machine share a small number of slots.
   let lastTick = 0;
+  if (projectRun) writeState(projectRun, { state: 'waiting' });
   const release = await acquireSlot({ signal: extra.signal, onWait: () => { if (Date.now() - lastTick >= 15000) { lastTick = Date.now(); tick(); } } });
+  if (projectRun) writeState(projectRun, { state: 'running' });
   if (!release) return finish(input, { status: 'cancelled', answer: '', message: 'Cancelled while waiting for a free test slot' }, folder, { attachImages, projectRun });
   message = 'Testing…';
   try { return await launch(); } finally { release(); }
@@ -107,6 +121,8 @@ async function runTest(text, input, extra, { attachImages, projectRun, secretVal
     // Legacy tools must not accidentally inherit another caller's selector.
     delete env.TOAD_PLAYWRIGHT_SECRETS_FILE;
     delete env.TOAD_CLI_SECRETS_FILE;
+    // A project's image wins over one set where the server is registered.
+    if (cliImage) env.TOAD_CLI_IMAGE = cliImage;
     if (secretValues) {
       const cli = input.handoff?.kind === 'cli';
       secretDir = mkdtempSync(join(privateDir(join(toadDirs().runtime, 'secrets')), cli ? 'toad-cli-' : 'toad-browser-'));
@@ -117,7 +133,7 @@ async function runTest(text, input, extra, { attachImages, projectRun, secretVal
       } catch (error) { rmSync(secretDir, { recursive: true, force: true }); throw error; }
       env[cli ? 'TOAD_CLI_SECRETS_FILE' : 'TOAD_PLAYWRIGHT_SECRETS_FILE'] = secretFile;
     }
-    const result = await runWorkflow(args, extra.signal, tick, env);
+    const result = await runWorkflow(agent, args, extra.signal, tick, env);
     const redact = value => typeof value === 'string' ? Object.values(secretValues ?? {}).filter(Boolean).reduce((text, secret) => text.split(secret).join('[REDACTED]'), value) : value;
     result.answer = redact(result.answer);
     result.message = redact(result.message);
@@ -133,13 +149,28 @@ async function runTest(text, input, extra, { attachImages, projectRun, secretVal
 }
 
 /** Map a workflow result, and the receipts it left, onto a tool result. */
+/**
+ * A run's progress, for the viewer: waiting for a slot, running, or finished.
+ * The pid lets the viewer tell a live run from one whose server died.
+ */
+function writeState(run, fields) {
+  let previous = {};
+  try { previous = JSON.parse(readFileSync(join(run, 'state.json'), 'utf8')); } catch {}
+  const now = new Date().toISOString();
+  const state = { started: previous.started ?? now, pid: process.pid, ...previous, ...fields, updated: now };
+  try { writeFileSync(join(run, 'state.json'), JSON.stringify(state) + '\n', { mode: 0o600 }); } catch {}
+}
+
 function finish(input, result, folder, { attachImages, projectRun }) {
   const verdict = verdictOf(result.answer);
+  if (projectRun) writeState(projectRun, { state: 'finished', finished: new Date().toISOString(), verdict, status: result.status });
   // Regular files only: agent-created symlinks are never followed.
   const files = receiptsIn(folder);
   if (projectRun) {
+    // The agent's report normally starts with its own verdict line.
+    const ownVerdict = /^\s*Verdict:/i.test(result.answer ?? '');
     writeFileSync(join(projectRun, 'reports', 'report.md'), [
-      `# TOaD run`, `Status: ${result.status}`, `Verdict: ${verdict}`,
+      `# TOaD run`, `Status: ${result.status}`, ...(ownVerdict ? [] : [`Verdict: ${verdict}`]),
       result.answer ?? '', result.message ?? '',
     ].filter(Boolean).join('\n\n') + '\n', { mode: 0o600 });
   }
@@ -178,7 +209,7 @@ const outputSchema = {
   screenshots: z.array(z.string()),
 };
 
-const server = new McpServer({ name: 'toad', version: '0.2.0' }, {
+const server = new McpServer({ name: 'toad', version: VERSION }, {
   instructions: 'Before using TOaD to test a project, call get_toad_guide for the current testing and credential-safety instructions. The guide is also available as the toad://guide resource. Never put secret values in a handoff or chat.',
 });
 
@@ -199,7 +230,7 @@ server.registerTool('get_toad_guide', {
 }, () => ({ content: [{ type: 'text', text: guide() }] }));
 
 function projectFolder(path) {
-  if (!path.startsWith('/') || path.split('/').includes('..')) throw new Error('project_path must be an absolute path without traversal');
+  if (!isAbsolute(path) || path.split(/[\\/]/).includes('..')) throw new Error('project_path must be an absolute path without traversal');
   const project = resolve(path);
   if (realpathSync(project) !== project || !statSync(project).isDirectory()) throw new Error('project_path must be an existing canonical directory without symlinks');
   return join(project, '.toad');
@@ -252,14 +283,14 @@ server.registerTool('setup_project', {
   createIfMissing(join(folder, 'toad.yaml'), CONFIG_TEMPLATE, 0o644);
   readProjectConfig(folder);
   registerProject(dirname(folder));
-  return { content: [{ type: 'text', text: `TOaD project initialized at ${folder}. Store secrets in .env, never in handoffs. Put defaults such as the app URL or CLI program in toad.yaml. Runs are stored in runs/<run-id>/. View every project's runs in a browser with: node ${CLI} ui. Handoffs reference credentials as {env: NAME}; trusted runs only.` }] };
+  return { content: [{ type: 'text', text: `TOaD project initialized at ${folder}. Store secrets in .env, never in handoffs. Put defaults such as the app URL or CLI program in toad.yaml. Runs are stored in runs/<run-id>/. View every project's runs in a browser with: ${viewerCommand()}. Handoffs reference credentials as {env: NAME}; trusted runs only.` }] };
 });
 
 const valueOrEnv = z.object({ env: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/) }).strict();
 const handoffSchema = z.object({
   version: z.literal(1),
   kind: z.enum(['web', 'cli']),
-  target: z.object({ url: z.string().url().optional(), workdir: z.string().optional(), program: z.string().optional() }).strict().optional()
+  target: z.object({ url: z.string().url().optional(), workdir: z.string().optional(), program: z.string().optional(), image: z.string().min(1).optional() }).strict().optional()
     .describe('Omitted fields come from the project\'s .toad/toad.yaml'),
   request: z.object({ goal: z.string().min(1), scenarios }).strict(),
   credentials: z.record(z.string(), valueOrEnv).optional(),
@@ -294,7 +325,7 @@ server.registerTool('run_project_test', {
   const text = [request(target, { what: h.request.goal, scenarios: h.request.scenarios }),
     ...(h.credentials ? [`Credential roles and secret names: ${JSON.stringify(h.credentials)}. ${h.kind === 'web' ? 'Use each env name as the Playwright secret name' : 'Use each env name as a shell environment variable'}; never print its value.`] : []),
     ...(h.limitations?.length ? ['Limitations:', ...h.limitations.map(item => `- ${item}`)] : [])].join('\n');
-  const result = await runTest(text, input, extra, { attachImages: h.kind === 'web' && input.screenshots !== 'paths', projectRun: run, secretValues });
+  const result = await runTest(text, input, extra, { attachImages: h.kind === 'web' && input.screenshots !== 'paths', projectRun: run, secretValues, cliImage: h.kind === 'cli' ? h.target.image : undefined });
   result.content[0].text += `\n\nHandoff: ${join(run, 'handoff.yaml')}\nReport: ${join(run, 'reports', 'report.md')}`;
   return result;
 });

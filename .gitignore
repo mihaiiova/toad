@@ -3,3 +3,6 @@
 
 # transient network captures from web-test runs
 agent/net-baseline-*.json
+
+# dependencies
+node_modules/

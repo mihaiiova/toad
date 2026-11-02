@@ -1,9 +1,9 @@
 {
   "mcpServers": {
     "playwright": {
-      "command": "bash",
+      "command": "node",
       "args": [
-        "tools/playwright-mcp.sh",
+        "tools/playwright-mcp.mjs",
         "-y",
         "@playwright/mcp@0.0.83",
         "--headless",

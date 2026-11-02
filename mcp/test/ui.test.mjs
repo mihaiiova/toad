@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, symlinkSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, symlinkSync, realpathSync } from 'node:fs';
+import { tmpdir as osTmpdir } from 'node:os';
+// Project paths must be canonical; on macOS the temp folder is behind a symlink.
+const tmpdir = () => realpathSync(osTmpdir());
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { forgetProject, listProjects, projectId, registerProject } from '../projects.mjs';
@@ -49,7 +51,9 @@ test('one viewer lists and serves the runs of every registered project', async t
 
   const detail = (await get(`/api/projects/${projectId(a)}/runs/2026-11-01T10-00-00-000Z-a1`)).body;
   assert.equal(detail.projectPath, a);
-  assert.deepEqual(detail.files, ['receipts/scenario/01-home.txt']);
+  assert.deepEqual(detail.files.map(f => f.path), ['receipts/scenario/01-home.txt']);
+  assert.equal(detail.state, 'finished');
+  assert.equal(detail.verdict, 'PASS');
   const file = await get(`/api/projects/${projectId(a)}/runs/2026-11-01T10-00-00-000Z-a1/file/${encodeURIComponent('receipts/scenario/01-home.txt')}`);
   assert.equal(file.body, 'evidence');
 
@@ -74,4 +78,37 @@ test('without an explicit port the viewer moves to the next free one', async t =
   t.after(() => second.server.close());
   assert.notEqual(first.url, second.url);
   await assert.rejects(startUi({ port: first.server.address().port }), /already in use/);
+});
+
+test('runs report whether they are running, finished or interrupted', async t => {
+  const path = project(t, 'state', [['2026-11-03T09-00-00-000Z-done', 'FAIL', 'Finished run']]);
+  const runs = join(path, '.toad', 'runs');
+  const make = (id, state) => {
+    mkdirSync(join(runs, id, 'receipts'), { recursive: true });
+    writeFileSync(join(runs, id, 'handoff.yaml'), JSON.stringify({ version: 1, kind: 'cli', target: { program: 'node x.js' }, request: { goal: id } }));
+    writeFileSync(join(runs, id, 'state.json'), JSON.stringify(state));
+  };
+  make('2026-11-03T10-00-00-000Z-live', { state: 'running', pid: process.pid, started: '2026-11-03T10:00:00.000Z' });
+  const dead = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' }).stdout;
+  make('2026-11-03T11-00-00-000Z-dead', { state: 'running', pid: Number(dead), started: '2026-11-03T11:00:00.000Z' });
+  const { server, url } = await startUi({ port: 0 });
+  t.after(() => server.close());
+  const get = async p => (await fetch(new URL(p, url))).json();
+  const id = projectId(path);
+  const list = await get(`/api/projects/${id}/runs`);
+  assert.deepEqual(list.map(r => [r.goal, r.state, r.verdict]), [
+    ['2026-11-03T11-00-00-000Z-dead', 'interrupted', 'INTERRUPTED'],
+    ['2026-11-03T10-00-00-000Z-live', 'running', 'RUNNING'],
+    ['Finished run', 'finished', 'FAIL'],
+  ]);
+  const summary = (await get('/api/projects')).find(p => p.id === id);
+  assert.equal(summary.active, 1);
+  assert.equal(summary.finished, 1);
+  assert.equal(summary.recent.length, 3);
+  const detail = await get(`/api/projects/${id}/runs/2026-11-03T10-00-00-000Z-live`);
+  assert.equal(detail.older, '2026-11-03T09-00-00-000Z-done');
+  assert.equal(detail.newer, '2026-11-03T11-00-00-000Z-dead');
+  const page = await fetch(url);
+  assert.match(page.headers.get('content-security-policy'), /default-src 'self'/);
+  assert.doesNotMatch(await page.text(), /__VERSION__/);
 });
