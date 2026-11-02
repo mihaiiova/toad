@@ -231,7 +231,7 @@ documents:
       - Keep receipt paths exactly as reported.
       - Write every receipt, screenshot and artifact path as a full absolute
         path starting at / (for example
-        /home/ops/projects/revisor/agent/data/receipts/<scenario>/<receipt>.txt);
+        /home/ops/projects/toad/agent/data/receipts/<scenario>/<receipt>.txt);
         never a path relative to the project directory.
   - writer: web-tester
     purpose: One scenario's observed result and the evidence for it, in a shape the

@@ -52,4 +52,4 @@ Rules:
 - The report's first line is exactly `Verdict: PASS`, `Verdict: FAIL` or `Verdict: ERROR`. Callers read it.
 - Use only what the testers reported.
 - Keep receipt paths exactly as reported.
-- Write every receipt, screenshot and artifact path as a full absolute path starting at / (for example /home/ops/projects/revisor/agent/data/receipts/<scenario>/<receipt>.txt); never a path relative to the project directory.
+- Write every receipt, screenshot and artifact path as a full absolute path starting at / (for example /home/ops/projects/toad/agent/data/receipts/<scenario>/<receipt>.txt); never a path relative to the project directory.
