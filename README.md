@@ -1,79 +1,263 @@
 # TOaD
 
-A testing bot for web applications and command-line programs. Give it a URL
-(web) or a working folder and how to invoke the program (CLI), what to test
-and, optionally, scenarios with expected outcomes. It tests web apps in a real
-headless browser and CLIs in a shell, and returns a verdict (PASS, FAIL or
-ERROR), a report per scenario, and receipts: screenshots for web steps, and a
-record of every command (exit code, output, duration) for CLI steps.
+A testing agent for the web apps and command-line programs you build. You say what
+should work, in plain words; TOaD tests it in a real headless browser or a
+sandboxed shell and returns a verdict (PASS, FAIL or ERROR), a report per
+scenario, and receipts: screenshots for web steps, and a record of every
+command (exit code, output, duration) for CLI steps.
 
-Two parts, kept separate:
+It is built to be called by your coding agent (Claude Code, Pi, Codex, Cursor
+or any MCP client): the agent hands TOaD a test, TOaD runs it independently,
+and the agent gets back evidence instead of its own opinion of its work.
 
-- **`agent/`**: the bot itself, a [Pi Forge](https://github.com/mihaiiova/pi-forge)
-  project. A lead plans the request into scenarios and hands each to a
-  specialist: a web-tester that drives Chromium through the
-  [Playwright MCP](https://github.com/microsoft/playwright-mcp), or a
-  cli-tester that runs commands through `agent/tools/toad-exec.mjs`. Its
-  design is `agent/.pi/system.yaml`; change it with `/forge` inside
-  `agent/./run`.
-- **`mcp/`**: an MCP server with project setup and handoff tools, plus the
-  legacy `run_web_test` and `run_cli_test` tools. It runs the bot's workflow
-  and maps the result onto the tool result.
+- [Requirements](#requirements)
+- [Install](#install-once-per-machine)
+- [Connect your coding agent](#connect-your-coding-agent)
+- [Test a project](#test-a-project)
+- [See results in the browser](#see-results-in-the-browser)
+- [Reference](#reference)
+- [Security and limits](#security-and-limits)
 
-### How CLI tests run
+## Requirements
 
-CLI scenarios use Bubblewrap 0.12.0 on Linux. The `prepare-scenario` tool
-copies the requested project to a unique retained workspace under
-`~/.cache/toad/scenarios/<id>` (`TOAD_CACHE_DIR`, or `$XDG_CACHE_HOME/toad`),
-skipping all symlinks, `.git`, `.forge`,
-`.toad`, `receipts`, `.env` and `.env.*` (except `.env.example`), common
-credential directories and private-key extensions. This is a name-based
-filter, not detection of every possible secret: users must remove other
-credential files from the project before preparing a scenario. It checks
-sandbox startup and writable workspace/home; the network preparation variant
-also checks an explicitly supplied HTTP(S) endpoint. The preparation returns
-an ID used by every `run-command` call in that scenario. Multiple commands
-share the copied workspace, but not background processes. The original
-project is not mounted. Failed preparation and sandbox startup are
-infrastructure errors; there is no host-execution fallback.
+| | Needed for |
+|---|---|
+| Linux or macOS, Node.js 22+ | everything |
+| [Pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) (`npm i -g @earendil-works/pi-coding-agent`) | running the agent |
+| A [DeepSeek](https://platform.deepseek.com) API key | the model the agent uses |
+| Network access | installing packages and the browser; calling the model |
+| [Bubblewrap](https://github.com/containers/bubblewrap) **0.12.0** exactly (`bwrap --version`), Linux only | CLI tests; web tests work without it |
 
-Commands run through `/bin/sh` inside Bubblewrap. They have no input unless
-provided, are stopped after 120 seconds (`TOAD_COMMAND_TIMEOUT_S`), and
-produce recorded receipts. The legacy shared `.forge/test-secrets.env` is
-passed to CLI commands; reserved environment names that could affect the
-host launcher are rejected. Exact secret values of at least four characters
-are redacted from recorded text, but redaction is not comprehensive.
-
-This is not a hardened sandbox for hostile workloads: networking is shared,
-including localhost and reachable LAN services, and there is no seccomp
-filter or resource quota. The host `/usr` and selected system configuration
-are mounted read-only. Copying and workspace validation assume no hostile
-same-user process racing filesystem operations. Workspaces persist and may
-contain sensitive data. Each new preparation removes workspaces unused for
-more than 7 days (`TOAD_SCENARIO_TTL_DAYS`; `0` keeps them); remove others
-manually when no longer needed.
-
-## Setup (once, Linux or macOS)
-
-Requires Pi, Node.js 22+, Bubblewrap 0.12.0 on Linux for CLI tests, and network access.
+## Install (once per machine)
 
 ```sh
-cd agent
-./run                      # installs the pinned packages; then /login (DeepSeek), and exit
+git clone https://github.com/mihaiiova/toad.git
+cd toad/agent
+./run                       # installs the pinned packages; type /login, pick DeepSeek, then exit
 npx -y @playwright/mcp@0.0.83 install-browser chrome-for-testing
-mkdir -p .forge && touch .forge/test-secrets.env && chmod 600 .forge/test-secrets.env
 cd ../mcp && npm install
+npm link                    # optional: puts `toad` on your PATH
 ```
 
-**Login secrets** for what's under test go in `agent/.forge/test-secrets.env`
-(gitignored) as `NAME=value`. Callers pass only the names. In web tests the
-browser fills in the values; in CLI tests commands use them as `$NAME`, and
-their values are redacted from some text output. This is not a guarantee that
-the model or a malicious page cannot obtain them; arbitrary output, screenshots,
-and transformations may expose them. The whole shared store is available to the
-legacy browser and CLI integration, not just names listed in a request.
+`/login` stores the key in `agent/.forge/pi-home`, separate from your own Pi
+setup. Instead of logging in, you can export `DEEPSEEK_API_KEY` in the
+environment the MCP server starts in.
 
-## Use it directly
+The commands below write `toad`; without `npm link`, use
+`node /path/to/toad/mcp/cli.mjs` instead.
+
+## Connect your coding agent
+
+Register TOaD once; every project uses the same server, and each call says
+which project it is for.
+
+**Claude Code**
+
+```sh
+claude mcp add --scope user toad -- toad mcp
+```
+
+**Pi**
+
+```sh
+pi mcp add toad -- toad mcp
+```
+
+Tests take minutes. Give the server a long request timeout, for example
+`"requestTimeoutMs": 900000` on its entry in `~/.pi/agent/mcp.json`.
+
+**Codex**
+
+```sh
+codex mcp add toad -- toad mcp
+```
+
+**Any other MCP client** (Cursor, Windsurf, Claude Desktop, …) takes a JSON
+entry in its MCP settings:
+
+```json
+{
+  "mcpServers": {
+    "toad": { "command": "node", "args": ["/path/to/toad/mcp/cli.mjs", "mcp"] }
+  }
+}
+```
+
+TOaD sends progress every 15 seconds while it tests, so clients that reset
+their timeout on progress wait for long runs. If yours does not, raise its MCP
+tool timeout to 15 minutes or more.
+
+Then check it is connected: ask your agent to *"list the TOaD tools"*. You
+should see `get_toad_guide`, `setup_project`, `run_project_test`,
+`run_web_test` and `run_cli_test`.
+
+The server also gives the agent a guide (the `get_toad_guide` tool and the
+`toad://guide` resource) on how to write good tests and handle credentials.
+Most clients pick it up from the server's instructions; if yours does not,
+tell the agent: *"Call get_toad_guide before using TOaD."*
+
+## Test a project
+
+### 1. Ask your agent
+
+In your project, ask your coding agent in plain words, for example:
+
+> Set up TOaD in this project, then use it to test the sign-up flow on
+> http://localhost:3000: a new user can register and lands on the dashboard.
+
+> Use TOaD to test our CLI: `node dist/cli.js --help` lists every command,
+> and `init` in an empty folder creates `config.json`.
+
+The agent calls `setup_project` once, writes a handoff (the target, the goal
+and scenarios with expected outcomes) and calls `run_project_test`. It gets
+back the verdict, the report and the receipt paths.
+
+Before you ask:
+
+- **Web apps:** start the app first. TOaD runs on your machine, so
+  `localhost` works. Use a test or staging environment: TOaD clicks, types
+  and submits forms.
+- **CLIs:** build the program first. TOaD copies the project into a sandbox
+  and runs commands there; it never changes your files.
+
+### 2. Save defaults (optional)
+
+Setup creates `.toad/toad.yaml`. Fill it in, and your agent can leave the
+target out of every handoff:
+
+```yaml
+web:
+  url: http://localhost:3000
+cli:
+  workdir: .                  # relative to the project, or absolute
+  program: node dist/cli.js
+timeout_minutes: 15
+```
+
+It holds no secrets; commit it.
+
+### 3. Add test logins (if needed)
+
+Put test-only values in `.toad/.env` **yourself**, in your editor, one
+`NAME=value` per line:
+
+```sh
+TOAD_TEST_EMAIL=tester@example.com
+TOAD_TEST_PASSWORD=a-test-password
+```
+
+Then tell your agent the names, never the values. TOaD passes only the names
+a handoff asks for to that run: the browser types them into the page, or CLI
+commands read them as `$NAME`. `.toad/.gitignore` keeps `.env` and `runs/`
+out of git.
+
+### What setup creates
+
+```
+<project>/.toad/
+├── toad.yaml        project defaults (commit it)
+├── .env             secret values (ignored by git)
+├── .env.example     the names, for your team (commit it)
+├── .gitignore
+└── runs/            one folder per run (ignored by git)
+    └── 2026-11-02T15-04-17-657Z-<id>/
+        ├── handoff.yaml     what was asked, with defaults filled in
+        ├── reports/report.md
+        └── receipts/        screenshots, page snapshots, command records
+```
+
+## See results in the browser
+
+```sh
+toad ui                 # http://127.0.0.1:8787, or the next free port
+toad ui --port 9000
+```
+
+One page shows the runs of every project TOaD is set up in, newest first,
+with a project filter. Open a run to see the scenarios, the report, every
+screenshot and every recorded command. It listens on localhost only.
+
+```sh
+toad projects                     # the projects in the list
+toad projects forget /path/to/x   # drop one from the list (its files stay)
+```
+
+A project joins the list when it is set up or runs a test. Projects set up
+before the viewer existed have a `.toad/history.mjs` copy; it still works and
+can be deleted.
+
+## Reference
+
+### MCP tools
+
+| Tool | What it does |
+|---|---|
+| `get_toad_guide` | Returns the guide for coding agents |
+| `setup_project` | Creates `.toad/` in a project (never overwrites files) and adds it to the viewer's list |
+| `run_project_test` | Runs a handoff in a set-up project; results go to `.toad/runs/<id>/` |
+| `run_web_test`, `run_cli_test` | Legacy: tests without a project (see [Legacy tools](#legacy-tools)) |
+
+### Handoff
+
+`run_project_test` takes `project_path` (absolute, no symlinks), a `handoff`,
+and optionally `timeout_minutes` and `screenshots` (`inline`, the default,
+attaches up to 8 images; `paths` returns only file paths):
+
+```json
+{
+  "version": 1,
+  "kind": "web",
+  "target": { "url": "http://localhost:3000" },
+  "request": {
+    "goal": "Check sign-in",
+    "scenarios": [
+      { "name": "Sign in", "steps": "Open sign-in, enter the test login", "expected": "The dashboard is shown" }
+    ]
+  },
+  "credentials": {
+    "email": { "env": "TOAD_TEST_EMAIL" },
+    "password": { "env": "TOAD_TEST_PASSWORD" }
+  },
+  "limitations": ["Use test data only"]
+}
+```
+
+For `"kind": "cli"`, the target is `{ "workdir": "/abs/path", "program": "node dist/cli.js" }`.
+Fields left out of `target`, and the timeout, come from `toad.yaml`; the
+handoff wins where both are set. Without scenarios, TOaD derives them from
+the goal.
+
+The result has the report as text and as structured content: `verdict`
+(`PASS`, `FAIL`, `ERROR`, or `UNKNOWN` when the report has none), `status`
+(how the run itself ended: `ok`, `timeout`, `blocked`, `cancelled`, `error`,
+`configuration_error`), `runId`, `receipts` (the folder), `files` and
+`screenshots`. A run that could not complete is a tool error; a failing test
+is not.
+
+### Where things live
+
+TOaD is installed once; everything about a project stays in that project.
+
+| Where | What |
+|---|---|
+| `<project>/.toad/` | defaults, secret values, runs |
+| `~/.config/toad/projects.json` | the projects the viewer shows |
+| `~/.cache/toad/scenarios/` | CLI sandbox workspaces, removed after 7 days unused |
+| `$XDG_RUNTIME_DIR/toad/` | run slots and per-run secret files (falls back to a private folder in the system temp directory) |
+
+### Settings
+
+Environment variables, set where the MCP server is registered:
+
+| Variable | Default | |
+|---|---|---|
+| `TOAD_MAX_CONCURRENT_RUNS` | `2` | Runs at once across every TOaD server on the machine; further calls wait |
+| `TOAD_COMMAND_TIMEOUT_S` | `120` | Time limit for each CLI command |
+| `TOAD_SCENARIO_TTL_DAYS` | `7` | When unused CLI workspaces are removed; `0` keeps them |
+| `TOAD_CONFIG_DIR`, `TOAD_CACHE_DIR`, `TOAD_RUNTIME_DIR` | see above | Move TOaD's per-user folders |
+| `TOAD_AGENT_DIR` | `../agent` | Use an agent installed elsewhere |
+
+### Use the agent without MCP
 
 ```sh
 cd agent
@@ -85,194 +269,98 @@ cd agent
   --input receipts=data/receipts/manual-2
 ```
 
-The last line of output is JSON with `status` and the report in `answer`;
-the report's first line is `Verdict: PASS`, `FAIL` or `ERROR`.
-Receipts are in the receipts folder. `status` is about the run itself
-(`ok`, `timeout`, `blocked`, `cancelled`, `error`, `configuration_error`), not
-the verdict.
+The last line of output is JSON with `status` and the report in `answer`,
+whose first line is `Verdict: PASS`, `FAIL` or `ERROR`. Receipts are in the
+receipts folder.
 
-## Use it over MCP
+### How it is built
 
-Register the server with any MCP client, for example:
+- **`agent/`**: the testing agent, a [Pi Forge](https://github.com/mihaiiova/pi-forge)
+  project. A lead plans the request into scenarios and hands each to a
+  specialist: a web-tester that drives Chromium through the
+  [Playwright MCP](https://github.com/microsoft/playwright-mcp), or a
+  cli-tester that runs commands through `agent/tools/toad-exec.mjs`. Its
+  design is `agent/.pi/system.yaml`; change it with `/forge` inside
+  `agent/run`.
+- **`mcp/`**: the MCP server (`server.mjs`), the run viewer (`ui.mjs`) and the
+  `toad` command (`cli.mjs`). The server runs the agent's workflow and maps the
+  result onto the tool result; it holds no testing logic.
+- **`skills/toad-mcp/SKILL.md`**: the guide served to coding agents.
 
-```sh
-pi mcp add toad -- node /path/to/toad/mcp/cli.mjs mcp
-claude mcp add toad -- node /path/to/toad/mcp/cli.mjs mcp
-```
+### How CLI tests run
 
-Register it once per machine; every project uses the same server, and each
-call names its project. `mcp/server.mjs` still works as the command for
-existing registrations.
+CLI scenarios use Bubblewrap 0.12.0 on Linux. Preparing a scenario copies the
+project to a new workspace under `~/.cache/toad/scenarios/<id>`, skipping
+symlinks, `.git`, `.forge`, `.toad`, `receipts`, `.env` and `.env.*` (except
+`.env.example`), common credential folders and private-key files. This is a
+name-based filter, not detection of every secret: remove other credential
+files from the project first. Preparation checks that the sandbox starts and
+the workspace and home are writable; the network variant also checks a given
+HTTP(S) endpoint. Commands in one scenario share the workspace but not
+background processes. The original project is not mounted. A failed
+preparation is an infrastructure error; nothing ever runs on the host instead.
 
-### One machine, many projects
+Commands run through `/bin/sh` inside Bubblewrap, with no input unless
+provided, and stop after 120 seconds. Each produces a receipt. Exact secret
+values of at least four characters are redacted from recorded text, but
+redaction is not comprehensive.
 
-TOaD is installed once; everything about a project lives in that project:
+## Security and limits
 
-| Where | What |
-|---|---|
-| `<project>/.toad/` | `toad.yaml` (defaults), `.env` (secret values), `runs/` (handoffs, receipts, reports) |
-| `~/.config/toad/projects.json` | the projects that have been set up, for the viewer |
-| `~/.cache/toad/scenarios/` | CLI scenario workspaces, pruned after 7 days |
-| `$XDG_RUNTIME_DIR/toad/` | run slots and per-run secret files (falls back to a private folder in the system temp directory) |
+**TOaD runs with your permissions.** The agent, its tools and the programs it
+tests run as your user. Use it on code and sites you trust, with test
+accounts and restricted keys.
 
-`TOAD_CONFIG_DIR`, `TOAD_CACHE_DIR` and `TOAD_RUNTIME_DIR` move these.
+**The CLI sandbox is not hardened.** Networking is shared, including
+localhost and reachable LAN services; there is no seccomp filter or resource
+quota. The host `/usr` and some system configuration are mounted read-only.
+Copying and workspace checks assume no hostile process of your user is racing
+them. Workspaces persist and may contain sensitive data.
 
-At most two runs execute at once across every TOaD server on the machine
-(`TOAD_MAX_CONCURRENT_RUNS`, set where the server is registered); further calls
-wait, reporting progress, until a slot frees up. The limit is a resource cap,
-not a security boundary.
+**Credentials are best-effort protected, not isolated.**
 
-### Instructions for coding agents
+- Handoffs carry only names (`{ "env": "NAME" }`), never values. The `.env`
+  format is `NAME=value`, with optional matching quotes and no shell
+  expansion; duplicate, malformed, missing and empty referenced values are
+  rejected. Do not give values to the coding agent in chat.
+- Each run gets a mode-0600 file, in a mode-0700 folder, with only the values
+  its handoff names. Web runs pass it to the browser launcher; CLI runs pass
+  the variables to the sandboxed command. A run without credentials gets an
+  empty file, never the shared store. Names that affect process startup
+  (`PATH`, `LD_*`, `NODE_OPTIONS`, `BASH_ENV`, …) are rejected for CLI runs.
+- Pi Forge passes the caller's whole environment to Pi, including provider
+  keys; agents, tools, subprocesses and other processes of your user can read
+  the run's environment and file. A tested program can send credentials over
+  the network or write them into its workspace.
+- After the run, TOaD removes the file. If Forge reports incomplete cleanup,
+  or the server is killed, the file stays in the runtime folder's `secrets/`
+  (`toad-browser-*` or `toad-cli-*`) and the result names it; remove it once
+  no process can still be using it.
+- Redaction of the report and result is best effort. Screenshots, page
+  content, logs, files and transformed values can still expose secrets; treat
+  every run folder as sensitive.
 
-The server exposes `skills/toad-mcp/SKILL.md` through the read-only
-`get_toad_guide` tool and the `toad://guide` MCP resource. Server
-initialization and the project-run tool description direct agents to read the
-guide before testing. MCP clients vary in whether they surface server
-instructions and resources; if needed, explicitly ask your agent: “Call
-`get_toad_guide` before using TOaD.” The MCP server does not install a
-native skill into the client's own skill directory.
+**Paths are checked, not confined.** `project_path` must be absolute and
+canonical; symlinked projects and `.toad` folders are rejected, and the `.env`
+file is opened without following symlinks. These checks assume no hostile
+process is changing the project at the same time.
 
-### Project-local handoffs
-
-Call `setup_project` with an absolute `project_path` before using
-`run_project_test`. Setup creates `.toad/.env`, `.env.example`, `.gitignore`,
-`toad.yaml` and `runs/` without overwriting existing files, and adds the
-project to the viewer's list. If an existing `.gitignore` does not explicitly
-ignore `.env` and `runs/`, setup asks you to add those rules.
-
-`toad.yaml` holds the project's defaults and no secrets, so it can be
-committed. Handoffs fill in whatever they leave out from it, and a relative
-`cli.workdir` is resolved against the project:
-
-```yaml
-web:
-  url: http://localhost:3000
-cli:
-  workdir: .
-  program: node dist/cli.js
-timeout_minutes: 15
-```
-
-The run tool takes the same `project_path` and a structured `handoff`:
-
-```json
-{
-  "version": 1,
-  "kind": "web",
-  "target": { "url": "http://localhost:3000" },
-  "request": { "goal": "Check sign-in", "scenarios": [
-    { "name": "Sign in", "steps": "Open sign-in", "expected": "Form is visible" }
-  ] },
-  "credentials": {
-    "email": { "env": "TOAD_TEST_EMAIL" },
-    "password": { "env": "TOAD_TEST_PASSWORD" }
-  },
-  "limitations": ["Use test data only"]
-}
-```
-
-For `kind: "cli"`, use `target.workdir` and `target.program`. With defaults
-in `toad.yaml`, `target` can be left out entirely. Each run stores the
-effective `handoff.yaml` (JSON, which is valid YAML 1.2), `receipts/`, and
-`reports/report.md` under `.toad/runs/<timestamp-and-id>/`. The browser and
-the command recorder write receipts straight into that `receipts/` folder;
-there is no other copy. Treat all run artifacts as sensitive; screenshots and
-output can contain private data.
-
-Browse every project's runs in one browser page (localhost only):
-
-```sh
-node /path/to/toad/mcp/cli.mjs ui            # http://127.0.0.1:8787, or the next free port
-node /path/to/toad/mcp/cli.mjs ui --port 9000
-node /path/to/toad/mcp/cli.mjs projects      # list set-up projects; `projects forget <path>` removes one
-```
-
-Projects set up before this viewer existed have a `.toad/history.mjs` copy;
-it still works, and can be deleted. Run any test there (or `setup_project`)
-to add the project to the list.
-
-Set values locally by editing `.toad/.env` yourself, for example by using
-an editor; do not give values to the coding agent in chat. The supported format
-is one `NAME=value` per line, with optional matching single or double quotes;
-there is no shell evaluation or expansion. Duplicate names, malformed entries,
-missing and empty referenced values are rejected. Credential fields accept
-references only, never literal values.
-
-For web runs, the wrapper resolves only the referenced names and writes them
-to a mode-0600 per-run temporary dotenv file in a mode-0700 directory. The
-Playwright launcher receives the file path through the inherited environment;
-credential values are not passed as workflow inputs. Runs without credentials
-get an empty per-run file rather than falling back to the shared store. Forge
-v0.25.0's trusted-run model applies: Pi, agents, tools and subprocesses can
-access the inherited environment and file, and other same-user processes may
-also access them. This is not per-tool isolation. Use trusted workloads and
-restricted test accounts.
-
-After Forge reports completion and cleanup, the wrapper removes the temporary
-file. If Forge reports incomplete cleanup or produces no result, it retains the
-file and reports its directory; inspect and remove it only after confirming
-all processes have stopped. Abrupt wrapper termination can also leave a file
-in the runtime directory's `secrets/` folder (`toad-browser-*` or `toad-cli-*`). Forge's cleanup
-report is not proof against all detached or same-user processes.
-
-Project CLI handoffs use the same credential references. The wrapper creates a
-per-run private file containing only selected values, and the recorder passes
-those variables to the sandboxed command. An empty selection never falls back
-to the shared store. Environment names that affect process startup, such as
-`PATH`, `LD_*`, `NODE_OPTIONS`, and `BASH_ENV`, are rejected. The program can
-transmit credentials over the shared network or write them into the retained
-workspace; use trusted code and a restricted test key.
-
-The legacy tools below continue to use the shared agent store, and keep their
-receipts under `agent/data/receipts`. Cancelled or abruptly terminated calls
-may not produce a consolidated report.
-
-An explicit canonical project path is authorization by the MCP caller, not an
-OS sandbox. The wrapper rejects symlinked project paths and .toad directories
-and opens the credential file without following symlinks. It assumes the project
-and its parent directories are not concurrently modified by a hostile process
-running as the same user; path checks are not race-proof filesystem confinement.
-Agents and tools retain the filesystem and network permissions of that user.
-Screenshots, page content, and arbitrary tool output can expose sensitive data,
-even where text redaction is used.
-
-### Trusted-run integration
-
-`agent/tools/playwright-mcp.sh` selects `TOAD_PLAYWRIGHT_SECRETS_FILE` when
-provided and otherwise uses the legacy shared file. Forge passes the caller's
-entire environment to Pi, including provider credentials. Do not run untrusted
-agents or point the browser at untrusted sites with sensitive credentials.
-Exact-value redaction of the wrapper's result and report is best effort, not a
-security boundary; screenshots, page content, logs, files, and transformed
-values may still expose secrets.
+**Web tests act on the site.** The browser clicks, types and submits forms.
+Point it at test or staging environments.
 
 ### Legacy tools
 
-| Argument | `run_web_test` | `run_cli_test` |
-|---|---|---|
-| `url` | where the application is reachable | |
-| `workdir` | | absolute path of the folder to run the program in |
-| `program` | | how to invoke it there, e.g. `node dist/bin.js` or `owlie` |
-| `what` | what to test | what to test |
-| `scenarios` | optional `[{ name, steps, expected }]` | same |
-| `secrets` | optional names from `agent/.forge/test-secrets.env` | same |
-| `timeout_minutes` | optional, default 15 | same |
-| `screenshots` | `inline` (default, up to 8 attached as images) or `paths` | |
+`run_web_test` and `run_cli_test` predate projects. They take `url`, or
+`workdir` and `program`, plus `what`, optional `scenarios`, `secrets`,
+`timeout_minutes` and (web) `screenshots`. Their receipts go to
+`agent/data/receipts`. Their `secrets` are names in the shared
+`agent/.forge/test-secrets.env` (create it with mode 600), and that whole
+store is available to the run, not only the names requested. Prefer
+`run_project_test`.
 
-Both return the report as text and structured content: `verdict`, `status`,
-`runId`, `receipts` (the run's folder, absolute), `files` (every receipt) and
-`screenshots`. `run_web_test` also attaches screenshots as images. A run that
-couldn't complete is a tool error; a failing test is not.
-Calls run in parallel, up to the machine-wide limit, each with its own receipts folder. The server sends
-progress every 15 seconds, so clients that reset their timeout on progress
-won't give up on long tests; cancelling a call stops the test.
-
-**Safety:** the bot clicks, types and submits forms on the site it is given.
-Point it at test or staging environments.
-
-## Tests
+## Development
 
 ```sh
-cd mcp && npm test                            # the MCP layer and viewer, with a stand-in for the bot
-node --test agent/tools/toad-exec.test.mjs   # the command recorder
+cd mcp && npm test                           # MCP server, viewer and slots, with a stand-in for the agent
+node --test agent/tools/toad-exec.test.mjs   # the CLI sandbox and command recorder
 ```
