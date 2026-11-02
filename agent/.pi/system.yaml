@@ -1,9 +1,9 @@
-# Revisor: tests web apps in a real browser and command-line programs in a
+# TOaD: tests web apps in a real browser and command-line programs in a
 # shell, and returns the results with receipts (screenshots, recorded
 # commands). Called directly with ./run --workflow test, or by other agents
 # through ../mcp.
 schema: 1
-name: revisor
+name: toad
 description: Tests web apps and command-line programs end to end and returns the
   results with receipts.
 orchestrator:
@@ -135,20 +135,20 @@ integrations:
       description: Copy the project into a persistent isolated scenario workspace and
         preflight the sandbox
       command: node
-      args: [ tools/revisor-exec.mjs, prepare, "{workdir}" ]
+      args: [ tools/toad-exec.mjs, prepare, "{workdir}" ]
       approve: false
     - name: prepare-network-scenario
       description: Prepare a scenario and preflight connectivity to the specified
         HTTP(S) endpoint
       command: node
-      args: [ tools/revisor-exec.mjs, prepare, "{workdir}", "{url}" ]
+      args: [ tools/toad-exec.mjs, prepare, "{workdir}", "{url}" ]
       approve: false
     - name: run-command
       description: Run one shell command in a prepared scenario sandbox and record a receipt
       command: node
       args:
         [
-          tools/revisor-exec.mjs,
+          tools/toad-exec.mjs,
           run,
           "{receipts}",
           "{name}",
@@ -162,7 +162,7 @@ integrations:
       command: node
       args:
         [
-          tools/revisor-exec.mjs,
+          tools/toad-exec.mjs,
           run,
           "{receipts}",
           "{name}",
@@ -177,7 +177,7 @@ integrations:
         - rename
         - "{pane}"
         - "{name}"
-      description: Rename this Herdr pane (wC:pJ) to revisor-agent; the earlier
+      description: Rename this Herdr pane (wC:pJ) to toad-agent; the earlier
         attempt failed only because cli:pane:current is not a pane id.
       name: herdr-pane-rename
   mcp:

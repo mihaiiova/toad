@@ -16,7 +16,7 @@ const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwA
  * workflow runner would, as configured by `behaviour`.
  */
 function agent(t, behaviour) {
-  const dir = mkdtempSync(join(tmpdir(), 'revisor-agent-'));
+  const dir = mkdtempSync(join(tmpdir(), 'toad-agent-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   writeFileSync(join(dir, 'behaviour.json'), JSON.stringify(behaviour));
   writeFileSync(join(dir, 'run'), `#!/usr/bin/env node
@@ -25,7 +25,7 @@ const args = process.argv.slice(2);
 fs.writeFileSync('args.json', JSON.stringify(args));
 fs.writeFileSync('pid', String(process.pid));
 const b = JSON.parse(fs.readFileSync('behaviour.json', 'utf8'));
-const secretFile = process.env.REVISOR_CLI_SECRETS_FILE || process.env.REVISOR_PLAYWRIGHT_SECRETS_FILE;
+const secretFile = process.env.TOAD_CLI_SECRETS_FILE || process.env.TOAD_PLAYWRIGHT_SECRETS_FILE;
 if (secretFile) {
   fs.writeFileSync('secret-path', secretFile);
   fs.writeFileSync('secret-observed', fs.readFileSync(secretFile));
@@ -44,35 +44,35 @@ setTimeout(finish, b.delay ?? 0);
 }
 
 async function connect(t, dir) {
-  const client = new Client({ name: 'revisor-test', version: '1.0.0' });
-  await client.connect(new StdioClientTransport({ command: process.execPath, args: [server], env: { ...process.env, REVISOR_AGENT_DIR: dir } }));
+  const client = new Client({ name: 'toad-test', version: '1.0.0' });
+  await client.connect(new StdioClientTransport({ command: process.execPath, args: [server], env: { ...process.env, TOAD_AGENT_DIR: dir } }));
   t.after(() => client.close());
   return client;
 }
 
 test('coding agents can retrieve the skill as an MCP tool and resource', async t => {
   const client = await connect(t, agent(t, { status: 'ok', answer: 'Verdict: PASS', code: 0 }));
-  const skill = readFileSync(resolve(import.meta.dirname, '../../skills/revisor-mcp/SKILL.md'), 'utf8');
-  const result = await client.callTool({ name: 'get_revisor_guide', arguments: {} });
+  const skill = readFileSync(resolve(import.meta.dirname, '../../skills/toad-mcp/SKILL.md'), 'utf8');
+  const result = await client.callTool({ name: 'get_toad_guide', arguments: {} });
   assert.equal(result.content[0].text, skill);
   const resources = await client.listResources();
-  assert.ok(resources.resources.some(resource => resource.uri === 'revisor://guide'));
-  const resource = await client.readResource({ uri: 'revisor://guide' });
+  assert.ok(resources.resources.some(resource => resource.uri === 'toad://guide'));
+  const resource = await client.readResource({ uri: 'toad://guide' });
   assert.equal(resource.contents[0].text, skill);
-  assert.match(client.getInstructions(), /get_revisor_guide/);
+  assert.match(client.getInstructions(), /get_toad_guide/);
 });
 
 test('project setup and handoff persist project-local evidence without overwriting files', async t => {
   const dir = agent(t, { status: 'ok', answer: 'Verdict: PASS', code: 0 });
-  const project = mkdtempSync(join(tmpdir(), 'revisor-project-'));
+  const project = mkdtempSync(join(tmpdir(), 'toad-project-'));
   t.after(() => rmSync(project, { recursive: true, force: true }));
   const client = await connect(t, dir);
   const setup = () => client.callTool({ name: 'setup_project', arguments: { project_path: project } });
   assert.notEqual((await setup()).isError, true);
-  writeFileSync(join(project, '.revisor', '.env'), 'PASSWORD=s3cr3t-sentinel\n');
+  writeFileSync(join(project, '.toad', '.env'), 'PASSWORD=s3cr3t-sentinel\n');
   await setup();
-  assert.equal(readFileSync(join(project, '.revisor', '.env'), 'utf8'), 'PASSWORD=s3cr3t-sentinel\n');
-  const viewerPath = join(project, '.revisor', 'history.mjs');
+  assert.equal(readFileSync(join(project, '.toad', '.env'), 'utf8'), 'PASSWORD=s3cr3t-sentinel\n');
+  const viewerPath = join(project, '.toad', 'history.mjs');
   const viewer = readFileSync(viewerPath, 'utf8');
   assert.match(viewer, /^#!\/usr\/bin\/env node/);
   assert.match(viewer, /\/api\/runs/);
@@ -84,7 +84,7 @@ test('project setup and handoff persist project-local evidence without overwriti
   const result = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff, screenshots: 'paths' } });
   assert.equal(result.isError, false);
   const run = resolve(result.structuredContent.receipts, '..');
-  assert.ok(run.startsWith(join(project, '.revisor', 'runs') + '/'));
+  assert.ok(run.startsWith(join(project, '.toad', 'runs') + '/'));
   assert.deepEqual(JSON.parse(readFileSync(join(run, 'handoff.yaml'), 'utf8')), handoff);
   assert.match(readFileSync(join(run, 'reports', 'report.md'), 'utf8'), /PASS/);
   assert.ok(existsSync(result.structuredContent.screenshots[0]));
@@ -98,7 +98,7 @@ test('project setup and handoff persist project-local evidence without overwriti
 
 test('web handoffs reject missing credentials and unsafe project paths', async t => {
   const dir = agent(t, { status: 'ok', answer: 'Verdict: PASS', code: 0 });
-  const project = mkdtempSync(join(tmpdir(), 'revisor-safe-'));
+  const project = mkdtempSync(join(tmpdir(), 'toad-safe-'));
   t.after(() => rmSync(project, { recursive: true, force: true }));
   const client = await connect(t, dir);
   await client.callTool({ name: 'setup_project', arguments: { project_path: project } });
@@ -107,7 +107,7 @@ test('web handoffs reject missing credentials and unsafe project paths', async t
   assert.equal(missing.isError, true);
   assert.match(JSON.stringify(missing), /Missing referenced/);
   assert.equal(existsSync(join(dir, 'pid')), false);
-  writeFileSync(join(project, '.revisor', '.env'), 'PASSWORD=sentinel-value\n');
+  writeFileSync(join(project, '.toad', '.env'), 'PASSWORD=sentinel-value\n');
   const completed = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff } });
   assert.equal(completed.isError, false);
   assert.doesNotMatch(JSON.stringify(completed), /sentinel-value/);
@@ -122,7 +122,7 @@ test('web handoffs reject missing credentials and unsafe project paths', async t
 
 test('project runs collect nested scenario receipt files', async t => {
   const dir = agent(t, { status: 'ok', answer: 'Verdict: PASS', code: 0, nested: true });
-  const project = mkdtempSync(join(tmpdir(), 'revisor-nested-'));
+  const project = mkdtempSync(join(tmpdir(), 'toad-nested-'));
   t.after(() => rmSync(project, { recursive: true, force: true }));
   const client = await connect(t, dir);
   await client.callTool({ name: 'setup_project', arguments: { project_path: project } });
@@ -135,11 +135,11 @@ test('project runs collect nested scenario receipt files', async t => {
 
 test('project CLI handoffs select referenced credentials and empty selections exclude the shared store', async t => {
   const dir = agent(t, { status: 'ok', answer: 'Verdict: PASS', code: 0 });
-  const project = mkdtempSync(join(tmpdir(), 'revisor-cli-'));
+  const project = mkdtempSync(join(tmpdir(), 'toad-cli-'));
   t.after(() => rmSync(project, { recursive: true, force: true }));
   const client = await connect(t, dir);
   await client.callTool({ name: 'setup_project', arguments: { project_path: project } });
-  writeFileSync(join(project, '.revisor', '.env'), 'API_KEY=unique-secret-95\nOTHER=not-selected\n');
+  writeFileSync(join(project, '.toad', '.env'), 'API_KEY=unique-secret-95\nOTHER=not-selected\n');
   const handoff = { version: 1, kind: 'cli', target: { workdir: project, program: 'example' }, request: { goal: 'Test' }, credentials: { api_key: { env: 'API_KEY' } } };
   const result = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff } });
   assert.equal(result.isError, false);
@@ -161,11 +161,11 @@ test('project CLI handoffs select referenced credentials and empty selections ex
 
 test('MCP CLI run delivers only selected variables through the actual Bubblewrap recorder', async t => {
   const dir = agent(t, { status: 'ok', answer: 'unused', code: 0 });
-  const project = mkdtempSync(join(tmpdir(), 'revisor-real-cli-'));
+  const project = mkdtempSync(join(tmpdir(), 'toad-real-cli-'));
   t.after(() => rmSync(project, { recursive: true, force: true }));
   mkdirSync(join(dir, '.forge'));
   writeFileSync(join(dir, '.forge/test-secrets.env'), 'SHARED=should-not-reach-command\n');
-  const recorder = resolve(import.meta.dirname, '../../agent/tools/revisor-exec.mjs');
+  const recorder = resolve(import.meta.dirname, '../../agent/tools/toad-exec.mjs');
   writeFileSync(join(dir, 'run'), `#!/usr/bin/env node
 const { spawnSync } = require('child_process');
 const fs = require('fs');
@@ -179,7 +179,7 @@ console.log(JSON.stringify({status:run.status === 0 ? 'ok' : 'error', answer:'Ve
 `, { mode: 0o755 });
   const client = await connect(t, dir);
   await client.callTool({ name: 'setup_project', arguments: { project_path: project } });
-  writeFileSync(join(project, '.revisor', '.env'), 'API_KEY=test-sentinel-927\nOTHER=other-secret\n');
+  writeFileSync(join(project, '.toad', '.env'), 'API_KEY=test-sentinel-927\nOTHER=other-secret\n');
   const handoff = { version: 1, kind: 'cli', target: { workdir: project, program: 'test' }, request: { goal: 'Check env' }, credentials: { key: { env: 'API_KEY' } } };
   const result = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff } });
   assert.equal(result.isError, false, JSON.stringify(result));
@@ -191,11 +191,11 @@ console.log(JSON.stringify({status:run.status === 0 ? 'ok' : 'error', answer:'Ve
 test('concurrent project CLI runs receive distinct selected sets', async t => {
   const dir = agent(t, { status: 'ok', answer: 'Verdict: PASS', code: 0, delay: 100 });
   const client = await connect(t, dir);
-  const projects = [mkdtempSync(join(tmpdir(), 'revisor-cli-a-')), mkdtempSync(join(tmpdir(), 'revisor-cli-b-'))];
+  const projects = [mkdtempSync(join(tmpdir(), 'toad-cli-a-')), mkdtempSync(join(tmpdir(), 'toad-cli-b-'))];
   t.after(() => projects.forEach(p => rmSync(p, { recursive: true, force: true })));
   for (const [i, project] of projects.entries()) {
     await client.callTool({ name: 'setup_project', arguments: { project_path: project } });
-    writeFileSync(join(project, '.revisor', '.env'), `API_KEY=secret-${i}\nOTHER=not-selected\n`);
+    writeFileSync(join(project, '.toad', '.env'), `API_KEY=secret-${i}\nOTHER=not-selected\n`);
   }
   const results = await Promise.all(projects.map(project_path => client.callTool({ name: 'run_project_test', arguments: { project_path, handoff: { version: 1, kind: 'cli', target: { workdir: project_path, program: 'test' }, request: { goal: 'Test' }, credentials: { key: { env: 'API_KEY' } } } } })));
   assert.ok(results.every(result => !result.isError));
@@ -206,10 +206,10 @@ test('concurrent project CLI runs receive distinct selected sets', async t => {
 test('cancelled project CLI runs stop before removing the credential file', async t => {
   const dir = agent(t, { status: 'ok', answer: 'Verdict: PASS', code: 0, delay: 30000 });
   const client = await connect(t, dir);
-  const project = mkdtempSync(join(tmpdir(), 'revisor-cli-cancel-'));
+  const project = mkdtempSync(join(tmpdir(), 'toad-cli-cancel-'));
   t.after(() => rmSync(project, { recursive: true, force: true }));
   await client.callTool({ name: 'setup_project', arguments: { project_path: project } });
-  writeFileSync(join(project, '.revisor', '.env'), 'API_KEY=cancel-test-secret\n');
+  writeFileSync(join(project, '.toad', '.env'), 'API_KEY=cancel-test-secret\n');
   const handoff = { version: 1, kind: 'cli', target: { workdir: project, program: 'test' }, request: { goal: 'Test' }, credentials: { key: { env: 'API_KEY' } } };
   const controller = new AbortController();
   const call = client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff } }, undefined, { signal: controller.signal });
@@ -224,11 +224,11 @@ test('cancelled project CLI runs stop before removing the credential file', asyn
 
 test('incomplete project CLI cleanup retains the per-run credentials', async t => {
   const dir = agent(t, { status: 'error', answer: '', code: 1, cleanup: 'incomplete' });
-  const project = mkdtempSync(join(tmpdir(), 'revisor-cli-incomplete-'));
+  const project = mkdtempSync(join(tmpdir(), 'toad-cli-incomplete-'));
   t.after(() => rmSync(project, { recursive: true, force: true }));
   const client = await connect(t, dir);
   await client.callTool({ name: 'setup_project', arguments: { project_path: project } });
-  writeFileSync(join(project, '.revisor', '.env'), 'API_KEY=cleanup-test-secret\n');
+  writeFileSync(join(project, '.toad', '.env'), 'API_KEY=cleanup-test-secret\n');
   const handoff = { version: 1, kind: 'cli', target: { workdir: project, program: 'test' }, request: { goal: 'Test' }, credentials: { key: { env: 'API_KEY' } } };
   const result = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff } });
   const path = readFileSync(join(dir, 'secret-path'), 'utf8');
@@ -241,11 +241,11 @@ test('incomplete project CLI cleanup retains the per-run credentials', async t =
 test('concurrent web runs select only their own project secrets', async t => {
   const dir = agent(t, { status: 'ok', answer: 'Verdict: PASS', code: 0, delay: 100 });
   const client = await connect(t, dir);
-  const projects = [mkdtempSync(join(tmpdir(), 'revisor-a-')), mkdtempSync(join(tmpdir(), 'revisor-b-'))];
+  const projects = [mkdtempSync(join(tmpdir(), 'toad-a-')), mkdtempSync(join(tmpdir(), 'toad-b-'))];
   t.after(() => projects.forEach(p => rmSync(p, { recursive: true, force: true })));
   for (const [i, project] of projects.entries()) {
     await client.callTool({ name: 'setup_project', arguments: { project_path: project } });
-    writeFileSync(join(project, '.revisor', '.env'), `PASSWORD=secret-${i}\nUNUSED=not-selected\n`);
+    writeFileSync(join(project, '.toad', '.env'), `PASSWORD=secret-${i}\nUNUSED=not-selected\n`);
   }
   const handoff = { version: 1, kind: 'web', target: { url: 'https://example.test' }, request: { goal: 'Login' }, credentials: { password: { env: 'PASSWORD' } } };
   const results = await Promise.all(projects.map(project_path => client.callTool({ name: 'run_project_test', arguments: { project_path, handoff } })));
@@ -258,11 +258,11 @@ test('concurrent web runs select only their own project secrets', async t => {
 test('selected secret is redacted from text results and report but absent from handoff and arguments', async t => {
   const secret = 'unique-sentinel-947';
   const dir = agent(t, { status: 'ok', answer: `Verdict: PASS\n${secret}`, code: 0 });
-  const project = mkdtempSync(join(tmpdir(), 'revisor-redact-'));
+  const project = mkdtempSync(join(tmpdir(), 'toad-redact-'));
   t.after(() => rmSync(project, { recursive: true, force: true }));
   const client = await connect(t, dir);
   await client.callTool({ name: 'setup_project', arguments: { project_path: project } });
-  writeFileSync(join(project, '.revisor', '.env'), `PASSWORD=${secret}\n`);
+  writeFileSync(join(project, '.toad', '.env'), `PASSWORD=${secret}\n`);
   const handoff = { version: 1, kind: 'web', target: { url: 'https://example.test' }, request: { goal: 'Login' }, credentials: { password: { env: 'PASSWORD' } } };
   const result = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff, screenshots: 'paths' } });
   const run = resolve(result.structuredContent.receipts, '..');
@@ -272,11 +272,11 @@ test('selected secret is redacted from text results and report but absent from h
 
 test('incomplete Forge cleanup retains the secrets file and reports its directory', async t => {
   const dir = agent(t, { status: 'error', answer: '', code: 1, cleanup: 'incomplete' });
-  const project = mkdtempSync(join(tmpdir(), 'revisor-cleanup-'));
+  const project = mkdtempSync(join(tmpdir(), 'toad-cleanup-'));
   t.after(() => rmSync(project, { recursive: true, force: true }));
   const client = await connect(t, dir);
   await client.callTool({ name: 'setup_project', arguments: { project_path: project } });
-  writeFileSync(join(project, '.revisor', '.env'), 'PASSWORD=test-only-value\n');
+  writeFileSync(join(project, '.toad', '.env'), 'PASSWORD=test-only-value\n');
   const handoff = { version: 1, kind: 'web', target: { url: 'https://example.test' }, request: { goal: 'Login' }, credentials: { password: { env: 'PASSWORD' } } };
   const result = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff } });
   const secretPath = readFileSync(join(dir, 'secret-path'), 'utf8');
@@ -293,7 +293,7 @@ test('run_web_test runs the workflow and returns the verdict, report and screens
   const dir = agent(t, { status: 'ok', answer: report('FAIL'), code: 0 });
   const client = await connect(t, dir);
   const { tools } = await client.listTools();
-  assert.deepEqual(tools.map(tool => tool.name).sort(), ['get_revisor_guide', 'run_cli_test', 'run_project_test', 'run_web_test', 'setup_project']);
+  assert.deepEqual(tools.map(tool => tool.name).sort(), ['get_toad_guide', 'run_cli_test', 'run_project_test', 'run_web_test', 'setup_project']);
   const result = await client.callTool({ name: 'run_web_test', arguments: {
     url: 'https://staging.example.test', what: 'The home page',
     scenarios: [{ name: 'home', steps: 'Open the page', expected: 'The heading says Welcome' }],

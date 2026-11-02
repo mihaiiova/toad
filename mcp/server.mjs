@@ -1,26 +1,26 @@
 #!/usr/bin/env node
 /**
- * Revisor MCP: a thin stdio MCP server in front of the Revisor testing bot.
+ * TOaD MCP: a thin stdio MCP server in front of the TOaD testing bot.
  *
  * It holds no testing logic. Each call builds a test request, runs the bot's
  * declared workflow (`<agent>/run --workflow test`), and maps the workflow's
  * JSON result onto the tool result: the verdict, the report, and the
  * screenshots the bot saved as receipts. The bot lives in ../agent (a Pi
- * Forge project); REVISOR_AGENT_DIR points elsewhere.
+ * Forge project); TOAD_AGENT_DIR points elsewhere.
  */
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { readdirSync, readFileSync, statSync, lstatSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, copyFileSync, realpathSync, openSync, closeSync, constants, fstatSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolveSecretReferences } from './project-secrets.mjs';
-import { isReservedSecretName } from '../agent/tools/revisor-sandbox.mjs';
+import { isReservedSecretName } from '../agent/tools/toad-sandbox.mjs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 
-const AGENT = resolve(process.env.REVISOR_AGENT_DIR ?? join(dirname(fileURLToPath(import.meta.url)), '../agent'));
+const AGENT = resolve(process.env.TOAD_AGENT_DIR ?? join(dirname(fileURLToPath(import.meta.url)), '../agent'));
 const MAX_IMAGES = 8;
 const MAX_IMAGE_BYTES = 1024 * 1024;
 
@@ -91,17 +91,17 @@ async function runTest(text, input, extra, { attachImages, projectRun, secretVal
   let secretDir;
   const env = { ...process.env };
   // Legacy tools must not accidentally inherit another caller's selector.
-  delete env.REVISOR_PLAYWRIGHT_SECRETS_FILE;
-  delete env.REVISOR_CLI_SECRETS_FILE;
+  delete env.TOAD_PLAYWRIGHT_SECRETS_FILE;
+  delete env.TOAD_CLI_SECRETS_FILE;
   if (secretValues) {
     const cli = input.handoff?.kind === 'cli';
-    secretDir = mkdtempSync(join(tmpdir(), cli ? 'revisor-cli-' : 'revisor-browser-'));
+    secretDir = mkdtempSync(join(tmpdir(), cli ? 'toad-cli-' : 'toad-browser-'));
     const secretFile = join(secretDir, cli ? 'secrets.json' : 'secrets.env');
     try {
       const data = cli ? JSON.stringify(secretValues) : Object.entries(secretValues).map(([key, value]) => `${key}=${JSON.stringify(value)}`).join('\n') + '\n';
       writeFileSync(secretFile, data, { flag: 'wx', mode: 0o600 });
     } catch (error) { rmSync(secretDir, { recursive: true, force: true }); throw error; }
-    env[cli ? 'REVISOR_CLI_SECRETS_FILE' : 'REVISOR_PLAYWRIGHT_SECRETS_FILE'] = secretFile;
+    env[cli ? 'TOAD_CLI_SECRETS_FILE' : 'TOAD_PLAYWRIGHT_SECRETS_FILE'] = secretFile;
   }
   const result = await runWorkflow(args, extra.signal, tick, env);
   const redact = value => typeof value === 'string' ? Object.values(secretValues ?? {}).filter(Boolean).reduce((text, secret) => text.split(secret).join('[REDACTED]'), value) : value;
@@ -125,7 +125,7 @@ async function runTest(text, input, extra, { attachImages, projectRun, secretVal
       return destination;
     });
     writeFileSync(join(projectRun, 'reports', 'report.md'), [
-      `# Revisor run`, `Status: ${result.status}`, `Verdict: ${verdict}`,
+      `# TOaD run`, `Status: ${result.status}`, `Verdict: ${verdict}`,
       result.answer ?? '', result.message ?? '',
     ].filter(Boolean).join('\n\n') + '\n', { mode: 0o600 });
   }
@@ -164,22 +164,22 @@ const outputSchema = {
   screenshots: z.array(z.string()),
 };
 
-const server = new McpServer({ name: 'revisor', version: '0.2.0' }, {
-  instructions: 'Before using Revisor to test a project, call get_revisor_guide for the current testing and credential-safety instructions. The guide is also available as the revisor://guide resource. Never put secret values in a handoff or chat.',
+const server = new McpServer({ name: 'toad', version: '0.2.0' }, {
+  instructions: 'Before using TOaD to test a project, call get_toad_guide for the current testing and credential-safety instructions. The guide is also available as the toad://guide resource. Never put secret values in a handoff or chat.',
 });
 
 // Serve the same guide as the distributable skill; avoid a second copy that
 // could drift from the instructions installed by coding agents.
-const guidePath = resolve(dirname(fileURLToPath(import.meta.url)), '../skills/revisor-mcp/SKILL.md');
+const guidePath = resolve(dirname(fileURLToPath(import.meta.url)), '../skills/toad-mcp/SKILL.md');
 const guide = () => readFileSync(guidePath, 'utf8');
-server.registerResource('revisor-guide', 'revisor://guide', {
-  title: 'Revisor MCP testing guide',
-  description: 'Instructions for coding agents using Revisor, including project setup and credential safety.',
+server.registerResource('toad-guide', 'toad://guide', {
+  title: 'TOaD MCP testing guide',
+  description: 'Instructions for coding agents using TOaD, including project setup and credential safety.',
   mimeType: 'text/markdown',
 }, async uri => ({ contents: [{ uri: uri.href, mimeType: 'text/markdown', text: guide() }] }));
-server.registerTool('get_revisor_guide', {
-  title: 'Get Revisor testing instructions',
-  description: 'Read the Revisor coding-agent skill before preparing a test or project handoff. Includes setup, credential safety, sandbox limitations, and result interpretation.',
+server.registerTool('get_toad_guide', {
+  title: 'Get TOaD testing instructions',
+  description: 'Read the TOaD coding-agent skill before preparing a test or project handoff. Includes setup, credential safety, sandbox limitations, and result interpretation.',
   inputSchema: {},
   annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
 }, () => ({ content: [{ type: 'text', text: guide() }] }));
@@ -188,7 +188,7 @@ function projectFolder(path) {
   if (!path.startsWith('/') || path.split('/').includes('..')) throw new Error('project_path must be an absolute path without traversal');
   const project = resolve(path);
   if (realpathSync(project) !== project || !statSync(project).isDirectory()) throw new Error('project_path must be an existing canonical directory without symlinks');
-  return join(project, '.revisor');
+  return join(project, '.toad');
 }
 
 function readRegular(path) {
@@ -202,7 +202,7 @@ function readRegular(path) {
 function checkIgnore(path) {
   const rules = readRegular(path).split(/\r?\n/).map(line => line.trim());
   if (!rules.includes('.env') || !rules.includes('runs/') || rules.some(line => line.startsWith('!'))) {
-    throw new Error('Ensure .revisor/.gitignore contains .env and runs/ and no negation rules');
+    throw new Error('Ensure .toad/.gitignore contains .env and runs/ and no negation rules');
   }
 }
 
@@ -221,8 +221,8 @@ function createIfMissing(path, text, mode = 0o600) {
 }
 
 server.registerTool('setup_project', {
-  title: 'Set up Revisor in a project',
-  description: 'Initialize .revisor in an existing project. Call get_revisor_guide for testing and credential guidance. Keep all handoffs, receipts and reports in .revisor/runs. Put secret values only in .revisor/.env and reference them by name in handoffs. Writes history.mjs, a localhost web viewer for past runs. Existing files are never overwritten.',
+  title: 'Set up TOaD in a project',
+  description: 'Initialize .toad in an existing project. Call get_toad_guide for testing and credential guidance. Keep all handoffs, receipts and reports in .toad/runs. Put secret values only in .toad/.env and reference them by name in handoffs. Writes history.mjs, a localhost web viewer for past runs. Existing files are never overwritten.',
   inputSchema: { project_path: z.string().min(1).describe('Absolute path to the project directory') },
 }, ({ project_path }) => {
   const folder = projectFolder(project_path);
@@ -236,7 +236,7 @@ server.registerTool('setup_project', {
   if (!lstatSync(join(folder, '.env')).isFile()) throw new Error('Project .env must be a regular file, not a symlink');
   createIfMissing(join(folder, '.env.example'), '# Add secret variable names and descriptions here; never add values.\n', 0o644);
   createIfMissing(join(folder, 'history.mjs'), readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), 'history.mjs'), 'utf8'), 0o755);
-  return { content: [{ type: 'text', text: `Revisor project initialized at ${folder}. Store secrets in .env, never in handoffs. Runs are stored in runs/<run-id>/. View results in a browser with: node ${join(folder, 'history.mjs')}. Handoffs reference credentials as {env: NAME}; trusted runs only.` }] };
+  return { content: [{ type: 'text', text: `TOaD project initialized at ${folder}. Store secrets in .env, never in handoffs. Runs are stored in runs/<run-id>/. View results in a browser with: node ${join(folder, 'history.mjs')}. Handoffs reference credentials as {env: NAME}; trusted runs only.` }] };
 });
 
 const valueOrEnv = z.object({ env: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/) }).strict();
@@ -251,7 +251,7 @@ const handoffSchema = z.object({
 
 server.registerTool('run_project_test', {
   title: 'Run a project test from a handoff',
-  description: 'Run a project handoff. First call get_revisor_guide for setup and safety guidance. Credentials must be references {env: NAME}, never values. Project runs use a per-run secrets file. Trusted runs only: agents, tools and same-user processes can access credentials; artifacts may expose them.',
+  description: 'Run a project handoff. First call get_toad_guide for setup and safety guidance. Credentials must be references {env: NAME}, never values. Project runs use a per-run secrets file. Trusted runs only: agents, tools and same-user processes can access credentials; artifacts may expose them.',
   inputSchema: { project_path: z.string().min(1), handoff: handoffSchema, timeout_minutes: timeout, screenshots: z.enum(['inline', 'paths']).optional() },
   outputSchema,
 }, async (input, extra) => {
@@ -281,7 +281,7 @@ server.registerTool('run_project_test', {
 
 server.registerTool('run_web_test', {
   title: 'Run a web test',
-  description: 'Call get_revisor_guide before testing; this legacy tool uses the shared agent secret store. Tests a web application end to end in a real headless browser and returns the verdict (PASS, FAIL or ERROR), a report per scenario, and screenshots as receipts. Give the URL and what to test; add scenarios with steps and expected outcomes for precise checks. Takes from tens of seconds to several minutes. Use test or staging environments: the bot clicks, types and submits forms.',
+  description: 'Call get_toad_guide before testing; this legacy tool uses the shared agent secret store. Tests a web application end to end in a real headless browser and returns the verdict (PASS, FAIL or ERROR), a report per scenario, and screenshots as receipts. Give the URL and what to test; add scenarios with steps and expected outcomes for precise checks. Takes from tens of seconds to several minutes. Use test or staging environments: the bot clicks, types and submits forms.',
   inputSchema: {
     url: z.string().url().describe('Where the application is reachable'),
     what: z.string().min(1).describe('What to test: a goal, a feature or a user flow'),
@@ -295,7 +295,7 @@ server.registerTool('run_web_test', {
 
 server.registerTool('run_cli_test', {
   title: 'Run a command-line test',
-  description: 'Call get_revisor_guide before testing; this legacy tool uses the shared agent secret store. Tests a command-line program by running it in a shell, and returns the verdict (PASS, FAIL or ERROR), a report per scenario, and every command as a recorded receipt (command, exit code, output). Give the working folder, how to invoke the program and what to test; add scenarios with steps and expected outcomes for precise checks. Commands run with your user\'s permissions; they write only inside the receipts folder unless a scenario says otherwise.',
+  description: 'Call get_toad_guide before testing; this legacy tool uses the shared agent secret store. Tests a command-line program by running it in a shell, and returns the verdict (PASS, FAIL or ERROR), a report per scenario, and every command as a recorded receipt (command, exit code, output). Give the working folder, how to invoke the program and what to test; add scenarios with steps and expected outcomes for precise checks. Commands run with your user\'s permissions; they write only inside the receipts folder unless a scenario says otherwise.',
   inputSchema: {
     workdir: z.string().min(1).describe('Absolute path of the folder to run the program in, usually the project under test'),
     program: z.string().min(1).describe('How to invoke the program from that folder, for example `node apps/cli/dist/bin.js` or `owlie`'),

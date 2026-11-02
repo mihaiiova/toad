@@ -1,4 +1,4 @@
-# Revisor
+# TOaD
 
 A testing bot for web applications and command-line programs. Give it a URL
 (web) or a working folder and how to invoke the program (CLI), what to test
@@ -13,7 +13,7 @@ Two parts, kept separate:
   project. A lead plans the request into scenarios and hands each to a
   specialist: a web-tester that drives Chromium through the
   [Playwright MCP](https://github.com/microsoft/playwright-mcp), or a
-  cli-tester that runs commands through `agent/tools/revisor-exec.mjs`. Its
+  cli-tester that runs commands through `agent/tools/toad-exec.mjs`. Its
   design is `agent/.pi/system.yaml`; change it with `/forge` inside
   `agent/./run`.
 - **`mcp/`**: an MCP server with project setup and handoff tools, plus the
@@ -25,7 +25,7 @@ Two parts, kept separate:
 CLI scenarios use Bubblewrap 0.12.0 on Linux. The `prepare-scenario` tool
 copies the requested project to a unique retained workspace under
 `agent/.forge/scenarios/<id>`, skipping all symlinks, `.git`, `.forge`,
-`.revisor`, `receipts`, `.env` and `.env.*` (except `.env.example`), common
+`.toad`, `receipts`, `.env` and `.env.*` (except `.env.example`), common
 credential directories and private-key extensions. This is a name-based
 filter, not detection of every possible secret: users must remove other
 credential files from the project before preparing a scenario. It checks
@@ -37,7 +37,7 @@ project is not mounted. Failed preparation and sandbox startup are
 infrastructure errors; there is no host-execution fallback.
 
 Commands run through `/bin/sh` inside Bubblewrap. They have no input unless
-provided, are stopped after 120 seconds (`REVISOR_COMMAND_TIMEOUT_S`), and
+provided, are stopped after 120 seconds (`TOAD_COMMAND_TIMEOUT_S`), and
 produce recorded receipts. The legacy shared `.forge/test-secrets.env` is
 passed to CLI commands; reserved environment names that could affect the
 host launcher are rejected. Exact secret values of at least four characters
@@ -93,24 +93,24 @@ the verdict.
 Register the server with any MCP client, for example:
 
 ```sh
-pi mcp add revisor -- node /path/to/revisor/mcp/server.mjs
-claude mcp add revisor -- node /path/to/revisor/mcp/server.mjs
+pi mcp add toad -- node /path/to/toad/mcp/server.mjs
+claude mcp add toad -- node /path/to/toad/mcp/server.mjs
 ```
 
 ### Instructions for coding agents
 
-The server exposes `skills/revisor-mcp/SKILL.md` through the read-only
-`get_revisor_guide` tool and the `revisor://guide` MCP resource. Server
+The server exposes `skills/toad-mcp/SKILL.md` through the read-only
+`get_toad_guide` tool and the `toad://guide` MCP resource. Server
 initialization and the project-run tool description direct agents to read the
 guide before testing. MCP clients vary in whether they surface server
 instructions and resources; if needed, explicitly ask your agent: “Call
-`get_revisor_guide` before using Revisor.” The MCP server does not install a
+`get_toad_guide` before using TOaD.” The MCP server does not install a
 native skill into the client's own skill directory.
 
 ### Project-local handoffs
 
 Call `setup_project` with an absolute `project_path` before using
-`run_project_test`. Setup creates `.revisor/.env`, `.env.example`, `.gitignore`,
+`run_project_test`. Setup creates `.toad/.env`, `.env.example`, `.gitignore`,
 `runs/`, and `history.mjs` without overwriting existing files. If an existing
 `.gitignore` does not explicitly ignore `.env` and `runs/`, setup asks you to
 add those rules. The run tool takes the same `project_path` and a structured `handoff`:
@@ -124,8 +124,8 @@ add those rules. The run tool takes the same `project_path` and a structured `ha
     { "name": "Sign in", "steps": "Open sign-in", "expected": "Form is visible" }
   ] },
   "credentials": {
-    "email": { "env": "REVISOR_TEST_EMAIL" },
-    "password": { "env": "REVISOR_TEST_PASSWORD" }
+    "email": { "env": "TOAD_TEST_EMAIL" },
+    "password": { "env": "TOAD_TEST_PASSWORD" }
   },
   "limitations": ["Use test data only"]
 }
@@ -133,16 +133,16 @@ add those rules. The run tool takes the same `project_path` and a structured `ha
 
 For `kind: "cli"`, use `target.workdir` and `target.program`. Each run stores
 `handoff.yaml` (JSON, which is valid YAML 1.2), `receipts/`, and
-`reports/report.md` under `.revisor/runs/<timestamp-and-id>/`. Treat all run
+`reports/report.md` under `.toad/runs/<timestamp-and-id>/`. Treat all run
 artifacts as sensitive; screenshots and output can contain private data.
 
 Browse all past runs in a browser (localhost only):
 
 ```sh
-node .revisor/history.mjs   # http://127.0.0.1:8787 (set REVISOR_VIEW_PORT to change)
+node .toad/history.mjs   # http://127.0.0.1:8787 (set TOAD_VIEW_PORT to change)
 ```
 
-Set values locally by editing `.revisor/.env` yourself, for example by using
+Set values locally by editing `.toad/.env` yourself, for example by using
 an editor; do not give values to the coding agent in chat. The supported format
 is one `NAME=value` per line, with optional matching single or double quotes;
 there is no shell evaluation or expansion. Duplicate names, malformed entries,
@@ -163,7 +163,7 @@ After Forge reports completion and cleanup, the wrapper removes the temporary
 file. If Forge reports incomplete cleanup or produces no result, it retains the
 file and reports its directory; inspect and remove it only after confirming
 all processes have stopped. Abrupt wrapper termination can also leave a file
-in the system temporary directory (`revisor-browser-*` or `revisor-cli-*`). Forge's cleanup
+in the system temporary directory (`toad-browser-*` or `toad-cli-*`). Forge's cleanup
 report is not proof against all detached or same-user processes.
 
 Project CLI handoffs use the same credential references. The wrapper creates a
@@ -180,7 +180,7 @@ copies, not the only evidence on disk. Cancelled or abruptly terminated calls
 may not produce a consolidated report.
 
 An explicit canonical project path is authorization by the MCP caller, not an
-OS sandbox. The wrapper rejects symlinked project paths and .revisor directories
+OS sandbox. The wrapper rejects symlinked project paths and .toad directories
 and opens the credential file without following symlinks. It assumes the project
 and its parent directories are not concurrently modified by a hostile process
 running as the same user; path checks are not race-proof filesystem confinement.
@@ -190,7 +190,7 @@ even where text redaction is used.
 
 ### Trusted-run integration
 
-`agent/tools/playwright-mcp.sh` selects `REVISOR_PLAYWRIGHT_SECRETS_FILE` when
+`agent/tools/playwright-mcp.sh` selects `TOAD_PLAYWRIGHT_SECRETS_FILE` when
 provided and otherwise uses the legacy shared file. Forge passes the caller's
 entire environment to Pi, including provider credentials. Do not run untrusted
 agents or point the browser at untrusted sites with sensitive credentials.
@@ -226,5 +226,5 @@ Point it at test or staging environments.
 
 ```sh
 cd mcp && npm test                              # the MCP layer, with a stand-in for the bot
-node --test agent/tools/revisor-exec.test.mjs   # the command recorder
+node --test agent/tools/toad-exec.test.mjs   # the command recorder
 ```

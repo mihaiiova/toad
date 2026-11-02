@@ -5,9 +5,9 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 
-const recorder = resolve(import.meta.dirname, 'revisor-exec.mjs');
+const recorder = resolve(import.meta.dirname, 'toad-exec.mjs');
 function setup(t, secrets = '') {
-  const root = mkdtempSync(join(tmpdir(), 'revisor-exec-'));
+  const root = mkdtempSync(join(tmpdir(), 'toad-exec-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(join(root, '.forge'));
   writeFileSync(join(root, '.forge/test-secrets.env'), secrets);
@@ -39,13 +39,13 @@ test('copy excludes secrets, receipts and symlinks without following them', t =>
   writeFileSync(join(target, '.env'), 'PASSWORD=private\n');
   writeFileSync(join(target, '.env.local'), 'secret');
   writeFileSync(join(target, '.env.example'), '# name only');
-  mkdirSync(join(target, '.revisor')); writeFileSync(join(target, '.revisor', 'credentials'), 'private');
+  mkdirSync(join(target, '.toad')); writeFileSync(join(target, '.toad', 'credentials'), 'private');
   mkdirSync(join(target, '.ssh')); writeFileSync(join(target, '.ssh', 'id_rsa'), 'private');
   writeFileSync(join(target, 'server.key'), 'private');
   mkdirSync(join(target, 'receipts')); writeFileSync(join(target, 'receipts', 'secret'), 'private');
   symlinkSync(join(root, '.forge'), join(target, 'external'));
   const project = join(root, '.forge/scenarios', prepare(), 'project');
-  for (const name of ['.env', '.env.local', '.revisor', '.ssh', 'server.key', 'receipts', 'external']) assert.equal(existsSync(join(project, name)), false, name);
+  for (const name of ['.env', '.env.local', '.toad', '.ssh', 'server.key', 'receipts', 'external']) assert.equal(existsSync(join(project, name)), false, name);
   assert.equal(existsSync(join(project, '.env.example')), true);
 });
 
@@ -54,7 +54,7 @@ test('project CLI credentials are selected, redacted even when short, and never 
   const id = prepare();
   const file = join(root, 'selected.json');
   writeFileSync(file, JSON.stringify({ TOKEN: 'xy', SELECTED: 'selected-private' }), { mode: 0o600 });
-  const env = { ...process.env, REVISOR_CLI_SECRETS_FILE: file };
+  const env = { ...process.env, TOAD_CLI_SECRETS_FILE: file };
   const result = run(['run', 'data/receipts/r2', 'project', id, 'printf "%s %s %s" "$TOKEN" "$SELECTED" "${SHARED-unset}"'], { env });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /\[secret:TOKEN\]/);
@@ -71,7 +71,7 @@ test('project credential files fail closed on missing, malformed, symlinked or r
   const { root, run, prepare } = setup(t, 'SHARED=shared-private\n');
   const id = prepare();
   const file = join(root, 'selected.json');
-  const env = { ...process.env, REVISOR_CLI_SECRETS_FILE: file };
+  const env = { ...process.env, TOAD_CLI_SECRETS_FILE: file };
   const exec = () => run(['run', 'data/receipts/r2', 'invalid', id, 'echo should-not-run'], { env });
   assert.equal(exec().status, 2);
   writeFileSync(file, 'not-json'); assert.equal(exec().status, 2);
@@ -87,7 +87,7 @@ test('secrets are redacted and command input and timeout are supported', t => {
   assert.doesNotMatch(readFileSync(join(root, 'data/receipts/r2/secret.txt'), 'utf8'), /s3cret-value-123/);
   writeFileSync(join(root, 'input.txt'), 'yes\n');
   assert.match(run(['run', 'data/receipts/r2', 'input', id, 'read a; echo $a', join(root, 'input.txt')]).stdout, /yes/);
-  assert.match(run(['run', 'data/receipts/r2', 'timeout', id, 'sleep 30'], { env: { ...process.env, REVISOR_COMMAND_TIMEOUT_S: '1' } }).stdout, /timed out after 1s/);
+  assert.match(run(['run', 'data/receipts/r2', 'timeout', id, 'sleep 30'], { env: { ...process.env, TOAD_COMMAND_TIMEOUT_S: '1' } }).stdout, /timed out after 1s/);
 });
 
 test('scenarios use different workspaces', t => {

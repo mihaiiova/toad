@@ -1,10 +1,10 @@
 {
-  "name": "revisor-mcp",
+  "name": "toad-mcp",
   "version": "0.1.0",
   "private": true,
-  "description": "Thin MCP server that runs the Revisor testing bot's workflow and returns its result",
+  "description": "Thin MCP server that runs the TOaD testing bot's workflow and returns its result",
   "type": "module",
-  "bin": { "revisor-mcp": "server.mjs" },
+  "bin": { "toad-mcp": "server.mjs" },
   "scripts": { "test": "node --test test/*.test.mjs" },
   "engines": { "node": ">=22" },
   "dependencies": {

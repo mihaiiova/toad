@@ -4,7 +4,7 @@ Generated from this system's declarations; it changes when they do. Use only wha
 
 - **Built-in tools:** read, ls, find
 - **Commands** (no shell): `{name}` is a value you supply, such as an existing path; `{name:file}` writes your text to a temporary file and passes its path.
-  - `cli_herdr_pane_rename` — Rename this Herdr pane (wC:pJ) to revisor-agent; the earlier attempt failed only because cli:pane:current is not a pane id.: `herdr pane rename {pane} {name}`; the user approves each run
+  - `cli_herdr_pane_rename` — Rename this Herdr pane (wC:pJ) to toad-agent; the earlier attempt failed only because cli:pane:current is not a pane id.: `herdr pane rename {pane} {name}`; the user approves each run
 - **Specialists** (delegate with the subagent tool):
   - `web-tester` — Runs one web test scenario in a real headless browser and reports pass or fail with screenshots
   - `cli-tester` — Runs one command-line test scenario and reports pass or fail with every command recorded as a receipt

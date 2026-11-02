@@ -22,10 +22,10 @@ systemPrompt: |
   
   - **Built-in tools:** none
   - **Commands** (no shell): `{name}` is a value you supply, such as an existing path; `{name:file}` writes your text to a temporary file and passes its path.
-    - `cli_prepare_scenario` — Copy the project into a persistent isolated scenario workspace and preflight the sandbox: `node tools/revisor-exec.mjs prepare {workdir}`; runs without asking
-    - `cli_prepare_network_scenario` — Prepare a scenario and preflight connectivity to the specified HTTP(S) endpoint: `node tools/revisor-exec.mjs prepare {workdir} {url}`; runs without asking
-    - `cli_run_command` — Run one shell command in a prepared scenario sandbox and record a receipt: `node tools/revisor-exec.mjs run {receipts} {name} {scenario} {command}`; runs without asking
-    - `cli_run_command_with_input` — Run one shell command in a prepared scenario sandbox with the given text as input, and record a receipt: `node tools/revisor-exec.mjs run {receipts} {name} {scenario} {command} {input:file}`; runs without asking
+    - `cli_prepare_scenario` — Copy the project into a persistent isolated scenario workspace and preflight the sandbox: `node tools/toad-exec.mjs prepare {workdir}`; runs without asking
+    - `cli_prepare_network_scenario` — Prepare a scenario and preflight connectivity to the specified HTTP(S) endpoint: `node tools/toad-exec.mjs prepare {workdir} {url}`; runs without asking
+    - `cli_run_command` — Run one shell command in a prepared scenario sandbox and record a receipt: `node tools/toad-exec.mjs run {receipts} {name} {scenario} {command}`; runs without asking
+    - `cli_run_command_with_input` — Run one shell command in a prepared scenario sandbox with the given text as input, and record a receipt: `node tools/toad-exec.mjs run {receipts} {name} {scenario} {command} {input:file}`; runs without asking
   - **Skills:**
     - `cli-test-scenario` — Run one CLI scenario and record its evidence
   

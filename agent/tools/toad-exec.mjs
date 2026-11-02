@@ -3,10 +3,10 @@
 import { spawn } from 'node:child_process';
 import { constants, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
-import { isReservedSecretName, prepare, sandboxArgs, sandboxEnv, scenarioPath } from './revisor-sandbox.mjs';
+import { isReservedSecretName, prepare, sandboxArgs, sandboxEnv, scenarioPath } from './toad-sandbox.mjs';
 
 const root = process.cwd();
-const fail = message => { process.stderr.write(`revisor-exec: infrastructure error: ${message}\n`); process.exit(2); };
+const fail = message => { process.stderr.write(`toad-exec: infrastructure error: ${message}\n`); process.exit(2); };
 const [operation, ...args] = process.argv.slice(2);
 if (operation === 'prepare') {
   const [source, network] = args;
@@ -27,10 +27,10 @@ let workspace;
 try { workspace = scenarioPath(root, id); } catch (error) { fail(error.message); }
 if (inputFile !== undefined && !existsSync(inputFile)) fail('input file not found');
 function secrets() {
-  if (Object.hasOwn(process.env, 'REVISOR_CLI_SECRETS_FILE')) {
+  if (Object.hasOwn(process.env, 'TOAD_CLI_SECRETS_FILE')) {
     let fd;
     try {
-      const path = process.env.REVISOR_CLI_SECRETS_FILE;
+      const path = process.env.TOAD_CLI_SECRETS_FILE;
       if (!path || !path.startsWith('/')) throw new Error();
       fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
       if (!fstatSync(fd).isFile()) throw new Error();
@@ -51,11 +51,11 @@ function secrets() {
 }
 const secret = secrets();
 // Never let the shared store change how the host loads or finds Bubblewrap.
-const projectCredentials = Object.hasOwn(process.env, 'REVISOR_CLI_SECRETS_FILE');
+const projectCredentials = Object.hasOwn(process.env, 'TOAD_CLI_SECRETS_FILE');
 if (Object.keys(secret).some(name => projectCredentials ? isReservedSecretName(name) : /^(LD_|DYLD_|GCONV_PATH$|GLIBC_TUNABLES$|PATH$|HOME$|TMPDIR$|LANG$)/.test(name))) fail('credentials contain a reserved environment name');
 const values = Object.entries(secret).filter(([, value]) => value.length > 0).sort((a, b) => b[1].length - a[1].length);
 const redact = text => values.reduce((result, [key, value]) => result.split(value).join(`[secret:${key}]`), text);
-const timeoutS = Number(process.env.REVISOR_COMMAND_TIMEOUT_S ?? 120);
+const timeoutS = Number(process.env.TOAD_COMMAND_TIMEOUT_S ?? 120);
 if (!Number.isFinite(timeoutS) || timeoutS <= 0) fail('invalid timeout');
 const started = Date.now();
 // The info pipe is written only after Bubblewrap has initialized the sandbox.

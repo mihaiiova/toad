@@ -45,13 +45,13 @@ export function prepare(root, sourcePath, networkUrl) {
       if (!rel) return true;
       const segments = rel.split(sep), name = segments.at(-1);
       if (lstatSync(path).isSymbolicLink()) return false;
-      if (['.forge', '.revisor', '.git', '.ssh', '.aws', '.gnupg', '.kube', '.npmrc', '.pypirc', 'receipts', 'scenario-workspaces'].includes(name)) return false;
+      if (['.forge', '.toad', '.git', '.ssh', '.aws', '.gnupg', '.kube', '.npmrc', '.pypirc', 'receipts', 'scenario-workspaces'].includes(name)) return false;
       if (name === '.env' || (name.startsWith('.env.') && name !== '.env.example') || /\.(pem|key|p12|pfx)$/i.test(name)) return false;
       if (rel === join('.config', 'gcloud')) return false;
       if (resolve(path) === resolve(root, 'data/receipts')) return false;
       return true;
     } });
-    const check = spawnSync('bwrap', sandboxArgs(workspace, ['/bin/sh', '-c', 'set -eu; printf ok > /work/.revisor-preflight; test "$(cat /work/.revisor-preflight)" = ok; rm /work/.revisor-preflight; test -w "$HOME"; test ! -w /usr']), { env: sandboxEnv(), encoding: 'utf8', timeout: 15000 });
+    const check = spawnSync('bwrap', sandboxArgs(workspace, ['/bin/sh', '-c', 'set -eu; printf ok > /work/.toad-preflight; test "$(cat /work/.toad-preflight)" = ok; rm /work/.toad-preflight; test -w "$HOME"; test ! -w /usr']), { env: sandboxEnv(), encoding: 'utf8', timeout: 15000 });
     if (check.status !== 0) throw new Error('Sandbox preflight failed');
     if (networkUrl) {
       const network = spawnSync('bwrap', sandboxArgs(workspace, ['node', '-e', 'fetch(process.argv[1], {signal: AbortSignal.timeout(10000)}).then(r => { if (!r.ok) process.exitCode=1 }).catch(() => { process.exitCode=1 })', networkUrl]), { env: sandboxEnv(), encoding: 'utf8', timeout: 15000 });

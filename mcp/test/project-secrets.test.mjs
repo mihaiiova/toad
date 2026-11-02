@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { resolveSecretReferences } from '../project-secrets.mjs';
 
 function project(t, contents) {
-  const dir = mkdtempSync(join(tmpdir(), 'revisor-secrets-'));
+  const dir = mkdtempSync(join(tmpdir(), 'toad-secrets-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   if (contents !== undefined) writeFileSync(join(dir, '.env'), contents);
   return dir;

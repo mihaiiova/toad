@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
- * Revisor history viewer: a dependency-free web interface over `.revisor/runs`.
+ * TOaD history viewer: a dependency-free web interface over `.toad/runs`.
  *
- * Run it from inside a project that Revisor has set up:
- *   node .revisor/history.mjs            # http://127.0.0.1:8787
- *   node .revisor/history.mjs 9000       # or: --port 9000 / --port=9000
+ * Run it from inside a project that TOaD has set up:
+ *   node .toad/history.mjs            # http://127.0.0.1:8787
+ *   node .toad/history.mjs 9000       # or: --port 9000 / --port=9000
  *
  * It binds to localhost only; run artifacts can contain sensitive data.
  */
@@ -14,10 +14,10 @@ import { dirname, join, extname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const SELF = fileURLToPath(import.meta.url);
-const ROOT = dirname(SELF); // the `.revisor` directory this file lives in
-const RUNS = process.env.REVISOR_RUNS_DIR ?? join(ROOT, 'runs');
+const ROOT = dirname(SELF); // the `.toad` directory this file lives in
+const RUNS = process.env.TOAD_RUNS_DIR ?? join(ROOT, 'runs');
 const HOST = '127.0.0.1';
-const PORT = Number(process.env.REVISOR_VIEW_PORT ?? portFromArgs());
+const PORT = Number(process.env.TOAD_VIEW_PORT ?? portFromArgs());
 
 function portFromArgs() {
   const argv = process.argv.slice(2);
@@ -154,7 +154,7 @@ const server = createServer((req, res) => {
   }
 });
 
-server.listen(PORT, HOST, () => console.log(`Revisor history: http://${HOST}:${PORT}/  (runs: ${RUNS})`));
+server.listen(PORT, HOST, () => console.log(`TOaD history: http://${HOST}:${PORT}/  (runs: ${RUNS})`));
 server.on('error', error => {
   if (error.code === 'EADDRINUSE') {
     console.error(`Port ${PORT} is already in use. Run with a different one: node ${basename(SELF)} --port <port>`);
@@ -168,7 +168,7 @@ const HTML = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Revisor history</title>
+<title>TOaD history</title>
 <style>
 :root { --bg:#0f1115; --panel:#171a21; --border:#262b36; --text:#e6e8ee; --muted:#8b93a7; --accent:#58a6ff; --pass:#2ea043; --fail:#f85149; --error:#d29922; }
 * { box-sizing: border-box; }
@@ -213,7 +213,7 @@ a { color:var(--accent); }
 </head>
 <body>
 <header>
-  <h1>Revisor history</h1>
+  <h1>TOaD history</h1>
   <span class="path" id="path"></span>
   <button id="refresh">Refresh</button>
 </header>
@@ -234,7 +234,7 @@ async function loadRuns() {
   const box = $('#runs');
   if (!runs.length) {
     box.innerHTML = '<div class="empty">No runs yet.</div>';
-    $('#detail').innerHTML = '<div class="empty">Run a Revisor test, then refresh.</div>';
+    $('#detail').innerHTML = '<div class="empty">Run a TOaD test, then refresh.</div>';
     return;
   }
   box.innerHTML = runs.map(r =>
