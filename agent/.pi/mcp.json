@@ -1,8 +1,9 @@
 {
   "mcpServers": {
     "playwright": {
-      "command": "npx",
+      "command": "bash",
       "args": [
+        "tools/playwright-mcp.sh",
         "-y",
         "@playwright/mcp@0.0.83",
         "--headless",
@@ -12,9 +13,7 @@
         "--viewport-size",
         "1280,800",
         "--output-dir",
-        "data/receipts",
-        "--secrets",
-        ".forge/test-secrets.env"
+        "data/receipts"
       ],
       "description": "A real headless Chromium browser driven by Playwright",
       "exposure": "deferred",

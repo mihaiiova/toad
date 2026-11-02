@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, symlinkSync, readdirSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -25,11 +25,18 @@ const args = process.argv.slice(2);
 fs.writeFileSync('args.json', JSON.stringify(args));
 fs.writeFileSync('pid', String(process.pid));
 const b = JSON.parse(fs.readFileSync('behaviour.json', 'utf8'));
+const secretFile = process.env.REVISOR_CLI_SECRETS_FILE || process.env.REVISOR_PLAYWRIGHT_SECRETS_FILE;
+if (secretFile) {
+  fs.writeFileSync('secret-path', secretFile);
+  fs.writeFileSync('secret-observed', fs.readFileSync(secretFile));
+  fs.writeFileSync('capture-' + path.basename(path.dirname(secretFile)), fs.readFileSync(secretFile));
+}
 const receipts = args.find(a => a.startsWith('receipts=')).slice('receipts='.length);
 fs.mkdirSync(receipts, { recursive: true });
 fs.writeFileSync(path.join(receipts, 'scenario-01-home.png'), Buffer.from(${JSON.stringify(PNG)}, 'base64'));
 fs.writeFileSync(path.join(receipts, 'scenario-02-help.txt'), '$ tool --help\\nexit: 0\\n');
-const finish = () => { console.log('pi output'); console.log(JSON.stringify({ workflow: 'test', runId: 'run-1', status: b.status, answer: b.answer, toolErrors: 0 })); process.exit(b.code); };
+if (b.nested) { fs.mkdirSync(path.join(receipts, 'scenario')); fs.writeFileSync(path.join(receipts, 'scenario', '01.txt'), 'nested evidence'); }
+const finish = () => { console.log('pi output'); console.log(JSON.stringify({ workflow: 'test', runId: 'run-1', status: b.status, answer: b.answer, toolErrors: 0, ...(b.cleanup ? {cleanup: b.cleanup} : {}) })); process.exit(b.code); };
 process.on('SIGTERM', () => { fs.writeFileSync('cancelled', 'yes'); console.log(JSON.stringify({ workflow: 'test', runId: 'run-1', status: 'cancelled', answer: '', toolErrors: 0 })); process.exit(1); });
 setTimeout(finish, b.delay ?? 0);
 `, { mode: 0o755 });
@@ -43,13 +50,250 @@ async function connect(t, dir) {
   return client;
 }
 
+test('coding agents can retrieve the skill as an MCP tool and resource', async t => {
+  const client = await connect(t, agent(t, { status: 'ok', answer: 'Verdict: PASS', code: 0 }));
+  const skill = readFileSync(resolve(import.meta.dirname, '../../skills/revisor-mcp/SKILL.md'), 'utf8');
+  const result = await client.callTool({ name: 'get_revisor_guide', arguments: {} });
+  assert.equal(result.content[0].text, skill);
+  const resources = await client.listResources();
+  assert.ok(resources.resources.some(resource => resource.uri === 'revisor://guide'));
+  const resource = await client.readResource({ uri: 'revisor://guide' });
+  assert.equal(resource.contents[0].text, skill);
+  assert.match(client.getInstructions(), /get_revisor_guide/);
+});
+
+test('project setup and handoff persist project-local evidence without overwriting files', async t => {
+  const dir = agent(t, { status: 'ok', answer: 'Verdict: PASS', code: 0 });
+  const project = mkdtempSync(join(tmpdir(), 'revisor-project-'));
+  t.after(() => rmSync(project, { recursive: true, force: true }));
+  const client = await connect(t, dir);
+  const setup = () => client.callTool({ name: 'setup_project', arguments: { project_path: project } });
+  assert.notEqual((await setup()).isError, true);
+  writeFileSync(join(project, '.revisor', '.env'), 'PASSWORD=s3cr3t-sentinel\n');
+  await setup();
+  assert.equal(readFileSync(join(project, '.revisor', '.env'), 'utf8'), 'PASSWORD=s3cr3t-sentinel\n');
+  const viewerPath = join(project, '.revisor', 'history.mjs');
+  const viewer = readFileSync(viewerPath, 'utf8');
+  assert.match(viewer, /^#!\/usr\/bin\/env node/);
+  assert.match(viewer, /\/api\/runs/);
+  assert.notEqual(statSync(viewerPath).mode & 0o100, 0);
+  writeFileSync(viewerPath, 'sentinel-viewer\n');
+  await setup();
+  assert.equal(readFileSync(viewerPath, 'utf8'), 'sentinel-viewer\n');
+  const handoff = { version: 1, kind: 'cli', target: { workdir: project, program: 'example' }, request: { goal: 'Check help' } };
+  const result = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff, screenshots: 'paths' } });
+  assert.equal(result.isError, false);
+  const run = resolve(result.structuredContent.receipts, '..');
+  assert.ok(run.startsWith(join(project, '.revisor', 'runs') + '/'));
+  assert.deepEqual(JSON.parse(readFileSync(join(run, 'handoff.yaml'), 'utf8')), handoff);
+  assert.match(readFileSync(join(run, 'reports', 'report.md'), 'utf8'), /PASS/);
+  assert.ok(existsSync(result.structuredContent.screenshots[0]));
+  const web = { version: 1, kind: 'web', target: { url: 'https://example.test' }, request: { goal: 'Check home' }, credentials: { password: { env: 'PASSWORD' } } };
+  const resultWeb = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff: web } });
+  assert.equal(resultWeb.isError, false);
+  assert.ok(!JSON.stringify(resultWeb).includes('s3cr3t-sentinel'));
+  assert.match(readFileSync(join(dir, 'secret-observed'), 'utf8'), /PASSWORD="s3cr3t-sentinel"/);
+  assert.equal(existsSync(readFileSync(join(dir, 'secret-path'), 'utf8')), false);
+});
+
+test('web handoffs reject missing credentials and unsafe project paths', async t => {
+  const dir = agent(t, { status: 'ok', answer: 'Verdict: PASS', code: 0 });
+  const project = mkdtempSync(join(tmpdir(), 'revisor-safe-'));
+  t.after(() => rmSync(project, { recursive: true, force: true }));
+  const client = await connect(t, dir);
+  await client.callTool({ name: 'setup_project', arguments: { project_path: project } });
+  const handoff = { version: 1, kind: 'web', target: { url: 'https://example.test' }, request: { goal: 'Check login' }, credentials: { password: { env: 'PASSWORD' } } };
+  const missing = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff } });
+  assert.equal(missing.isError, true);
+  assert.match(JSON.stringify(missing), /Missing referenced/);
+  assert.equal(existsSync(join(dir, 'pid')), false);
+  writeFileSync(join(project, '.revisor', '.env'), 'PASSWORD=sentinel-value\n');
+  const completed = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff } });
+  assert.equal(completed.isError, false);
+  assert.doesNotMatch(JSON.stringify(completed), /sentinel-value/);
+  assert.equal(existsSync(join(dir, 'pid')), true);
+  const alias = join(project, 'alias');
+  symlinkSync(project, alias);
+  const symlink = await client.callTool({ name: 'setup_project', arguments: { project_path: alias } });
+  assert.equal(symlink.isError, true);
+  const traversal = await client.callTool({ name: 'setup_project', arguments: { project_path: project + '/..' } });
+  assert.equal(traversal.isError, true);
+});
+
+test('project runs collect nested scenario receipt files', async t => {
+  const dir = agent(t, { status: 'ok', answer: 'Verdict: PASS', code: 0, nested: true });
+  const project = mkdtempSync(join(tmpdir(), 'revisor-nested-'));
+  t.after(() => rmSync(project, { recursive: true, force: true }));
+  const client = await connect(t, dir);
+  await client.callTool({ name: 'setup_project', arguments: { project_path: project } });
+  const handoff = { version: 1, kind: 'cli', target: { workdir: project, program: 'test' }, request: { goal: 'Test' } };
+  const result = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff } });
+  const nested = result.structuredContent.files.find(f => f.endsWith('/scenario/01.txt'));
+  assert.ok(nested);
+  assert.equal(readFileSync(nested, 'utf8'), 'nested evidence');
+});
+
+test('project CLI handoffs select referenced credentials and empty selections exclude the shared store', async t => {
+  const dir = agent(t, { status: 'ok', answer: 'Verdict: PASS', code: 0 });
+  const project = mkdtempSync(join(tmpdir(), 'revisor-cli-'));
+  t.after(() => rmSync(project, { recursive: true, force: true }));
+  const client = await connect(t, dir);
+  await client.callTool({ name: 'setup_project', arguments: { project_path: project } });
+  writeFileSync(join(project, '.revisor', '.env'), 'API_KEY=unique-secret-95\nOTHER=not-selected\n');
+  const handoff = { version: 1, kind: 'cli', target: { workdir: project, program: 'example' }, request: { goal: 'Test' }, credentials: { api_key: { env: 'API_KEY' } } };
+  const result = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff } });
+  assert.equal(result.isError, false);
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, 'secret-observed'), 'utf8')), { API_KEY: 'unique-secret-95' });
+  assert.equal(existsSync(readFileSync(join(dir, 'secret-path'), 'utf8')), false);
+  const run = resolve(result.structuredContent.receipts, '..');
+  for (const text of [JSON.stringify(result), readFileSync(join(dir, 'args.json'), 'utf8'), readFileSync(join(run, 'handoff.yaml'), 'utf8'), readFileSync(join(run, 'reports', 'report.md'), 'utf8')]) assert.doesNotMatch(text, /unique-secret-95|not-selected/);
+  delete handoff.credentials;
+  const empty = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff } });
+  assert.equal(empty.isError, false);
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, 'secret-observed'), 'utf8')), {});
+  handoff.credentials = { bad: { env: 'NODE_OPTIONS' } };
+  const reserved = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff } });
+  assert.equal(reserved.isError, true); assert.match(JSON.stringify(reserved), /reserved/);
+  handoff.credentials.bad.env = 'MISSING';
+  const missing = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff } });
+  assert.equal(missing.isError, true); assert.match(JSON.stringify(missing), /Missing/);
+});
+
+test('MCP CLI run delivers only selected variables through the actual Bubblewrap recorder', async t => {
+  const dir = agent(t, { status: 'ok', answer: 'unused', code: 0 });
+  const project = mkdtempSync(join(tmpdir(), 'revisor-real-cli-'));
+  t.after(() => rmSync(project, { recursive: true, force: true }));
+  mkdirSync(join(dir, '.forge'));
+  writeFileSync(join(dir, '.forge/test-secrets.env'), 'SHARED=should-not-reach-command\n');
+  const recorder = resolve(import.meta.dirname, '../../agent/tools/revisor-exec.mjs');
+  writeFileSync(join(dir, 'run'), `#!/usr/bin/env node
+const { spawnSync } = require('child_process');
+const fs = require('fs');
+const args = process.argv.slice(2);
+const prep = spawnSync(process.execPath, [${JSON.stringify(recorder)}, 'prepare', ${JSON.stringify(project)}], { encoding: 'utf8' });
+if (prep.status !== 0) { console.log(JSON.stringify({status:'error', message:prep.stderr, answer:''})); process.exit(1); }
+const id = /Scenario ID: (.+)/.exec(prep.stdout)[1];
+const receipts = args.find(a => a.startsWith('receipts=')).slice(9);
+const run = spawnSync(process.execPath, [${JSON.stringify(recorder)}, 'run', receipts, 'env', id, 'printf "%s %s %s" "$API_KEY" "\u0024{SHARED-unset}" "\u0024{OTHER-unset}"'], { encoding: 'utf8' });
+console.log(JSON.stringify({status:run.status === 0 ? 'ok' : 'error', answer:'Verdict: PASS\\n' + run.stdout, message:run.stderr}));
+`, { mode: 0o755 });
+  const client = await connect(t, dir);
+  await client.callTool({ name: 'setup_project', arguments: { project_path: project } });
+  writeFileSync(join(project, '.revisor', '.env'), 'API_KEY=test-sentinel-927\nOTHER=other-secret\n');
+  const handoff = { version: 1, kind: 'cli', target: { workdir: project, program: 'test' }, request: { goal: 'Check env' }, credentials: { key: { env: 'API_KEY' } } };
+  const result = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff } });
+  assert.equal(result.isError, false, JSON.stringify(result));
+  assert.match(result.content[0].text, /\[secret:API_KEY\] unset unset/);
+  const receipt = readFileSync(result.structuredContent.files.find(p => p.endsWith('/env.txt')), 'utf8');
+  for (const text of [JSON.stringify(result), receipt]) assert.doesNotMatch(text, /test-sentinel-927|other-secret|should-not-reach-command/);
+});
+
+test('concurrent project CLI runs receive distinct selected sets', async t => {
+  const dir = agent(t, { status: 'ok', answer: 'Verdict: PASS', code: 0, delay: 100 });
+  const client = await connect(t, dir);
+  const projects = [mkdtempSync(join(tmpdir(), 'revisor-cli-a-')), mkdtempSync(join(tmpdir(), 'revisor-cli-b-'))];
+  t.after(() => projects.forEach(p => rmSync(p, { recursive: true, force: true })));
+  for (const [i, project] of projects.entries()) {
+    await client.callTool({ name: 'setup_project', arguments: { project_path: project } });
+    writeFileSync(join(project, '.revisor', '.env'), `API_KEY=secret-${i}\nOTHER=not-selected\n`);
+  }
+  const results = await Promise.all(projects.map(project_path => client.callTool({ name: 'run_project_test', arguments: { project_path, handoff: { version: 1, kind: 'cli', target: { workdir: project_path, program: 'test' }, request: { goal: 'Test' }, credentials: { key: { env: 'API_KEY' } } } } })));
+  assert.ok(results.every(result => !result.isError));
+  const captures = readdirSync(dir).filter(name => name.startsWith('capture-')).map(name => readFileSync(join(dir, name), 'utf8')).sort();
+  assert.deepEqual(captures, ['{"API_KEY":"secret-0"}', '{"API_KEY":"secret-1"}']);
+});
+
+test('cancelled project CLI runs stop before removing the credential file', async t => {
+  const dir = agent(t, { status: 'ok', answer: 'Verdict: PASS', code: 0, delay: 30000 });
+  const client = await connect(t, dir);
+  const project = mkdtempSync(join(tmpdir(), 'revisor-cli-cancel-'));
+  t.after(() => rmSync(project, { recursive: true, force: true }));
+  await client.callTool({ name: 'setup_project', arguments: { project_path: project } });
+  writeFileSync(join(project, '.revisor', '.env'), 'API_KEY=cancel-test-secret\n');
+  const handoff = { version: 1, kind: 'cli', target: { workdir: project, program: 'test' }, request: { goal: 'Test' }, credentials: { key: { env: 'API_KEY' } } };
+  const controller = new AbortController();
+  const call = client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff } }, undefined, { signal: controller.signal });
+  for (let i = 0; i < 100 && !existsSync(join(dir, 'secret-path')); i++) await new Promise(r => setTimeout(r, 20));
+  const path = readFileSync(join(dir, 'secret-path'), 'utf8');
+  assert.ok(existsSync(path));
+  controller.abort(); await assert.rejects(call);
+  for (let i = 0; i < 100 && (!existsSync(join(dir, 'cancelled')) || existsSync(path)); i++) await new Promise(r => setTimeout(r, 20));
+  assert.ok(existsSync(join(dir, 'cancelled')));
+  assert.equal(existsSync(path), false);
+});
+
+test('incomplete project CLI cleanup retains the per-run credentials', async t => {
+  const dir = agent(t, { status: 'error', answer: '', code: 1, cleanup: 'incomplete' });
+  const project = mkdtempSync(join(tmpdir(), 'revisor-cli-incomplete-'));
+  t.after(() => rmSync(project, { recursive: true, force: true }));
+  const client = await connect(t, dir);
+  await client.callTool({ name: 'setup_project', arguments: { project_path: project } });
+  writeFileSync(join(project, '.revisor', '.env'), 'API_KEY=cleanup-test-secret\n');
+  const handoff = { version: 1, kind: 'cli', target: { workdir: project, program: 'test' }, request: { goal: 'Test' }, credentials: { key: { env: 'API_KEY' } } };
+  const result = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff } });
+  const path = readFileSync(join(dir, 'secret-path'), 'utf8');
+  t.after(() => rmSync(resolve(path, '..'), { recursive: true, force: true }));
+  assert.equal(result.isError, true); assert.ok(existsSync(path));
+  assert.match(JSON.stringify(result), /Cleanup incomplete/);
+  assert.doesNotMatch(JSON.stringify(result), /cleanup-test-secret/);
+});
+
+test('concurrent web runs select only their own project secrets', async t => {
+  const dir = agent(t, { status: 'ok', answer: 'Verdict: PASS', code: 0, delay: 100 });
+  const client = await connect(t, dir);
+  const projects = [mkdtempSync(join(tmpdir(), 'revisor-a-')), mkdtempSync(join(tmpdir(), 'revisor-b-'))];
+  t.after(() => projects.forEach(p => rmSync(p, { recursive: true, force: true })));
+  for (const [i, project] of projects.entries()) {
+    await client.callTool({ name: 'setup_project', arguments: { project_path: project } });
+    writeFileSync(join(project, '.revisor', '.env'), `PASSWORD=secret-${i}\nUNUSED=not-selected\n`);
+  }
+  const handoff = { version: 1, kind: 'web', target: { url: 'https://example.test' }, request: { goal: 'Login' }, credentials: { password: { env: 'PASSWORD' } } };
+  const results = await Promise.all(projects.map(project_path => client.callTool({ name: 'run_project_test', arguments: { project_path, handoff } })));
+  assert.ok(results.every(result => !result.isError));
+  const captures = readdirSync(dir).filter(name => name.startsWith('capture-')).map(name => readFileSync(join(dir, name), 'utf8')).sort();
+  assert.deepEqual(captures, ['PASSWORD="secret-0"\n', 'PASSWORD="secret-1"\n']);
+  assert.ok(results.every(result => !JSON.stringify(result).includes('secret-')));
+});
+
+test('selected secret is redacted from text results and report but absent from handoff and arguments', async t => {
+  const secret = 'unique-sentinel-947';
+  const dir = agent(t, { status: 'ok', answer: `Verdict: PASS\n${secret}`, code: 0 });
+  const project = mkdtempSync(join(tmpdir(), 'revisor-redact-'));
+  t.after(() => rmSync(project, { recursive: true, force: true }));
+  const client = await connect(t, dir);
+  await client.callTool({ name: 'setup_project', arguments: { project_path: project } });
+  writeFileSync(join(project, '.revisor', '.env'), `PASSWORD=${secret}\n`);
+  const handoff = { version: 1, kind: 'web', target: { url: 'https://example.test' }, request: { goal: 'Login' }, credentials: { password: { env: 'PASSWORD' } } };
+  const result = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff, screenshots: 'paths' } });
+  const run = resolve(result.structuredContent.receipts, '..');
+  for (const text of [JSON.stringify(result), readFileSync(join(run, 'handoff.yaml'), 'utf8'), readFileSync(join(run, 'reports', 'report.md'), 'utf8'), readFileSync(join(dir, 'args.json'), 'utf8')]) assert.ok(!text.includes(secret));
+  assert.match(result.content[0].text, /\[REDACTED\]/);
+});
+
+test('incomplete Forge cleanup retains the secrets file and reports its directory', async t => {
+  const dir = agent(t, { status: 'error', answer: '', code: 1, cleanup: 'incomplete' });
+  const project = mkdtempSync(join(tmpdir(), 'revisor-cleanup-'));
+  t.after(() => rmSync(project, { recursive: true, force: true }));
+  const client = await connect(t, dir);
+  await client.callTool({ name: 'setup_project', arguments: { project_path: project } });
+  writeFileSync(join(project, '.revisor', '.env'), 'PASSWORD=test-only-value\n');
+  const handoff = { version: 1, kind: 'web', target: { url: 'https://example.test' }, request: { goal: 'Login' }, credentials: { password: { env: 'PASSWORD' } } };
+  const result = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff } });
+  const secretPath = readFileSync(join(dir, 'secret-path'), 'utf8');
+  t.after(() => rmSync(resolve(secretPath, '..'), { recursive: true, force: true }));
+  assert.equal(result.isError, true);
+  assert.equal(existsSync(secretPath), true);
+  assert.match(JSON.stringify(result), /Cleanup incomplete/);
+  assert.doesNotMatch(JSON.stringify(result), /test-only-value/);
+});
+
 const report = verdict => `# Test report\n\n## Verdict\n\n${verdict}\n\nThe home page loads.\n\n## Scenarios\n\n**home — ${verdict}**`;
 
 test('run_web_test runs the workflow and returns the verdict, report and screenshots', async t => {
   const dir = agent(t, { status: 'ok', answer: report('FAIL'), code: 0 });
   const client = await connect(t, dir);
   const { tools } = await client.listTools();
-  assert.deepEqual(tools.map(tool => tool.name).sort(), ['run_cli_test', 'run_web_test']);
+  assert.deepEqual(tools.map(tool => tool.name).sort(), ['get_revisor_guide', 'run_cli_test', 'run_project_test', 'run_web_test', 'setup_project']);
   const result = await client.callTool({ name: 'run_web_test', arguments: {
     url: 'https://staging.example.test', what: 'The home page',
     scenarios: [{ name: 'home', steps: 'Open the page', expected: 'The heading says Welcome' }],

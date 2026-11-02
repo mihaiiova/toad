@@ -1,4 +1,4 @@
-<!-- forge:generated v1 sha256=bebac4c377563102aedb1318bb2a887a9b27d900702e7bb73530ad182497664f -->
+<!-- forge:generated v1 sha256=f6363239a3c0484ab295bdfdc505b2a2c40b1e3a7c84f35e64c68c25df984345 -->
 # revisor
 
 Tests web apps and command-line programs end to end and returns the results with receipts.
@@ -40,8 +40,9 @@ capabilities are enforced vs advisory.
 
 ## Maintain
 
-`/forge <request>` proposes a change; when the turn ends, Forge shows the
-preview for you to approve or decline. `/forge review` is read-only.
+`/forge <request>` proposes a change; when the turn ends, Forge asks you
+to discuss, apply or discard it. Replies continue the conversation until
+then; `/forge exit` leaves. `/forge review` is read-only.
 `/forge check` verifies the agent, `/forge status` summarizes it, and
 `/forge sync` moves to the newest Forge release after two confirmations.
 Roll back with git. `/forge permissions` lists the commands agents may run

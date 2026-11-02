@@ -4,13 +4,20 @@
 # through ../mcp.
 schema: 1
 name: revisor
-description: Tests web apps and command-line programs end to end and returns the results with receipts.
+description: Tests web apps and command-line programs end to end and returns the
+  results with receipts.
 orchestrator:
   name: lead
-  description: Plans a test request into scenarios, delegates them to web and CLI testers, and reports the results
+  description: Plans a test request into scenarios, delegates them to web and CLI
+    testers, and reports the results
   model: deepseek/deepseek-flash
   thinking: medium
-  tools: [subagent]
+  tools:
+    - subagent
+    - read
+    - ls
+    - find
+    - cli:herdr-pane-rename
   prompt: |
     You run test requests for web applications and command-line programs. A
     request says what to test, how to reach it (a URL for a web app; a
@@ -37,28 +44,37 @@ orchestrator:
     missing), report it as ERROR with the reason, not as FAIL.
 agents:
   - name: web-tester
-    description: Runs one web test scenario in a real headless browser and reports pass or fail with screenshots
+    description: Runs one web test scenario in a real headless browser and reports
+      pass or fail with screenshots
     model: deepseek/deepseek-flash
     thinking: medium
-    tools: [mcp:playwright]
-    skills: [web-test-scenario]
+    tools: [ mcp:playwright ]
+    skills: [ web-test-scenario ]
     prompt: |
       You test one scenario of a web application in a real browser, exactly
       as given, and report what you observed. Follow the web-test-scenario
       skill. Never claim a step passed without evidence from the page.
   - name: cli-tester
-    description: Runs one command-line test scenario and reports pass or fail with every command recorded as a receipt
+    description: Runs one command-line test scenario and reports pass or fail with
+      every command recorded as a receipt
     model: deepseek/deepseek-flash
     thinking: medium
-    tools: [cli:run-command, cli:run-command-with-input]
-    skills: [cli-test-scenario]
+    tools:
+      [
+        cli:prepare-scenario,
+        cli:prepare-network-scenario,
+        cli:run-command,
+        cli:run-command-with-input
+      ]
+    skills: [ cli-test-scenario ]
     prompt: |
       You test one scenario of a command-line program, exactly as given, and
       report what you observed. Follow the cli-test-scenario skill. Never
       claim a step passed without evidence from a recorded command.
 skills:
   - name: web-test-scenario
-    description: How to run one web test scenario with the Playwright MCP and record evidence
+    description: How to run one web test scenario with the Playwright MCP and record
+      evidence
     body: |
       # Running a web test scenario
 
@@ -72,72 +88,104 @@ skills:
       4. After each step, check the expected outcome against the snapshot.
          Wait for content that loads late before deciding.
       5. Take a screenshot at each checkpoint, and always at the moment a step
-         fails. Save it in the receipts folder you were given, as
-         `<receipts folder>/<scenario-slug>-<NN>-<what-it-shows>.png`, and
-         record the path the tool returns.
+         fails. Save it as
+         `<receipts folder>/<scenario-slug>/<NN>-<what-it-shows>.png`, numbering
+         from 01, and record the path the tool returns. That folder holds this
+         scenario's screenshots and console records and nothing else; never
+         copy them elsewhere, including into the project under test.
       6. A failed expectation is FAIL. Something that prevented testing (an
          unreachable site, a missing secret, an ambiguous step) is ERROR.
          Note console errors that appear during the scenario.
       7. Close the browser when done.
 
-      Report, in this order: the scenario name; PASS, FAIL or ERROR; each
-      step with what you did, what you expected, what you saw, and its
-      screenshot paths; console errors; and for a FAIL, the first step that
-      failed and why.
+      Evidence is kept apart from the report. The report cites each
+      screenshot and console record by its absolute path and never inlines a
+      screenshot, a page dump or a file's text.
+
+      Return your report in the web-tester-report format declared in your
+      instructions.
   - name: cli-test-scenario
-    description: How to run one command-line test scenario and record evidence
+    description: Run one CLI scenario and record its evidence
     body: |
-      # Running a command-line test scenario
+      # Running a CLI test scenario
 
-      Every command goes through run-command (or run-command-with-input when
-      the program reads from its input). Each call records the command, its
-      exit code, its output and its duration as a receipt.
+      1. Prepare a scenario for the requested project. If the scenario requires
+         network access, use the network preparation tool with a non-mutating
+         HTTP(S) endpoint. Otherwise use ordinary preparation. An infrastructure
+         or preflight error is ERROR; do not run commands on the host instead.
+      2. Use the returned scenario ID for every command in this scenario. The
+         workspace persists across commands and is retained for inspection.
+         Each command gets a fresh namespace; background servers do not persist.
+      3. Check the program is available, then execute the scenario's steps in
+         order. Put recorded evidence for one scenario under the supplied
+         receipts folder, in a scenario-specific subfolder. Name each command
+         NN-what-it-does, numbering from 01. Use the input-enabled command
+         when needed. The workspace is scratch space, not evidence.
+      4. Compare recorded exit codes and output with the expected outcomes.
+         A failed expectation is FAIL; missing dependencies, sandbox errors,
+         missing secrets or ambiguous steps are ERROR. Do not infer success.
+      5. Secrets are referenced by environment variable name, never value.
+         Return a scenario report with the verdict, observed steps and absolute
+         receipt paths, without inlining receipt contents or logs. For FAIL,
+         identify the first failing step and why.
 
-      1. Use the working folder you were given for every command. The
-         receipts folder is an absolute path that belongs to Revisor, not to
-         the project under test: pass it to the command tool exactly as
-         given, and never create, copy or mirror receipts anywhere else.
-         Name each command `<scenario-slug>-<NN>-<what-it-does>`, numbering
-         from 01. Run only the commands the scenario needs.
-      2. Check the program can run first (for example `<program> --version`
-         or `--help`). If it can't, the scenario is ERROR.
-      3. Run each step as written. Check the expected outcome against the
-         exit code, the output and any files the step should create;
-         inspect files with commands such as `ls`, `cat` or `test -f`.
-      4. Write files only inside `<receipts folder>/<scenario-slug>-work/`,
-         unless the scenario says to change the project. Never run commands
-         that delete or change anything outside those two places.
-      5. Commands get no input and stop after a timeout. Give input with
-         run-command-with-input; never start an interactive program without
-         it.
-      6. Login secrets are environment variables, by name: write `$NAME` in
-         the command, never a value. Output shows them as `[secret:NAME]`.
-      7. A failed expectation is FAIL. Something that prevented testing (the
-         program is missing, a secret is missing, a step is ambiguous) is
-         ERROR. A non-zero exit code is a failure only when the scenario
-         expected success.
-
-      Report, in this order: the scenario name; PASS, FAIL or ERROR; each
-      step with the command, what you expected, what you saw (exit code and
-      the relevant output) and its receipt path; and for a FAIL, the first
-      step that failed and why.
 integrations:
   cli:
-    - name: run-command
-      description: Run one shell command in the given working folder for a CLI test, and record it as a receipt
+    - name: prepare-scenario
+      description: Copy the project into a persistent isolated scenario workspace and
+        preflight the sandbox
       command: node
-      args: [tools/revisor-exec.mjs, "{receipts}", "{name}", "{workdir}", "{command}"]
+      args: [ tools/revisor-exec.mjs, prepare, "{workdir}" ]
+      approve: false
+    - name: prepare-network-scenario
+      description: Prepare a scenario and preflight connectivity to the specified
+        HTTP(S) endpoint
+      command: node
+      args: [ tools/revisor-exec.mjs, prepare, "{workdir}", "{url}" ]
+      approve: false
+    - name: run-command
+      description: Run one shell command in a prepared scenario sandbox and record a receipt
+      command: node
+      args:
+        [
+          tools/revisor-exec.mjs,
+          run,
+          "{receipts}",
+          "{name}",
+          "{scenario}",
+          "{command}"
+        ]
       approve: false
     - name: run-command-with-input
-      description: Run one shell command with the given text as its input, and record it as a receipt
+      description: Run one shell command in a prepared scenario sandbox with the given
+        text as input, and record a receipt
       command: node
-      args: [tools/revisor-exec.mjs, "{receipts}", "{name}", "{workdir}", "{command}", "{input:file}"]
+      args:
+        [
+          tools/revisor-exec.mjs,
+          run,
+          "{receipts}",
+          "{name}",
+          "{scenario}",
+          "{command}",
+          "{input:file}"
+        ]
       approve: false
+    - command: herdr
+      args:
+        - pane
+        - rename
+        - "{pane}"
+        - "{name}"
+      description: Rename this Herdr pane (wC:pJ) to revisor-agent; the earlier
+        attempt failed only because cli:pane:current is not a pane id.
+      name: herdr-pane-rename
   mcp:
     - name: playwright
       config:
-        command: npx
+        command: bash
         args:
+          - tools/playwright-mcp.sh
           - -y
           - "@playwright/mcp@0.0.83"
           - --headless
@@ -148,31 +196,94 @@ integrations:
           - "1280,800"
           - --output-dir
           - data/receipts
-          - --secrets
-          - .forge/test-secrets.env
         description: A real headless Chromium browser driven by Playwright
         # Tools that reach outside the page under test: arbitrary code on this
         # machine, and sending local files to the site.
-        excludeTools: [browser_run_code_unsafe, browser_file_upload, browser_drop]
+        excludeTools: [ browser_run_code_unsafe, browser_file_upload, browser_drop ]
 workflows:
   - name: test
-    description: Run a web or command-line test request and return the verdict, each scenario's result and the receipts
-    agents: [web-tester, cli-tester]
+    description: Run a web or command-line test request and return the verdict, each
+      scenario's result and the receipts
+    agents: [ web-tester, cli-tester ]
     entry: lead
 documents:
   - name: test-report
     writer: lead
-    purpose: A test result another agent or a person can act on without rerunning the test.
+    purpose: A test result another agent or a person can act on without rerunning
+      the test.
     sections:
       - heading: Verdict
-        guide: "One sentence on why the whole request passed, failed or could not be tested."
+        guide: One sentence on why the whole request passed, failed or could not be
+          tested.
       - heading: Scenarios
-        guide: "For each scenario: name, PASS/FAIL/ERROR, the first failing step and why, and its receipt paths."
+        guide: "For each scenario: name, PASS/FAIL/ERROR, the first failing step and
+          why, and its full absolute receipt paths."
       - heading: Evidence
-        guide: "Every receipt path (screenshots, command records), and console errors, grouped by scenario."
+        guide: Every receipt path (screenshots, command records) and console errors,
+          grouped by scenario; each path written in full from /, exactly as the
+          tester reported it.
       - heading: Not tested
-        guide: "Anything requested that could not be tested, and the reason."
+        guide: Anything requested that could not be tested, and the reason.
     rules:
-      - "The report's first line is exactly `Verdict: PASS`, `Verdict: FAIL` or `Verdict: ERROR`. Callers read it."
+      - "The report's first line is exactly `Verdict: PASS`, `Verdict: FAIL` or
+        `Verdict: ERROR`. Callers read it."
       - Use only what the testers reported.
       - Keep receipt paths exactly as reported.
+      - Write every receipt, screenshot and artifact path as a full absolute
+        path starting at / (for example
+        /home/ops/projects/revisor/agent/data/receipts/<scenario>/<receipt>.txt);
+        never a path relative to the project directory.
+  - writer: web-tester
+    purpose: One scenario's observed result and the evidence for it, in a shape the
+      lead can assemble into the final report without opening any evidence file.
+    sections:
+      - heading: Scenario
+        guide: The scenario name, and whether it was run as given, in one line.
+      - heading: Result
+        guide: "One word: PASS, FAIL or ERROR."
+      - heading: Steps
+        guide: "One row per step: what you did, what you expected, what you saw, and
+          that step's evidence path."
+      - heading: First failure
+        guide: The earliest step that diverged and why it did, or 'none'.
+      - heading: Evidence
+        guide: Every screenshot and console record for this scenario, each as a full
+          absolute path; console errors are listed here.
+      - heading: Limits
+        guide: What could not be tested, and why.
+    rules:
+      - Result is exactly one of PASS, FAIL or ERROR.
+      - No step without an evidence path or an explicit 'no artifact'.
+      - Cite evidence by absolute path; never inline a screenshot, a page dump
+        or a file's text.
+      - A step that could not run is ERROR with the reason, never FAIL.
+      - Keep every path exactly as the tool returned it.
+    name: web-tester-report
+  - writer: cli-tester
+    purpose: One scenario's observed result and the evidence for it, in a shape the
+      lead can assemble into the final report without opening any evidence file.
+    sections:
+      - heading: Scenario
+        guide: The scenario name, and whether it was run as written, in one line.
+      - heading: Result
+        guide: "One word: PASS, FAIL or ERROR."
+      - heading: Steps
+        guide: "One row per step: the command, what you expected, what you saw (exit
+          code and the relevant output), and that step's receipt path."
+      - heading: First failure
+        guide: The earliest step that diverged and why it did, or 'none'.
+      - heading: Evidence
+        guide: Every command receipt for this scenario, each as a full absolute path,
+          named as it was recorded.
+      - heading: Limits
+        guide: "What could not be tested, and why: prepare errors, missing program,
+          missing secret, host-mode mismatches."
+    rules:
+      - Result is exactly one of PASS, FAIL or ERROR.
+      - No step without a receipt path or an explicit 'no artifact'.
+      - Cite evidence by absolute path; never inline a receipt's contents or a
+        log dump.
+      - A non-zero exit code is a failure only when the scenario expected
+        success.
+      - Keep every path exactly as the recording tool returned it.
+    name: cli-tester-report

@@ -3,10 +3,13 @@
   "defaultModel": "deepseek-flash",
   "defaultThinkingLevel": "medium",
   "defaultTools": [
-    "subagent"
+    "subagent",
+    "read",
+    "ls",
+    "find"
   ],
   "packages": [
-    "git:github.com/mihaiiova/pi-forge@v0.21.0",
+    "git:github.com/mihaiiova/pi-forge@v0.25.0",
     "npm:pi-subagents@0.83.1"
   ]
 }
