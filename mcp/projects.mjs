@@ -1,5 +1,5 @@
 /**
- * The projects TOaD has been set up in, and each project's own defaults.
+ * The projects Toad has been set up in, and each project's own defaults.
  *
  * The list lives in <config>/projects.json so one viewer (`toad ui`) can show
  * every project's runs. A project's defaults live in its .toad/toad.yaml and
@@ -61,7 +61,7 @@ export function listProjects() {
   });
 }
 
-export const CONFIG_TEMPLATE = `# TOaD settings for this project. Commit this file; it holds no secrets.
+export const CONFIG_TEMPLATE = `# Toad settings for this project. Commit this file; it holds no secrets.
 # Handoffs fill in anything they leave out from here.
 #
 # web:

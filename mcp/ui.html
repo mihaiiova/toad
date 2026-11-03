@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>TOaD runs</title>
+<title>Toad runs</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2322c55e'/%3E%3Ccircle cx='11' cy='13' r='3' fill='%23fff'/%3E%3Ccircle cx='21' cy='13' r='3' fill='%23fff'/%3E%3Cpath d='M9 20q7 5 14 0' stroke='%23fff' stroke-width='2.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
 <style>
 :root {
@@ -261,7 +261,7 @@ h1 { font-size: 22px; line-height: 1.25; margin: 0; letter-spacing: -.015em; }
   <aside class="sidebar" aria-label="Projects">
     <a class="brand" href="#/">
       <span class="logo"><svg viewBox="0 0 32 32" width="18" height="18"><circle cx="11" cy="13" r="3.2" fill="#fff"/><circle cx="21" cy="13" r="3.2" fill="#fff"/><path d="M9 20q7 5 14 0" stroke="#fff" stroke-width="2.6" fill="none" stroke-linecap="round"/></svg></span>
-      TOaD <small>v__VERSION__</small>
+      Toad <small>v__VERSION__</small>
     </a>
     <button class="search-btn" id="open-switcher" type="button">
       <svg class="i" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
@@ -431,7 +431,7 @@ function passRate(p) { return p.finished ? `${Math.round(100 * p.passed / p.fini
 
 function homePage() {
   if (!data.projects.length) return topbar([{ label: 'All projects' }]) + `<div class="page"><div class="empty">
-    ${ICON.project}<h2>No projects yet</h2><p>Ask your coding agent to <em>set up TOaD in this project and test …</em>,<br>or call <code>setup_project</code>. Runs appear here as they happen.</p></div></div>`;
+    ${ICON.project}<h2>No projects yet</h2><p>Ask your coding agent to <em>set up Toad in this project and test …</em>,<br>or call <code>setup_project</code>. Runs appear here as they happen.</p></div></div>`;
   const total = data.projects.reduce((n, p) => n + p.runs, 0), active = data.projects.reduce((n, p) => n + p.active, 0);
   const finished = data.projects.reduce((n, p) => n + p.finished, 0), passed = data.projects.reduce((n, p) => n + p.passed, 0);
   return topbar([{ label: 'All projects' }]) + `<div class="page">
@@ -573,7 +573,7 @@ function markdown(src, ctx) {
 function reportBody(report) {
   const lines = report.replace(/\r/g, '').split('\n');
   let i = 0;
-  while (i < lines.length && (/^(# TOaD run|Status: \S+|Verdict: \S+)\s*$/.test(lines[i]) || !lines[i].trim())) i++;
+  while (i < lines.length && (/^(# (?:Toad|TOaD) run|Status: \S+|Verdict: \S+)\s*$/.test(lines[i]) || !lines[i].trim())) i++;
   return lines.slice(i).join('\n');
 }
 function scenarioVerdict(name, report) {
@@ -637,7 +637,7 @@ function runPage(r) {
     const v = d.report ? scenarioVerdict(s.name, d.report) : null;
     return `<div class="scenario"><span class="num">${i + 1}</span><span class="name">${esc(s.name)}</span><span>${v ? badge(v) : ''}</span>
       <div class="line"><b>Steps</b> ${esc(s.steps)}</div><div class="line"><b>Expected</b> ${esc(s.expected)}</div></div>`;
-  }).join('') : `<div class="empty">No scenarios were given; TOaD derived them from the goal. See the report.</div>`;
+  }).join('') : `<div class="empty">No scenarios were given; Toad derived them from the goal. See the report.</div>`;
   if (r.tab === 'receipts') body = d.files.length ? groups(d.files).map(([name, files]) => {
     const images = files.filter(f => isImage(f.path)), others = files.filter(f => !isImage(f.path));
     return `<div class="group"><h3>${name ? `<b>${esc(name)}</b>` : '<b>Run</b>'}<span>${files.length} file${files.length === 1 ? '' : 's'}</span></h3>
@@ -679,7 +679,7 @@ function render() {
   lastMain = html;
   $('#main').scrollTop = scroll;
   if (focused === 'run-filter') { const el = $('#run-filter'); el.focus(); el.setSelectionRange(caret, caret); }
-  document.title = r.view === 'home' ? 'TOaD runs' : `${$('.crumbs .here')?.textContent ?? ''} · TOaD`;
+  document.title = r.view === 'home' ? 'Toad runs' : `${$('.crumbs .here')?.textContent ?? ''} · Toad`;
   if (r.view === 'run' && r.tab === 'receipts') loadTexts(r);
   if (r.view === 'run' && r.file && !ui.scrolledTo) {
     const el = $$('.receipt-row').find(x => x.dataset.path === r.file) || $$('.shot').find(x => x.dataset.path === r.file);

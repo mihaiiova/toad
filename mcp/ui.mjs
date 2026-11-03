@@ -1,6 +1,6 @@
 /**
- * TOaD run viewer: one localhost web interface over the runs of every project
- * TOaD has been set up in (the list in ~/.config/toad/projects.json).
+ * Toad run viewer: one localhost web interface over the runs of every project
+ * Toad has been set up in (the list in ~/.config/toad/projects.json).
  *
  *   toad ui                # http://127.0.0.1:8787, or the next free port
  *   toad ui --port 9000    # exactly this port

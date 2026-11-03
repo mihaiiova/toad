@@ -1,5 +1,5 @@
 /**
- * Where TOaD keeps per-user state outside projects:
+ * Where Toad keeps per-user state outside projects:
  *
  *   config   ~/.config/toad        the list of set-up projects, the model key
  *   data     ~/.local/share/toad   the prepared agent, one folder per version

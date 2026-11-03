@@ -22,7 +22,7 @@ function project(t, name, runs) {
     mkdirSync(join(run, 'receipts', 'scenario'), { recursive: true });
     mkdirSync(join(run, 'reports'));
     writeFileSync(join(run, 'handoff.yaml'), JSON.stringify({ version: 1, kind: 'web', target: { url: 'http://localhost:3000' }, request: { goal } }));
-    writeFileSync(join(run, 'reports', 'report.md'), `# TOaD run\n\nStatus: ok\n\nVerdict: ${verdict}\n`);
+    writeFileSync(join(run, 'reports', 'report.md'), `# Toad run\n\nStatus: ok\n\nVerdict: ${verdict}\n`);
     writeFileSync(join(run, 'receipts', 'scenario', '01-home.txt'), 'evidence');
   }
   registerProject(path);

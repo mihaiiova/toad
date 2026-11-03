@@ -1,4 +1,4 @@
-# TOaD: tests web apps in a real browser and command-line programs in a
+# Toad: tests web apps in a real browser and command-line programs in a
 # shell, and returns the results with receipts (screenshots, recorded
 # commands). Called directly with ./run --workflow test, or by other agents
 # through ../mcp.
