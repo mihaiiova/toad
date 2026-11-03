@@ -35,7 +35,7 @@ systemPrompt: |
   
   The owner agreed these formats. Use exactly these sections, in this order,
   within the length limit. If a format no longer fits the work, say so and
-  suggest a change (applied with /forge) instead of deviating.
+  suggest a change (applied with /faur) instead of deviating.
   
   ### cli-tester-report (returned in your output)
   
@@ -59,4 +59,4 @@ systemPrompt: |
   - Keep every path exactly as the recording tool returned it.
 ---
 
-<!-- forge:generated v1 sha256=c033279ebf9b83da6cb6559c3a4811d1848026fb559a207bf0917c812a553d54 -->
+<!-- forge:generated v1 sha256=0e4ab9c42d1b8bb697275f10763099c58471ad6d2287cf006d3592ec2c8b6101 -->

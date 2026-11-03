@@ -19,7 +19,7 @@ systemPrompt: |
   
   - **Built-in tools:** none
   - **MCP servers:**
-    - `playwright` (all tools; tools named `mcp__playwright__<tool>`) — A real headless Chromium browser driven by Playwright
+    - `playwright` (all tools except `mcp__playwright__browser_run_code_unsafe`, `mcp__playwright__browser_file_upload`, `mcp__playwright__browser_drop`; tools named `mcp__playwright__<tool>`) — A real headless Chromium browser driven by Playwright
   - **Skills:**
     - `web-test-scenario` — How to run one web test scenario with the Playwright MCP and record evidence
   
@@ -29,7 +29,7 @@ systemPrompt: |
   
   The owner agreed these formats. Use exactly these sections, in this order,
   within the length limit. If a format no longer fits the work, say so and
-  suggest a change (applied with /forge) instead of deviating.
+  suggest a change (applied with /faur) instead of deviating.
   
   ### web-tester-report (returned in your output)
   
@@ -53,4 +53,4 @@ systemPrompt: |
   - Keep every path exactly as the tool returned it.
 ---
 
-<!-- forge:generated v1 sha256=345f006747ac97c01ac5e6787422fa054b5a320c43ea46e739077e648ff3fb79 -->
+<!-- forge:generated v1 sha256=f03733466210229f7bec014237715eb88e99ea8900fa833f4aad317a8469e10e -->
