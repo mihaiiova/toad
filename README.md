@@ -1,13 +1,13 @@
-# TOaD
+# Toad
 
 A testing agent for the web apps and command-line programs you build. You say what
-should work, in plain words; TOaD tests it in a real headless browser or a
+should work, in plain words; Toad tests it in a real headless browser or a
 sandboxed container and returns a verdict (PASS, FAIL or ERROR), a report per
 scenario, and receipts: screenshots for web steps, and a record of every
 command (exit code, output, duration) for CLI steps.
 
 It is built to be called by your coding agent (Claude Code, Pi, Codex, Cursor
-or any MCP client): the agent hands TOaD a test, TOaD runs it independently,
+or any MCP client): the agent hands Toad a test, Toad runs it independently,
 and the agent gets back evidence instead of its own opinion of its work.
 
 ```sh
@@ -33,7 +33,7 @@ npm install -g github:mihaiiova/toad && toad setup
 On Linux without Docker or Podman, CLI tests can use
 [Bubblewrap](https://github.com/containers/bubblewrap) 0.8 or later instead.
 
-**Windows:** TOaD's code is written to run there, but it is not verified yet,
+**Windows:** Toad's code is written to run there, but it is not verified yet,
 and the Pi Forge workflow runner it builds on has not been tested on Windows.
 Use WSL until a release says otherwise.
 
@@ -44,9 +44,8 @@ npm install -g github:mihaiiova/toad
 toad setup
 ```
 
-TOaD installs straight from GitHub for now (it is not on npm yet). While the
-repository is private, this needs git access to it over SSH. Add `#v0.3.0`, or
-any tag or commit, to install a specific version instead of `main`.
+Toad installs straight from GitHub for now (it is not on npm yet). Add
+`#<commit>` to install a specific version instead of `main`.
 
 `toad setup` walks through everything once, and can be run again at any time:
 
@@ -58,7 +57,7 @@ any tag or commit, to install a specific version instead of `main`.
    image (`node:22-bookworm`, about 1 GB; otherwise it downloads on the first
    CLI test).
 5. Finds Claude Code, Codex and Pi on your machine and offers to register
-   TOaD with each.
+   Toad with each.
 
 `toad setup --yes` accepts every default without asking; it then takes the key
 from `DEEPSEEK_API_KEY`. Check the result any time with:
@@ -78,7 +77,7 @@ stay), and asks you to restart your coding agents.
 
 ## Connect your coding agent
 
-`toad setup` registers TOaD with the coding agents it finds. To do it by hand,
+`toad setup` registers Toad with the coding agents it finds. To do it by hand,
 register the command `toad mcp` once; every project uses the same server, and
 each call says which project it is for.
 
@@ -99,18 +98,18 @@ entry in its MCP settings:
 }
 ```
 
-TOaD sends progress every 15 seconds while it tests, so clients that reset
+Toad sends progress every 15 seconds while it tests, so clients that reset
 their timeout on progress wait for long runs. If yours does not, raise its MCP
 tool timeout to 15 minutes or more.
 
-Restart the coding agent, then ask it to *"list the TOaD tools"*. You should
+Restart the coding agent, then ask it to *"list the Toad tools"*. You should
 see `get_toad_guide`, `setup_project`, `run_project_test`, `run_web_test` and
 `run_cli_test`.
 
 The server also gives the agent a guide (the `get_toad_guide` tool and the
 `toad://guide` resource) on how to write good tests and handle credentials.
 Most clients pick it up from the server's instructions; if yours does not,
-tell the agent: *"Call get_toad_guide before using TOaD."*
+tell the agent: *"Call get_toad_guide before using Toad."*
 
 ## Test a project
 
@@ -118,10 +117,10 @@ tell the agent: *"Call get_toad_guide before using TOaD."*
 
 In your project, ask your coding agent in plain words, for example:
 
-> Set up TOaD in this project, then use it to test the sign-up flow on
+> Set up Toad in this project, then use it to test the sign-up flow on
 > http://localhost:3000: a new user can register and lands on the dashboard.
 
-> Use TOaD to test our CLI: `node dist/cli.js --help` lists every command,
+> Use Toad to test our CLI: `node dist/cli.js --help` lists every command,
 > and `init` in an empty folder creates `config.json`.
 
 The agent calls `setup_project` once, writes a handoff (the target, the goal
@@ -131,9 +130,9 @@ back the verdict, the report and the receipt paths.
 Before you ask:
 
 - **Web apps:** start the app first. The browser runs on your machine, so
-  `localhost` works. Use a test or staging environment: TOaD clicks, types
+  `localhost` works. Use a test or staging environment: Toad clicks, types
   and submits forms.
-- **CLIs:** TOaD copies the project into a fresh workspace and runs each
+- **CLIs:** Toad copies the project into a fresh workspace and runs each
   command in a Linux container; it never changes your files. Build the
   program first, or let the scenario build it. Dependencies installed on a Mac
   or Windows machine may not run in Linux (native modules especially); a
@@ -167,7 +166,7 @@ TOAD_TEST_EMAIL=tester@example.com
 TOAD_TEST_PASSWORD=a-test-password
 ```
 
-Then tell your agent the names, never the values. TOaD passes only the names
+Then tell your agent the names, never the values. Toad passes only the names
 a handoff asks for to that run: the browser types them into the page, or CLI
 commands read them as `$NAME`. `.toad/.gitignore` keeps `.env` and `runs/`
 out of git.
@@ -194,7 +193,7 @@ toad ui                 # http://127.0.0.1:8787, or the next free port
 toad ui --port 9000
 ```
 
-One page shows the runs of every project TOaD is set up in, newest first,
+One page shows the runs of every project Toad is set up in, newest first,
 with a project filter. Open a run to see the scenarios, the report, every
 screenshot and every recorded command. It listens on localhost only.
 
@@ -211,7 +210,7 @@ A project joins the list when it is set up or runs a test.
 
 | Command | |
 |---|---|
-| `toad setup [--yes] [--no-register] [--skip-browser] [--skip-image] [--force]` | Prepare or repair everything TOaD needs |
+| `toad setup [--yes] [--no-register] [--skip-browser] [--skip-image] [--force]` | Prepare or repair everything Toad needs |
 | `toad doctor` | Check the agent, model key, browser, CLI sandbox and coding agents |
 | `toad update` | Install the latest version from GitHub and prepare it |
 | `toad mcp` | The MCP server; coding agents start it |
@@ -255,7 +254,7 @@ attaches up to 8 images; `paths` returns only file paths):
 For `"kind": "cli"`, the target is
 `{ "workdir": "/abs/path", "program": "node dist/cli.js", "image": "node:22-bookworm" }`
 (`image` optional). Fields left out of `target`, and the timeout, come from
-`toad.yaml`; the handoff wins where both are set. Without scenarios, TOaD
+`toad.yaml`; the handoff wins where both are set. Without scenarios, Toad
 derives them from the goal.
 
 The result has the report as text and as structured content: `verdict`
@@ -267,7 +266,7 @@ is not.
 
 ### Where things live
 
-TOaD is installed once; everything about a project stays in that project.
+Toad is installed once; everything about a project stays in that project.
 
 | Where | What |
 |---|---|
@@ -286,13 +285,13 @@ Environment variables, set where the MCP server is registered:
 | Variable | Default | |
 |---|---|---|
 | `DEEPSEEK_API_KEY` | the saved key | The model key; overrides the one `toad setup` saved |
-| `TOAD_MAX_CONCURRENT_RUNS` | `2` | Runs at once across every TOaD server on the machine; further calls wait |
+| `TOAD_MAX_CONCURRENT_RUNS` | `2` | Runs at once across every Toad server on the machine; further calls wait |
 | `TOAD_CLI_SANDBOX` | `auto` | `container`, `bwrap`, or `auto` (a running container runtime, else Bubblewrap) |
 | `TOAD_CONTAINER_RUNTIME` | first that answers | `docker` or `podman` |
 | `TOAD_CLI_IMAGE` | `node:22-bookworm` | Image for CLI tests when the project does not set one |
 | `TOAD_COMMAND_TIMEOUT_S` | `120` | Time limit for each CLI command |
 | `TOAD_SCENARIO_TTL_DAYS` | `7` | When unused CLI workspaces are removed; `0` keeps them |
-| `TOAD_CONFIG_DIR`, `TOAD_DATA_DIR`, `TOAD_CACHE_DIR`, `TOAD_RUNTIME_DIR` | see above | Move TOaD's per-user folders |
+| `TOAD_CONFIG_DIR`, `TOAD_DATA_DIR`, `TOAD_CACHE_DIR`, `TOAD_RUNTIME_DIR` | see above | Move Toad's per-user folders |
 | `TOAD_AGENT_DIR` | the prepared agent | Use an agent somewhere else |
 
 ### How it is built
@@ -358,7 +357,7 @@ whose first line is `Verdict: PASS`, `FAIL` or `ERROR`.
 
 ## Security and limits
 
-**TOaD runs with your permissions.** The agent, its tools and the browser run
+**Toad runs with your permissions.** The agent, its tools and the browser run
 as your user. Use it on code and sites you trust, with test accounts and
 restricted keys.
 
@@ -384,7 +383,7 @@ them.
   whole environment to Pi, its tools and subprocesses, and other processes of
   your user can read it. A tested program can send credentials over the
   network or write them into its workspace.
-- After the run, TOaD removes the per-run file. If Forge reports incomplete
+- After the run, Toad removes the per-run file. If Forge reports incomplete
   cleanup, or the server is killed, it stays in the runtime folder's
   `secrets/` and the result names it; remove it once no process can still be
   using it.
@@ -426,7 +425,7 @@ prepared copy. Change the agent with `/forge` inside `agent/run`.
 
 `.github/workflows/test.yml` runs the tests on Linux, macOS and Windows for
 every push. Installs come from GitHub for now, so pushing to `main` is a
-release. Once TOaD goes to npm, publish a version with:
+release. Once Toad goes to npm, publish a version with:
 
 ```sh
 npm version minor          # or patch / major: updates package.json and tags
@@ -434,3 +433,7 @@ git push --follow-tags     # the release workflow tests and publishes the tag
 ```
 
 Publishing needs an npm automation token in the repository secret `NPM_TOKEN`.
+
+## License
+
+[MIT](LICENSE)

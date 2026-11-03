@@ -1,6 +1,6 @@
 /**
  * `toad setup`, `toad doctor` and `toad update`: everything after
- * `npm install -g`, so installing TOaD is one line and updating is one more.
+ * `npm install -g`, so installing Toad is one line and updating is one more.
  */
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
@@ -11,7 +11,7 @@ import { pathToFileURL } from 'node:url';
 import { PACKAGE_ROOT, VERSION, installedAgentDir, modelReady, prepareAgent, readCredentials, resolveAgent, saveCredential } from './agent.mjs';
 import { chooseSandbox } from '../agent/tools/toad-sandbox.mjs';
 
-// TOaD installs straight from GitHub until it is published to npm. npm fetches
+// Toad installs straight from GitHub until it is published to npm. npm fetches
 // the tarball over HTTPS and falls back to an SSH clone for a private repository.
 const SOURCE = 'github:mihaiiova/toad';
 const CLI = join(PACKAGE_ROOT, 'mcp', 'cli.mjs');
@@ -66,7 +66,7 @@ const CLIENTS = [
     add: cmd => run('codex', ['mcp', 'add', 'toad', '--', ...cmd]) },
   { name: 'Pi', command: 'pi',
     registered: () => !!piConfig()?.mcpServers?.toad,
-    // The command line Pi starts, to notice a registration pointing at another copy of TOaD.
+    // The command line Pi starts, to notice a registration pointing at another copy of Toad.
     current: () => { const entry = piConfig()?.mcpServers?.toad; return entry ? [entry.command, ...(entry.args ?? [])] : null; },
     add: cmd => {
       const { command: _c, args: _a, ...previous } = piConfig()?.mcpServers?.toad ?? {};
@@ -104,7 +104,7 @@ function nodeOk() {
 }
 
 export async function setup(options = {}) {
-  console.log(`TOaD ${VERSION} setup`);
+  console.log(`Toad ${VERSION} setup`);
 
   step('Node.js');
   if (!nodeOk()) { bad(`Node.js ${MIN_NODE.join('.')} or later is required (found ${process.versions.node})`); process.exitCode = 1; return; }
@@ -137,7 +137,7 @@ export async function setup(options = {}) {
   const saved = readCredentials()[KEY];
   let key = saved;
   if (process.env[KEY] && process.env[KEY] !== saved) {
-    if (await confirm(`Save the ${KEY} from your environment for TOaD?`, options)) key = process.env[KEY];
+    if (await confirm(`Save the ${KEY} from your environment for Toad?`, options)) key = process.env[KEY];
   }
   if (key && key === saved && !options.yes && process.stdin.isTTY && !await confirm('A key is already saved. Keep it?', options)) key = undefined;
   const loggedIn = !key && modelReady(agent);
@@ -148,10 +148,10 @@ export async function setup(options = {}) {
     if (status === 'invalid') { bad('DeepSeek rejected that key; try again'); key = undefined; }
     else if (status === 'unknown') warn('Could not reach DeepSeek to check the key; saving it anyway');
   }
-  if (key && key !== saved) { saveCredential(KEY, key); ok('Key saved (only TOaD reads it)'); }
+  if (key && key !== saved) { saveCredential(KEY, key); ok('Key saved (only Toad reads it)'); }
   else if (key) ok('Key saved earlier');
   else if (loggedIn) ok('The agent is already logged in to DeepSeek');
-  else { bad(`No key: tests cannot run. Run \`toad setup\` again, or set ${KEY} where your coding agent starts TOaD.`); process.exitCode = 1; }
+  else { bad(`No key: tests cannot run. Run \`toad setup\` again, or set ${KEY} where your coding agent starts Toad.`); process.exitCode = 1; }
 
   step('CLI tests');
   try {
@@ -172,25 +172,25 @@ export async function setup(options = {}) {
   const command = serverCommand();
   const found = CLIENTS.filter(client => onPath(client.command));
   if (options.noRegister) warn('Skipped (--no-register)');
-  else if (!found.length) warn(`None found. Register TOaD with your MCP client as: ${command.join(' ')}`);
+  else if (!found.length) warn(`None found. Register Toad with your MCP client as: ${command.join(' ')}`);
   for (const client of found) {
     if (options.noRegister) break;
     if (client.registered()) {
       const current = client.current?.();
       if (!current || current.join(' ') === command.join(' ')) { ok(`${client.name}: already registered`); continue; }
-      if (!await confirm(`${client.name} starts TOaD as \`${current.join(' ')}\`. Switch it to \`${command.join(' ')}\`?`, options)) { warn(`${client.name}: left as \`${current.join(' ')}\``); continue; }
-    } else if (!await confirm(`Register TOaD with ${client.name}?`, options)) { warn(`${client.name}: skipped`); continue; }
+      if (!await confirm(`${client.name} starts Toad as \`${current.join(' ')}\`. Switch it to \`${command.join(' ')}\`?`, options)) { warn(`${client.name}: left as \`${current.join(' ')}\``); continue; }
+    } else if (!await confirm(`Register Toad with ${client.name}?`, options)) { warn(`${client.name}: skipped`); continue; }
     const result = client.add(command);
     if (result.status === 0) ok(`${client.name}: registered`);
     else bad(`${client.name}: ${(result.stderr || result.stdout || '').trim().split('\n').at(-1) || 'registration failed'}`);
   }
-  if (found.length && !options.noRegister) console.log('  Restart your coding agents to pick TOaD up.');
+  if (found.length && !options.noRegister) console.log('  Restart your coding agents to pick Toad up.');
 
-  console.log(`\nDone. Ask your coding agent to "set up TOaD in this project and test …".\nSee every run with: toad ui`);
+  console.log(`\nDone. Ask your coding agent to "set up Toad in this project and test …".\nSee every run with: toad ui`);
 }
 
 export async function doctor() {
-  console.log(`TOaD ${VERSION}`);
+  console.log(`Toad ${VERSION}`);
   let healthy = true;
   const check = (pass, good, problem) => { if (pass) ok(good); else { bad(problem); healthy = false; } };
   check(nodeOk(), `Node.js ${process.versions.node}`, `Node.js ${MIN_NODE.join('.')}+ required (found ${process.versions.node})`);

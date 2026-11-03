@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * TOaD MCP: a thin stdio MCP server in front of the TOaD testing bot.
+ * Toad MCP: a thin stdio MCP server in front of the Toad testing bot.
  *
  * It holds no testing logic. Each call builds a test request, runs the bot's
  * declared workflow (`<agent>/run --workflow test`), and maps the workflow's
@@ -32,7 +32,7 @@ function viewerCommand() {
   }
   return `node ${CLI} ui`;
 }
-const NOT_SET_UP = 'The TOaD agent is not set up on this machine. Run `toad setup`, then retry.';
+const NOT_SET_UP = 'The Toad agent is not set up on this machine. Run `toad setup`, then retry.';
 const MAX_IMAGES = 8;
 const MAX_IMAGE_BYTES = 1024 * 1024;
 
@@ -106,7 +106,7 @@ async function runTest(text, input, extra, { attachImages, projectRun, secretVal
   let message = 'Waiting for a free test slot…';
   // Progress keeps clients' request timeouts from expiring during long tests.
   const tick = () => token !== undefined && extra.sendNotification({ method: 'notifications/progress', params: { progressToken: token, progress: Math.round((Date.now() - started) / 1000), message } }).catch(() => {});
-  // Runs from every TOaD server on this machine share a small number of slots.
+  // Runs from every Toad server on this machine share a small number of slots.
   let lastTick = 0;
   if (projectRun) writeState(projectRun, { state: 'waiting' });
   const release = await acquireSlot({ signal: extra.signal, onWait: () => { if (Date.now() - lastTick >= 15000) { lastTick = Date.now(); tick(); } } });
@@ -170,7 +170,7 @@ function finish(input, result, folder, { attachImages, projectRun }) {
     // The agent's report normally starts with its own verdict line.
     const ownVerdict = /^\s*Verdict:/i.test(result.answer ?? '');
     writeFileSync(join(projectRun, 'reports', 'report.md'), [
-      `# TOaD run`, `Status: ${result.status}`, ...(ownVerdict ? [] : [`Verdict: ${verdict}`]),
+      `# Toad run`, `Status: ${result.status}`, ...(ownVerdict ? [] : [`Verdict: ${verdict}`]),
       result.answer ?? '', result.message ?? '',
     ].filter(Boolean).join('\n\n') + '\n', { mode: 0o600 });
   }
@@ -210,7 +210,7 @@ const outputSchema = {
 };
 
 const server = new McpServer({ name: 'toad', version: VERSION }, {
-  instructions: 'Before using TOaD to test a project, call get_toad_guide for the current testing and credential-safety instructions. The guide is also available as the toad://guide resource. Never put secret values in a handoff or chat.',
+  instructions: 'Before using Toad to test a project, call get_toad_guide for the current testing and credential-safety instructions. The guide is also available as the toad://guide resource. Never put secret values in a handoff or chat.',
 });
 
 // Serve the same guide as the distributable skill; avoid a second copy that
@@ -218,13 +218,13 @@ const server = new McpServer({ name: 'toad', version: VERSION }, {
 const guidePath = resolve(dirname(fileURLToPath(import.meta.url)), '../skills/toad-mcp/SKILL.md');
 const guide = () => readFileSync(guidePath, 'utf8');
 server.registerResource('toad-guide', 'toad://guide', {
-  title: 'TOaD MCP testing guide',
-  description: 'Instructions for coding agents using TOaD, including project setup and credential safety.',
+  title: 'Toad MCP testing guide',
+  description: 'Instructions for coding agents using Toad, including project setup and credential safety.',
   mimeType: 'text/markdown',
 }, async uri => ({ contents: [{ uri: uri.href, mimeType: 'text/markdown', text: guide() }] }));
 server.registerTool('get_toad_guide', {
-  title: 'Get TOaD testing instructions',
-  description: 'Read the TOaD coding-agent skill before preparing a test or project handoff. Includes setup, credential safety, sandbox limitations, and result interpretation.',
+  title: 'Get Toad testing instructions',
+  description: 'Read the Toad coding-agent skill before preparing a test or project handoff. Includes setup, credential safety, sandbox limitations, and result interpretation.',
   inputSchema: {},
   annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
 }, () => ({ content: [{ type: 'text', text: guide() }] }));
@@ -266,7 +266,7 @@ function createIfMissing(path, text, mode = 0o600) {
 }
 
 server.registerTool('setup_project', {
-  title: 'Set up TOaD in a project',
+  title: 'Set up Toad in a project',
   description: 'Initialize .toad in an existing project. Call get_toad_guide for testing and credential guidance. Keep all handoffs, receipts and reports in .toad/runs. Put secret values only in .toad/.env and reference them by name in handoffs. Writes toad.yaml for project defaults (app URL, CLI program, timeout) and adds the project to the machine-wide run viewer. Existing files are never overwritten.',
   inputSchema: { project_path: z.string().min(1).describe('Absolute path to the project directory') },
 }, ({ project_path }) => {
@@ -283,7 +283,7 @@ server.registerTool('setup_project', {
   createIfMissing(join(folder, 'toad.yaml'), CONFIG_TEMPLATE, 0o644);
   readProjectConfig(folder);
   registerProject(dirname(folder));
-  return { content: [{ type: 'text', text: `TOaD project initialized at ${folder}. Store secrets in .env, never in handoffs. Put defaults such as the app URL or CLI program in toad.yaml. Runs are stored in runs/<run-id>/. View every project's runs in a browser with: ${viewerCommand()}. Handoffs reference credentials as {env: NAME}; trusted runs only.` }] };
+  return { content: [{ type: 'text', text: `Toad project initialized at ${folder}. Store secrets in .env, never in handoffs. Put defaults such as the app URL or CLI program in toad.yaml. Runs are stored in runs/<run-id>/. View every project's runs in a browser with: ${viewerCommand()}. Handoffs reference credentials as {env: NAME}; trusted runs only.` }] };
 });
 
 const valueOrEnv = z.object({ env: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/) }).strict();

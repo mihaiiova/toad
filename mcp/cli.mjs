@@ -5,15 +5,15 @@ import { forgetProject, listProjects } from './projects.mjs';
 const USAGE = `Usage:
   toad setup [options]          prepare the agent, browser, model key and coding agents
       --yes                       accept every default without asking
-      --no-register               do not register TOaD with coding agents
+      --no-register               do not register Toad with coding agents
       --skip-browser              do not download the browser
       --skip-image                do not download the CLI test image
       --force                     prepare the agent again from scratch
-  toad doctor                   check that everything TOaD needs is in place
+  toad doctor                   check that everything Toad needs is in place
   toad update [--from <dir>]    install the latest from GitHub (or a local checkout's) and prepare it
   toad mcp                      run the MCP server over stdio (coding agents start this)
   toad ui [--port <port>]       browse every project's runs on localhost
-  toad projects                 list the projects TOaD has been set up in
+  toad projects                 list the projects Toad has been set up in
   toad projects forget <path>   remove one from the list (its files stay)`;
 
 function portOf(args) {
@@ -47,7 +47,7 @@ try {
     const { startUi } = await import('./ui.mjs');
     const { url } = await startUi({ port: portOf(args) });
     const count = listProjects().filter(p => p.present).length;
-    console.log(`TOaD runs: ${url}  (${count} project${count === 1 ? '' : 's'})`);
+    console.log(`Toad runs: ${url}  (${count} project${count === 1 ? '' : 's'})`);
   } else if (command === 'projects' && args[0] === 'forget' && args[1]) {
     console.log(forgetProject(args[1]) ? `Forgot ${args[1]}` : `Not in the list: ${args[1]}`);
   } else if (command === 'projects' && !args.length) {

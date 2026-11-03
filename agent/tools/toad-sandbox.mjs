@@ -93,7 +93,7 @@ export function containerArgs({ runtime, rootless, image }, workspace, { name, e
     '--entrypoint', '/bin/sh', image, '-c', ...workload];
 }
 
-// Workspaces live in the per-user cache, not in the TOaD install.
+// Workspaces live in the per-user cache, not in the Toad install.
 export function scenariosRoot() { return join(toadDirs().cache, 'scenarios'); }
 const DAY = 24 * 60 * 60 * 1000;
 /** Remove workspaces untouched for TOAD_SCENARIO_TTL_DAYS (default 7; 0 keeps them). */

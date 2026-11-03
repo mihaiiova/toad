@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Install TOaD from a local checkout the way npm would from the registry:
+ * Install Toad from a local checkout the way npm would from the registry:
  * pack the folder into the same tarball `npm publish` would upload, then
  * install that tarball globally. The result is a real copy, not a link back
  * to the checkout.

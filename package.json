@@ -1,7 +1,7 @@
 {
   "name": "@mihaiiova/toad",
   "version": "0.3.0",
-  "description": "TOaD: a testing agent your coding agent can call. Tests web apps in a real browser and CLIs in a container, and returns a verdict with receipts.",
+  "description": "Toad: a testing agent your coding agent can call. Tests web apps in a real browser and CLIs in a container, and returns a verdict with receipts.",
   "type": "module",
   "bin": {
     "toad": "mcp/cli.mjs"
@@ -21,7 +21,8 @@
     "agent/tools/*.mjs",
     "!agent/tools/*.test.mjs",
     "agent/data/knowledge/.gitkeep",
-    "skills/"
+    "skills/",
+    "LICENSE"
   ],
   "scripts": {
     "test": "node --test mcp/test/*.test.mjs agent/tools/*.test.mjs",
@@ -34,7 +35,7 @@
     "type": "git",
     "url": "git+https://github.com/mihaiiova/toad.git"
   },
-  "license": "UNLICENSED",
+  "license": "MIT",
   "dependencies": {
     "@earendil-works/pi-coding-agent": "1.5.0",
     "@modelcontextprotocol/sdk": "1.32.1",
