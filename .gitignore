@@ -1,5 +1,5 @@
 # pi local session state
-.pi/
+/.pi/
 
 # transient network captures from web-test runs
 agent/net-baseline-*.json

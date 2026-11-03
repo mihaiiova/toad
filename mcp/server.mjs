@@ -12,7 +12,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { readdirSync, readFileSync, statSync, lstatSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, realpathSync, openSync, closeSync, constants, fstatSync } from 'node:fs';
 import { resolveSecretReferences } from './project-secrets.mjs';
-import { isReservedSecretName } from '../agent/tools/toad-sandbox.mjs';
+import { chooseSandbox, isReservedSecretName } from '../agent/tools/toad-sandbox.mjs';
 import { privateDir, toadDirs } from '../agent/tools/toad-dirs.mjs';
 import { acquireSlot } from './slots.mjs';
 import { CONFIG_TEMPLATE, readProjectConfig, registerProject, withDefaults } from './projects.mjs';
@@ -124,7 +124,8 @@ async function runTest(text, input, extra, { attachImages, projectRun, secretVal
     // A project's image wins over one set where the server is registered.
     if (cliImage) env.TOAD_CLI_IMAGE = cliImage;
     if (secretValues) {
-      const cli = input.handoff?.kind === 'cli';
+      // CLI and API tests run in the CLI sandbox and take secrets as environment variables.
+      const cli = input.handoff?.kind === 'cli' || input.handoff?.kind === 'api';
       secretDir = mkdtempSync(join(privateDir(join(toadDirs().runtime, 'secrets')), cli ? 'toad-cli-' : 'toad-browser-'));
       const secretFile = join(secretDir, cli ? 'secrets.json' : 'secrets.env');
       try {
@@ -289,17 +290,40 @@ server.registerTool('setup_project', {
 const valueOrEnv = z.object({ env: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/) }).strict();
 const handoffSchema = z.object({
   version: z.literal(1),
-  kind: z.enum(['web', 'cli']),
-  target: z.object({ url: z.string().url().optional(), workdir: z.string().optional(), program: z.string().optional(), image: z.string().min(1).optional() }).strict().optional()
+  kind: z.enum(['web', 'cli', 'api']),
+  target: z.object({
+    url: z.string().url().optional().describe('web: the app; api: the API base URL'),
+    workdir: z.string().optional().describe('cli: where the program runs; api: the folder with the OpenAPI description and fixtures, default the project'),
+    program: z.string().optional(),
+    spec: z.string().min(1).optional().describe('api: the OpenAPI description, relative to workdir'),
+    image: z.string().min(1).optional(),
+  }).strict().optional()
     .describe('Omitted fields come from the project\'s .toad/toad.yaml'),
   request: z.object({ goal: z.string().min(1), scenarios }).strict(),
   credentials: z.record(z.string(), valueOrEnv).optional(),
   limitations: z.array(z.string()).optional(),
 }).strict();
 
+const LOOPBACK = /^(https?:\/\/)(localhost|127\.0\.0\.1|\[::1\])(?=[:/]|$)/i;
+/**
+ * What the lead is told about an API under test. Requests run in the CLI
+ * sandbox; in a container, the host's loopback is host.docker.internal.
+ */
+function apiTarget({ url, workdir, spec }) {
+  const lines = [`Test the HTTP API at ${url}.`];
+  let container = false;
+  try { container = chooseSandbox().sandbox === 'container'; } catch {}
+  if (container && LOOPBACK.test(url)) {
+    lines.push(`Requests run in a container, so use ${url.replace(LOOPBACK, '$1host.docker.internal')} instead. The API must listen on all interfaces (0.0.0.0), not only on 127.0.0.1.`);
+  }
+  lines.push(`Working folder, copied into the sandbox, with the API's description and test fixtures: ${workdir}.`);
+  if (spec) lines.push(`The OpenAPI description is ${spec} in that folder; check responses against it.`);
+  return lines;
+}
+
 server.registerTool('run_project_test', {
   title: 'Run a project test from a handoff',
-  description: 'Run a project handoff. First call get_toad_guide for setup and safety guidance. Target fields and the timeout default to the project\'s .toad/toad.yaml. Credentials must be references {env: NAME}, never values. Project runs use a per-run secrets file. Trusted runs only: agents, tools and same-user processes can access credentials; artifacts may expose them.',
+  description: 'Run a project handoff: kind web (a site in a real browser), cli (a command-line program in a sandbox) or api (an HTTP API, with requests recorded as receipts). First call get_toad_guide for setup and safety guidance. Target fields and the timeout default to the project\'s .toad/toad.yaml. Credentials must be references {env: NAME}, never values. Project runs use a per-run secrets file. Trusted runs only: agents, tools and same-user processes can access credentials; artifacts may expose them.',
   inputSchema: { project_path: z.string().min(1), handoff: handoffSchema, timeout_minutes: timeout, screenshots: z.enum(['inline', 'paths']).optional() },
   outputSchema,
 }, async (input, extra) => {
@@ -312,7 +336,8 @@ server.registerTool('run_project_test', {
   registerProject(dirname(folder));
   if (h.kind === 'web' && !h.target.url) throw new Error('A web handoff requires target.url, in the handoff or as web.url in .toad/toad.yaml');
   if (h.kind === 'cli' && (!h.target.workdir || !h.target.program)) throw new Error('A CLI handoff requires target.workdir and target.program, in the handoff or under cli: in .toad/toad.yaml');
-  if (h.kind === 'cli' && Object.values(h.credentials ?? {}).some(ref => isReservedSecretName(ref.env))) throw new Error('CLI credentials contain a reserved environment name');
+  if (h.kind === 'api' && !h.target.url) throw new Error('An API handoff requires target.url, in the handoff or as api.url in .toad/toad.yaml');
+  if (h.kind !== 'web' && Object.values(h.credentials ?? {}).some(ref => isReservedSecretName(ref.env))) throw new Error(`${h.kind.toUpperCase()} credentials contain a reserved environment name`);
   const secretValues = resolveSecretReferences(folder, h.credentials);
   const id = `${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID()}`;
   const run = join(folder, 'runs', id);
@@ -321,11 +346,13 @@ server.registerTool('run_project_test', {
   ensureDirectory(join(run, 'reports'));
   // JSON is a YAML 1.2 subset and avoids an additional YAML parser dependency.
   writeFileSync(join(run, 'handoff.yaml'), JSON.stringify(h, null, 2) + '\n', { mode: 0o600 });
-  const target = h.kind === 'web' ? [`Test ${h.target.url}.`] : [`Test the command-line program in the working folder ${h.target.workdir}.`, `Invoke it as: ${h.target.program}`];
+  const target = h.kind === 'web' ? [`Test ${h.target.url}.`]
+    : h.kind === 'api' ? apiTarget(h.target)
+      : [`Test the command-line program in the working folder ${h.target.workdir}.`, `Invoke it as: ${h.target.program}`];
   const text = [request(target, { what: h.request.goal, scenarios: h.request.scenarios }),
     ...(h.credentials ? [`Credential roles and secret names: ${JSON.stringify(h.credentials)}. ${h.kind === 'web' ? 'Use each env name as the Playwright secret name' : 'Use each env name as a shell environment variable'}; never print its value.`] : []),
     ...(h.limitations?.length ? ['Limitations:', ...h.limitations.map(item => `- ${item}`)] : [])].join('\n');
-  const result = await runTest(text, input, extra, { attachImages: h.kind === 'web' && input.screenshots !== 'paths', projectRun: run, secretValues, cliImage: h.kind === 'cli' ? h.target.image : undefined });
+  const result = await runTest(text, input, extra, { attachImages: h.kind === 'web' && input.screenshots !== 'paths', projectRun: run, secretValues, cliImage: h.kind === 'web' ? undefined : h.target.image });
   result.content[0].text += `\n\nHandoff: ${join(run, 'handoff.yaml')}\nReport: ${join(run, 'reports', 'report.md')}`;
   return result;
 });

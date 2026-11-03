@@ -1,10 +1,10 @@
 # Toad
 
-A testing agent for the web apps and command-line programs you build. You say what
-should work, in plain words; Toad tests it in a real headless browser or a
-sandboxed container and returns a verdict (PASS, FAIL or ERROR), a report per
-scenario, and receipts: screenshots for web steps, and a record of every
-command (exit code, output, duration) for CLI steps.
+A testing agent for the web apps, command-line programs and HTTP APIs you build.
+You say what should work, in plain words; Toad tests it in a real headless
+browser or a sandboxed container and returns a verdict (PASS, FAIL or ERROR), a
+report per scenario, and receipts: screenshots for web steps, and a record of
+every command or request (exit code, output, duration) for CLI and API steps.
 
 It is built to be called by your coding agent (Claude Code, Pi, Codex, Cursor
 or any MCP client): the agent hands Toad a test, Toad runs it independently,
@@ -28,7 +28,7 @@ npm install -g github:mihaiiova/toad && toad setup
 |---|---|
 | Node.js 22.19+ on Linux or macOS | everything (Windows: see below) |
 | An API key for a model provider Pi supports (Anthropic, OpenAI, Google, DeepSeek, OpenRouter and [many more](https://pi.dev/models)) | the model the agent uses |
-| [Docker](https://docs.docker.com/get-docker/) or [Podman](https://podman.io), running | CLI tests; web tests work without it |
+| [Docker](https://docs.docker.com/get-docker/) or [Podman](https://podman.io), running | CLI and API tests; web tests work without it |
 
 On Linux without Docker or Podman, CLI tests can use
 [Bubblewrap](https://github.com/containers/bubblewrap) 0.8 or later instead.
@@ -160,6 +160,10 @@ In your project, ask your coding agent in plain words, for example:
 > Use Toad to test our CLI: `node dist/cli.js --help` lists every command,
 > and `init` in an empty folder creates `config.json`.
 
+> Use Toad to test the orders API on http://localhost:8080/api against
+> `openapi.yaml`: creating an order returns 201 with its ID, and a request
+> without a token gets 401, never a 500.
+
 The agent calls `setup_project` once, writes a handoff (the target, the goal
 and scenarios with expected outcomes) and calls `run_project_test`. It gets
 back the verdict, the report and the receipt paths.
@@ -174,6 +178,13 @@ Before you ask:
   program first, or let the scenario build it. Dependencies installed on a Mac
   or Windows machine may not run in Linux (native modules especially); a
   scenario can run `npm ci` itself.
+- **APIs:** start the API first. Requests run in the same sandbox as CLI
+  commands, and each one is recorded with its status, headers and body. In a
+  container, Toad tells the tester to use `host.docker.internal` for a
+  `localhost` URL, so the API must listen on `0.0.0.0`, not only
+  `127.0.0.1`. Name your OpenAPI description, if you have one, and Toad checks
+  responses against it. Use a test environment: scenarios may create, change
+  and delete data.
 
 ### 2. Save defaults (optional)
 
@@ -187,6 +198,9 @@ cli:
   workdir: .                  # relative to the project, or absolute
   program: node dist/cli.js
   image: node:22-bookworm     # the container image CLI commands run in
+api:
+  url: http://localhost:8080/api
+  spec: openapi.yaml          # relative to workdir, which defaults to the project
 timeout_minutes: 15
 ```
 
@@ -205,7 +219,8 @@ TOAD_TEST_PASSWORD=a-test-password
 
 Then tell your agent the names, never the values. Toad passes only the names
 a handoff asks for to that run: the browser types them into the page, or CLI
-commands read them as `$NAME`. `.toad/.gitignore` keeps `.env` and `runs/`
+commands and API requests read them as `$NAME` (for example an
+`Authorization: Bearer $API_TOKEN` header). `.toad/.gitignore` keeps `.env` and `runs/`
 out of git.
 
 ### What setup creates
@@ -290,7 +305,11 @@ attaches up to 8 images; `paths` returns only file paths):
 
 For `"kind": "cli"`, the target is
 `{ "workdir": "/abs/path", "program": "node dist/cli.js", "image": "node:22-bookworm" }`
-(`image` optional). Fields left out of `target`, and the timeout, come from
+(`image` optional). For `"kind": "api"`, it is
+`{ "url": "http://localhost:8080/api", "spec": "openapi.yaml", "workdir": "/abs/path", "image": "node:22-bookworm" }`;
+only `url` is required, `workdir` (copied into the sandbox, with the spec and
+any request bodies) defaults to the project, and `spec` is relative to it.
+Fields left out of `target`, and the timeout, come from
 `toad.yaml`; the handoff wins where both are set. Without scenarios, Toad
 derives them from the goal.
 
@@ -347,7 +366,11 @@ Environment variables, set where the MCP server is registered:
   no testing logic.
 - **`skills/toad-mcp/SKILL.md`**: the guide served to coding agents.
 
-### How CLI tests run
+### How CLI and API tests run
+
+API tests use the same sandbox: the api-tester sends each request with `curl`
+from the prepared workspace, so every request is a receipt with its status
+line, headers and body, and JSON checks run as separate recorded commands.
 
 Preparing a scenario copies the project to a new workspace under
 `~/.cache/toad/scenarios/<id>`, skipping symlinks, `.git`, `.forge`, `.toad`,

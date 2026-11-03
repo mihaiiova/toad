@@ -70,12 +70,17 @@ export const CONFIG_TEMPLATE = `# Toad settings for this project. Commit this fi
 #   workdir: .                       # relative to the project, or absolute
 #   program: node dist/cli.js        # how to invoke the program there
 #   image: node:22-bookworm          # the container CLI tests run in
+# api:
+#   url: http://localhost:8080/api   # the API's base URL
+#   spec: openapi.yaml               # its OpenAPI description, relative to workdir
+#   workdir: .                       # folder copied into the sandbox (spec, fixtures)
 # timeout_minutes: 15
 `;
 
 const configSchema = z.object({
   web: z.object({ url: z.string().url() }).strict().optional(),
   cli: z.object({ workdir: z.string().min(1).optional(), program: z.string().min(1).optional(), image: z.string().min(1).optional() }).strict().optional(),
+  api: z.object({ url: z.string().url().optional(), spec: z.string().min(1).optional(), workdir: z.string().min(1).optional(), image: z.string().min(1).optional() }).strict().optional(),
   timeout_minutes: z.number().int().min(1).max(60).optional(),
 }).strict();
 
@@ -98,12 +103,13 @@ export function readProjectConfig(folder) {
 }
 
 /**
- * Fill a handoff's target from the project's defaults. A relative CLI working
- * folder is resolved against the project.
+ * Fill a handoff's target from the project's defaults. A relative working
+ * folder is resolved against the project; an API test's defaults to it.
  */
 export function withDefaults(handoff, config, project) {
-  const defaults = handoff.kind === 'web' ? config.web ?? {} : config.cli ?? {};
+  const defaults = config[handoff.kind] ?? {};
   const target = { ...defaults, ...(handoff.target ?? {}) };
-  if (handoff.kind === 'cli' && target.workdir && !isAbsolute(target.workdir)) target.workdir = resolve(project, target.workdir);
+  if (handoff.kind === 'api') target.workdir ??= '.';
+  if (handoff.kind !== 'web' && target.workdir && !isAbsolute(target.workdir)) target.workdir = resolve(project, target.workdir);
   return { ...handoff, target };
 }

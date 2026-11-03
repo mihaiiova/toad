@@ -171,9 +171,11 @@ export function prepare(root, sourcePath, networkUrl) {
     const check = preflight(sandbox, workspace, PREFLIGHT);
     if (check.status !== 0) throw new Error(`Sandbox preflight failed${check.stderr ? `: ${check.stderr.trim().split('\n').at(-1)}` : ''}`);
     if (networkUrl) {
+      // Reachability, not success: an API's base URL may well answer 401 or 404.
+      const node = 'node -e "fetch(process.argv[1], {signal: AbortSignal.timeout(10000)}).catch(() => { process.exitCode=1 })" "$0"';
       const script = sandbox.sandbox === 'container'
-        ? 'if command -v node >/dev/null 2>&1; then node -e "fetch(process.argv[1], {signal: AbortSignal.timeout(10000)}).then(r => { if (!r.ok) process.exitCode=1 }).catch(() => { process.exitCode=1 })" "$0"; elif command -v curl >/dev/null 2>&1; then curl -fsS -o /dev/null --max-time 10 "$0"; else wget -q -T 10 -O /dev/null "$0"; fi'
-        : 'exec node -e "fetch(process.argv[1], {signal: AbortSignal.timeout(10000)}).then(r => { if (!r.ok) process.exitCode=1 }).catch(() => { process.exitCode=1 })" "$0"';
+        ? `if command -v node >/dev/null 2>&1; then ${node}; elif command -v curl >/dev/null 2>&1; then curl -sS -o /dev/null --max-time 10 "$0"; else wget -q -T 10 -O /dev/null "$0" || [ $? -eq 8 ]; fi`
+        : `exec ${node}`;
       const network = preflight(sandbox, workspace, script, [networkUrl]);
       if (network.status !== 0) throw new Error('Sandbox network preflight failed');
     }
