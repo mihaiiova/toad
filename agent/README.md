@@ -1,4 +1,4 @@
-<!-- forge:generated v1 sha256=611463483481deba63c8718fdbd7ce23a1b2df5ff720ed1aa3a157a93f48a390 -->
+<!-- forge:generated v1 sha256=b0222b12952142867a750ba848ec8470976ef02cbdbbc88ffef70a276b421f47 -->
 # toad
 
 Tests web apps and command-line programs end to end and returns the results with receipts.
@@ -6,9 +6,10 @@ Tests web apps and command-line programs end to end and returns the results with
 ## Run
 
 The generated `./run` launcher is the entry point. It starts Pi with the
-project's own isolated config directory so your global Pi settings, MCP
-servers, extensions and credentials are not inherited. Skills in the shared
-Agent Skills folder (`~/.agents/skills/`) do load, for the orchestrator.
+project's own Pi configuration and logins, without your global Pi settings,
+MCP servers or extensions. Your environment, including any credentials in
+it, is inherited, and it is not an OS sandbox. Skills in the shared Agent
+Skills folder (`~/.agents/skills/`) do load, for the orchestrator.
 
 ```sh
 ./run             # interactive
@@ -34,24 +35,29 @@ Independently detached processes can survive the fallback cleanup.
 Approval is never granted unattended. Entry delegation and boundary
 instructions are model-directed, not a hard guarantee of execution.
 
+On the first interactive run, Pi may start npm package installation processes
+that continue briefly after Pi exits and may keep output pipes open. Callers
+should allow extra time before assuming the output stream has closed.
+
 Authenticate inside `./run` with `/login`, or export
-`PI_API_KEY` / a provider key. See the policy section below for which
+the provider-specific key (for example `DEEPSEEK_API_KEY`). See the policy
+section below for which
 capabilities are enforced vs advisory.
 
 ## Maintain
 
-`/forge <request>` proposes a change; when the turn ends, Forge asks you
+`/faur <request>` proposes a change; when the turn ends, Forge asks you
 to discuss, apply or discard it. Replies continue the conversation until
-then; `/forge exit` leaves. `/forge review` is read-only.
-`/forge check` verifies the agent, `/forge status` summarizes it, and
-`/forge sync` moves to the newest Forge release after two confirmations.
-Roll back with git. `/forge permissions` lists the commands agents may run
+then; `/faur exit` leaves. `/faur review` is read-only.
+`/faur check` verifies the agent, `/faur status` summarizes it, and
+`/faur sync` moves to the newest Forge release after two confirmations.
+Roll back with git. `/faur permissions` lists the commands agents may run
 and adds, removes or reviews them; agents ask for a command they need with
 `request_permission`. Restart `./run` when the launcher or packages change.
 
 ## Policy
 
-### Enforced (cannot be bypassed)
+### Enforced by Pi's tool layer
 
 None declared.
 

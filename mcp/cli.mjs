@@ -3,8 +3,14 @@
 import { forgetProject, listProjects } from './projects.mjs';
 
 const USAGE = `Usage:
-  toad setup [options]          prepare the agent, browser, model key and coding agents
+  toad setup [options]          prepare the agent, browser, models and keys, and coding agents
       --yes                       accept every default without asking
+      --lead-model <provider/id>  the model that plans tests and writes reports
+      --tester-model <provider/id>
+                                  the model that runs each scenario
+      --model <provider/id>       one model for both; models are named as
+                                  \`pi --list-models\` prints them, and each key comes
+                                  from its provider's variable, e.g. ANTHROPIC_API_KEY
       --no-register               do not register Toad with coding agents
       --skip-browser              do not download the browser
       --skip-image                do not download the CLI test image
@@ -30,10 +36,19 @@ try {
   if (command === 'mcp') await import('./server.mjs');
   else if (command === 'setup') {
     const known = ['--yes', '--no-register', '--skip-browser', '--skip-image', '--force'];
-    const unknown = args.filter(a => !known.includes(a));
+    const models = {};
+    const rest = [];
+    for (let i = 0; i < args.length; i++) {
+      const [flag, inline] = args[i].split(/=(.*)/s);
+      const key = { '--model': 'model', '--lead-model': 'leadModel', '--tester-model': 'testerModel' }[flag];
+      if (!key) { rest.push(args[i]); continue; }
+      models[key] = inline ?? args[++i];
+      if (!models[key]) throw new Error(`${flag} needs provider/id`);
+    }
+    const unknown = rest.filter(a => !known.includes(a));
     if (unknown.length) throw new Error(`Unknown option: ${unknown[0]}`);
     const { setup } = await import('./setup.mjs');
-    await setup({ yes: args.includes('--yes'), noRegister: args.includes('--no-register'), skipBrowser: args.includes('--skip-browser'), skipImage: args.includes('--skip-image'), force: args.includes('--force') });
+    await setup({ yes: rest.includes('--yes'), noRegister: rest.includes('--no-register'), skipBrowser: rest.includes('--skip-browser'), skipImage: rest.includes('--skip-image'), force: rest.includes('--force'), ...models });
   } else if (command === 'doctor') { const { doctor } = await import('./setup.mjs'); await doctor(); }
   else if (command === 'update') {
     const i = args.indexOf('--from');
