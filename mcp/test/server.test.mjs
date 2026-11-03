@@ -535,3 +535,109 @@ test('an agent that is not set up is a clear error', async t => {
   assert.equal(result.isError, true);
   assert.match(JSON.stringify(result), /toad setup/);
 });
+
+/** Give a stand-in agent the real sandbox tools, as the prepared agent has. */
+function realTools(dir) {
+  mkdirSync(join(dir, 'tools'), { recursive: true });
+  for (const name of ['toad-exec.mjs', 'toad-sandbox.mjs', 'toad-dirs.mjs']) writeFileSync(join(dir, 'tools', name), readFileSync(resolve(import.meta.dirname, '../../agent/tools', name)));
+}
+
+test('setup runs once in the sandbox and every scenario starts from its result', { skip: !sandboxAvailable && 'no CLI sandbox on this machine' }, async t => {
+  const dir = agent(t, { status: 'ok', answer: 'unused', code: 0 });
+  realTools(dir);
+  const project = mkdtempSync(join(tmpdir(), 'toad-setup-'));
+  t.after(() => rmSync(project, { recursive: true, force: true }));
+  standIn(dir, `import { spawnSync } from 'node:child_process';
+const all = process.argv.slice(2);
+const args = all.slice(all.indexOf('--') + 1);
+const request = args.find(a => a.startsWith('request=')).slice(8);
+const prep = spawnSync(process.execPath, ['tools/toad-exec.mjs', 'prepare', ${JSON.stringify(project)}], { encoding: 'utf8' });
+const id = /Scenario ID: (.+)/.exec(prep.stdout)[1];
+const receipts = args.find(a => a.startsWith('receipts=')).slice(9);
+const run = spawnSync(process.execPath, ['tools/toad-exec.mjs', 'run', receipts + '/uses-the-tool', '01-tool', id, 'cat installed.txt'], { encoding: 'utf8' });
+const ok = /installed by setup/.test(run.stdout) && /Setup already ran/.test(request) && /not allowed/.test(request);
+console.log(JSON.stringify({ status: 'ok', answer: 'Verdict: ' + (ok ? 'PASS' : 'FAIL') + '\\nResults:\\n- ' + (ok ? 'PASS' : 'FAIL') + ' | Uses the tool\\n' }));
+`);
+  const env = home(t);
+  const client = await connect(t, dir, env);
+  await client.callTool({ name: 'setup_project', arguments: { project_path: project } });
+  const handoff = { version: 1, kind: 'cli', target: { workdir: project, program: 'test', image: process.env.TOAD_TEST_IMAGE || 'node:22-slim', setup: ['echo installed by setup > installed.txt'] },
+    request: { goal: 'Check setup', scenarios: [{ name: 'Uses the tool', steps: 'cat installed.txt', expected: 'the text' }] } };
+  const result = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff } });
+  assert.equal(result.isError, false, JSON.stringify(result));
+  assert.equal(result.structuredContent.verdict, 'PASS');
+  assert.deepEqual(result.structuredContent.scenarios, [{ name: 'Uses the tool', result: 'PASS' }]);
+  assert.match(readFileSync(result.structuredContent.files.find(p => p.endsWith('/setup/01-setup.txt')), 'utf8'), /result: exit 0/);
+  assert.equal(existsSync(join(project, 'installed.txt')), false);
+  // Only the scenario's own workspace is left; the setup workspace is removed.
+  assert.equal(readdirSync(join(env.TOAD_CACHE_DIR, 'scenarios')).length, 1);
+});
+
+test('a failed setup ends the run as ERROR before any scenario starts', { skip: !sandboxAvailable && 'no CLI sandbox on this machine' }, async t => {
+  const dir = agent(t, { status: 'ok', answer: 'Verdict: PASS', code: 0 });
+  realTools(dir);
+  const project = mkdtempSync(join(tmpdir(), 'toad-setup-fail-'));
+  t.after(() => rmSync(project, { recursive: true, force: true }));
+  const client = await connect(t, dir);
+  await client.callTool({ name: 'setup_project', arguments: { project_path: project } });
+  const handoff = { version: 1, kind: 'cli', target: { workdir: project, program: 'test', image: process.env.TOAD_TEST_IMAGE || 'node:22-slim', setup: ['true', 'echo no such package >&2; exit 4'] },
+    request: { goal: 'Check', scenarios: [{ name: 'A', steps: 's', expected: 'e' }, { name: 'B', steps: 's', expected: 'e' }] } };
+  const result = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff } });
+  assert.equal(result.isError, true);
+  assert.equal(result.structuredContent.status, 'setup_failed');
+  assert.equal(result.structuredContent.verdict, 'ERROR');
+  assert.deepEqual(result.structuredContent.scenarios.map(s => s.result), ['ERROR', 'ERROR']);
+  assert.match(result.content[0].text, /exit 4/);
+  assert.equal(existsSync(join(dir, 'launch.json')), false, 'the workflow never started');
+  assert.match(readFileSync(result.structuredContent.files.find(p => p.endsWith('/setup/02-setup.txt')), 'utf8'), /no such package/);
+});
+
+test('scenario results come back by name, and a contradicting verdict is corrected', async t => {
+  const dir = agent(t, { status: 'ok', answer: 'Compiling the report.\nVerdict: PASS\nResults:\n- PASS | A\n- ERROR | B\n', code: 0 });
+  const project = mkdtempSync(join(tmpdir(), 'toad-results-'));
+  t.after(() => rmSync(project, { recursive: true, force: true }));
+  const client = await connect(t, dir);
+  await client.callTool({ name: 'setup_project', arguments: { project_path: project } });
+  const handoff = { version: 1, kind: 'cli', target: { workdir: project, program: 'test' },
+    request: { goal: 'Check', scenarios: ['A', 'B', 'C'].map(name => ({ name, steps: 's', expected: 'e' })) } };
+  const result = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff } });
+  assert.equal(result.structuredContent.verdict, 'ERROR');
+  assert.deepEqual(result.structuredContent.scenarios, [{ name: 'A', result: 'PASS' }, { name: 'B', result: 'ERROR' }, { name: 'C', result: 'ERROR', missing: true }]);
+  const runs = join(project, '.toad', 'runs');
+  const run = join(runs, readdirSync(runs)[0]);
+  assert.match(readFileSync(join(run, 'reports', 'report.md'), 'utf8'), /^# Toad run\n\nStatus: ok\n\nVerdict: ERROR\n\n\(The report said PASS/);
+  assert.equal(JSON.parse(readFileSync(join(run, 'state.json'), 'utf8')).scenarios.length, 3);
+});
+
+test('a project run that cannot start is recorded as failed, not left running', async t => {
+  const dir = agent(t, { status: 'ok', answer: 'Verdict: PASS', code: 0 });
+  const project = mkdtempSync(join(tmpdir(), 'toad-nostart-'));
+  t.after(() => rmSync(project, { recursive: true, force: true }));
+  // The per-run secrets folder cannot be made: its parent is a file.
+  const env = home(t);
+  mkdirSync(dirname(env.TOAD_RUNTIME_DIR), { recursive: true });
+  writeFileSync(env.TOAD_RUNTIME_DIR, 'not a folder');
+  const client = await connect(t, dir, env);
+  await client.callTool({ name: 'setup_project', arguments: { project_path: project } });
+  writeFileSync(join(project, '.toad', '.env'), 'TOAD_TEST_EMAIL=a@example.test\n');
+  const handoff = { version: 1, kind: 'web', target: { url: 'http://localhost:3000' }, request: { goal: 'Home' }, credentials: { email: { env: 'TOAD_TEST_EMAIL' } } };
+  const result = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff } });
+  assert.equal(result.isError, true);
+  const runs = join(project, '.toad', 'runs');
+  const state = JSON.parse(readFileSync(join(runs, readdirSync(runs)[0], 'state.json'), 'utf8'));
+  assert.equal(state.state, 'failed');
+  assert.ok(state.error);
+  assert.equal(existsSync(join(dir, 'launch.json')), false);
+});
+
+test('web handoffs reject setup commands', async t => {
+  const dir = agent(t, { status: 'ok', answer: 'Verdict: PASS', code: 0 });
+  const project = mkdtempSync(join(tmpdir(), 'toad-websetup-'));
+  t.after(() => rmSync(project, { recursive: true, force: true }));
+  const client = await connect(t, dir);
+  await client.callTool({ name: 'setup_project', arguments: { project_path: project } });
+  const handoff = { version: 1, kind: 'web', target: { url: 'http://localhost:3000', setup: ['npm ci'] }, request: { goal: 'Home' } };
+  const result = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff } });
+  assert.equal(result.isError, true);
+  assert.match(JSON.stringify(result.content), /cli and api handoffs/);
+});

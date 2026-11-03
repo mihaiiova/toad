@@ -14,6 +14,7 @@ import { dirname, join, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { listProjects } from './projects.mjs';
 import { VERSION } from './agent.mjs';
+import { resultsOf, scenarioResults } from './results.mjs';
 
 const HOST = '127.0.0.1';
 const PAGE = join(dirname(fileURLToPath(import.meta.url)), 'ui.html');
@@ -77,10 +78,19 @@ function targetOf(handoff) {
   return '';
 }
 
+/** A short name for a run: the handoff's title, or the goal's first sentence. */
+export function titleOf(handoff) {
+  if (handoff?.title) return handoff.title;
+  const goal = (handoff?.request?.goal ?? '').trim();
+  const first = /^(.+?[.!?])(?:\s|$)/s.exec(goal)?.[1] ?? goal;
+  return first.length > 90 ? `${first.slice(0, 87).replace(/\s+\S*$/, '')}…` : first;
+}
+
 /**
- * One run's summary. `state` is running, waiting, finished, or interrupted
- * (no report, and the server that started it is gone). Runs from before
- * state.json existed count as finished when they have a report.
+ * One run's summary. `state` is starting, waiting, running, finished, failed
+ * (it could not start; `error` says why) or interrupted (no report, and the
+ * server that started it is gone, or it never recorded a state). Runs from
+ * before state.json existed count as finished when they have a report.
  */
 function summary(project, id) {
   const dir = join(project.runs, id);
@@ -89,17 +99,21 @@ function summary(project, id) {
   const report = readText(reportPath);
   const saved = readJson(join(dir, 'state.json'));
   const started = Date.parse(saved?.started ?? '') || startOf(id);
-  let state = report ? 'finished' : saved && ['running', 'waiting'].includes(saved.state) && alive(saved.pid) ? saved.state : 'interrupted';
-  if (!report && !saved && started && Date.now() - started < 60 * 60 * 1000) state = 'running';
+  let state = report ? 'finished'
+    : saved?.state === 'failed' ? 'failed'
+    : saved && ['starting', 'running', 'waiting'].includes(saved.state) && alive(saved.pid) ? (saved.state === 'starting' ? 'running' : saved.state)
+    : 'interrupted';
   const ended = report ? Date.parse(saved?.finished ?? '') || mtime(reportPath) : null;
   // The server records the verdict it read; older runs only have the report.
-  const verdict = state !== 'finished' ? state.toUpperCase()
+  const verdict = state === 'failed' ? 'ERROR' : state !== 'finished' ? state.toUpperCase()
     : saved?.verdict ?? /^[#*\s]*Verdict[*:\s]*?(?:\n\s*)*[*\s]*(PASS|FAIL|ERROR)\b/im.exec(report)?.[1]?.toUpperCase() ?? 'UNKNOWN';
   return {
     id, project: project.id, projectName: project.name,
     started, ended, duration: started && ended ? ended - started : null,
-    kind: handoff?.kind ?? '', goal: handoff?.request?.goal ?? '', target: targetOf(handoff),
+    kind: handoff?.kind ?? '', title: titleOf(handoff), goal: handoff?.request?.goal ?? '', target: targetOf(handoff),
     scenarios: handoff?.request?.scenarios?.length ?? 0,
+    results: saved?.scenarios ?? (report ? scenarioResults(handoff?.request?.scenarios, resultsOf(report)) : []),
+    ...(saved?.error ? { error: saved.error } : {}),
     verdict, status: /^Status:\s*(\S+)/m.exec(report)?.[1] ?? (state === 'finished' ? 'unknown' : state), state,
   };
 }
@@ -115,7 +129,7 @@ function projectSummaries() {
       id: project.id, name: project.name, path: project.path,
       runs: runs.length, active: runs.filter(r => r.state === 'running' || r.state === 'waiting').length,
       passed: finished.filter(r => r.verdict === 'PASS').length, finished: finished.length,
-      last: runs[0] ?? null, recent: runs.slice(0, 20).map(r => ({ id: r.id, verdict: r.verdict, started: r.started, goal: r.goal })),
+      last: runs[0] ?? null, recent: runs.slice(0, 20).map(r => ({ id: r.id, verdict: r.verdict, started: r.started, goal: r.title })),
     };
   }).sort((a, b) => (b.last?.started ?? 0) - (a.last?.started ?? 0));
 }

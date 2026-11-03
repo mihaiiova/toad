@@ -53,6 +53,29 @@ for (const name of BACKENDS) describe(`with ${name}`, () => {
     assert.match(readFileSync(join(root, 'data/receipts/r1/scenario-02.txt'), 'utf8'), /result: exit 3/);
   });
 
+  test('scenarios start from the setup workspace of the same source, links included', t => {
+    const { root, target, run, prepare } = setup(t);
+    const base = prepare();
+    const install = run(['run', 'data/receipts/setup', '01-setup', base, 'mkdir -p node_modules/.bin tools && printf "#!/bin/sh\\necho tool ok\\n" > tools/tool && chmod +x tools/tool && ln -s ../../tools/tool node_modules/.bin/tool && echo cached > "$HOME/cache"']);
+    assert.match(install.stdout, /exit 0/, install.stdout + install.stderr);
+    const withBase = { env: { ...process.env, TOAD_BASE_SCENARIO: base } };
+    const prepared = run(['prepare', target], withBase);
+    assert.equal(prepared.status, 0, prepared.stderr);
+    const id = /Scenario ID: (.+)/.exec(prepared.stdout)[1];
+    assert.notEqual(id, base);
+    const used = run(['run', 'data/receipts/s1', '01-tool', id, 'PATH="$PWD/node_modules/.bin:$PATH" tool && cat "$HOME/cache"']);
+    assert.match(used.stdout, /exit 0/, used.stdout); assert.match(used.stdout, /tool ok/); assert.match(used.stdout, /cached/);
+    // Changes in one scenario never reach the setup workspace or the project.
+    run(['run', 'data/receipts/s1', '02-change', id, 'rm tools/tool']);
+    assert.equal(existsSync(join(root, 'cache/scenarios', base, 'project/tools/tool')), true);
+    assert.equal(existsSync(join(target, 'tools')), false);
+    // Another source ignores it and is copied as usual.
+    const other = join(root, 'other'); mkdirSync(other); writeFileSync(join(other, 'x.txt'), 'x');
+    const plain = run(['prepare', other], withBase);
+    assert.equal(plain.status, 0, plain.stderr);
+    assert.equal(existsSync(join(root, 'cache/scenarios', /Scenario ID: (.+)/.exec(plain.stdout)[1], 'project/tools')), false);
+  });
+
   test('copy excludes secrets, receipts and symlinks without following them', t => {
     const { root, target, prepare } = setup(t);
     writeFileSync(join(target, '.env'), 'PASSWORD=private\n');

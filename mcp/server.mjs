@@ -15,6 +15,7 @@ import { resolveSecretReferences } from './project-secrets.mjs';
 import { chooseSandbox, isReservedSecretName } from '../agent/tools/toad-sandbox.mjs';
 import { privateDir, toadDirs } from '../agent/tools/toad-dirs.mjs';
 import { acquireSlot } from './slots.mjs';
+import { overallVerdict, resultsOf, scenarioResults, verdictOf } from './results.mjs';
 import { CONFIG_TEMPLATE, readProjectConfig, registerProject, withDefaults } from './projects.mjs';
 import { resolveAgent, workflowCommand, workflowEnv, VERSION } from './agent.mjs';
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
@@ -71,15 +72,6 @@ function runWorkflow(agent, args, signal, onTick, env = process.env) {
   });
 }
 
-/**
- * The report's verdict: PASS, FAIL or ERROR, or UNKNOWN when it has none. The
- * bot is told to start with `Verdict: X`; headings or bold around the word
- * Verdict, and the value on the next line, are accepted too.
- */
-function verdictOf(answer) {
-  return /^[#*\s]*Verdict[*:\s]*?(?:\n\s*)*[*\s]*(PASS|FAIL|ERROR)\b/im.exec(answer ?? '')?.[1]?.toUpperCase() ?? 'UNKNOWN';
-}
-
 function receiptsIn(dir) {
   const files = [];
   function visit(folder) {
@@ -94,7 +86,7 @@ function receiptsIn(dir) {
 }
 
 /** Run one test request through the bot and map its result onto a tool result. */
-async function runTest(text, input, extra, { attachImages, projectRun, secretValues, cliImage }) {
+async function runTest(text, input, extra, { attachImages, projectRun, secretValues, cliImage, setup }) {
   const agent = resolveAgent();
   if (!agent) throw new Error(NOT_SET_UP);
   // Project runs write receipts straight into .toad/runs/<id>/receipts; the
@@ -134,7 +126,21 @@ async function runTest(text, input, extra, { attachImages, projectRun, secretVal
       } catch (error) { rmSync(secretDir, { recursive: true, force: true }); throw error; }
       env[cli ? 'TOAD_CLI_SECRETS_FILE' : 'TOAD_PLAYWRIGHT_SECRETS_FILE'] = secretFile;
     }
-    const result = await runWorkflow(agent, args, extra.signal, tick, env);
+    let base, result;
+    try {
+      if (setup?.commands?.length) {
+        message = 'Running setup…';
+        const prepared = await runSetup(agent, setup, env, folder, extra.signal);
+        base = prepared.workspace;
+        if (extra.signal.aborted) result = { status: 'cancelled', answer: '', cleanup: 'complete', message: 'Cancelled during setup' };
+        else if (prepared.failure) result = prepared.failure;
+        else env.TOAD_BASE_SCENARIO = prepared.id;
+        message = 'Testing…';
+      }
+      result ??= await runWorkflow(agent, args, extra.signal, tick, env);
+    } finally {
+      if (base) rmSync(base, { recursive: true, force: true });
+    }
     const redact = value => typeof value === 'string' ? Object.values(secretValues ?? {}).filter(Boolean).reduce((text, secret) => text.split(secret).join('[REDACTED]'), value) : value;
     result.answer = redact(result.answer);
     result.message = redact(result.message);
@@ -147,6 +153,47 @@ async function runTest(text, input, extra, { attachImages, projectRun, secretVal
     }
     return finish(input, result, folder, { attachImages, projectRun });
   }
+}
+
+/** Run one Toad tool command (toad-exec) in the agent folder. */
+function toolCommand(agent, args, env, signal) {
+  return new Promise(done => {
+    const child = spawn(process.execPath, [join(agent, 'tools', 'toad-exec.mjs'), ...args], { cwd: agent, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '', err = '';
+    child.stdout.setEncoding('utf8').on('data', d => { out += d; });
+    child.stderr.setEncoding('utf8').on('data', d => { err += d; });
+    const cancel = () => child.kill('SIGTERM');
+    signal?.addEventListener('abort', cancel, { once: true });
+    child.on('error', error => { err += error.message; });
+    child.on('close', code => { signal?.removeEventListener('abort', cancel); done({ code, out, err }); });
+  });
+}
+
+/**
+ * Run the handoff's setup commands once, in a sandbox workspace made from the
+ * working folder. Every scenario then starts from a copy of it. Each command
+ * is recorded under receipts/setup/. A failed command ends the run as ERROR
+ * before any scenario starts.
+ */
+async function runSetup(agent, { commands, workdir, names = [] }, env, folder, signal) {
+  const setupEnv = { ...env, TOAD_COMMAND_TIMEOUT_S: String(Number(env.TOAD_SETUP_TIMEOUT_S ?? 900)) };
+  delete setupEnv.TOAD_BASE_SCENARIO;
+  const failure = (why, receipt) => ({
+    status: 'setup_failed', cleanup: 'complete', message: '',
+    answer: ['Verdict: ERROR', 'Results:', ...(names.length ? names : ['Setup']).map(name => `- ERROR | ${name}`), '',
+      `Setup failed, so no scenario ran: ${why}`, ...(receipt ? [`Receipt: ${receipt}`] : [])].join('\n'),
+  });
+  const prepared = await toolCommand(agent, ['prepare', workdir], setupEnv, signal);
+  const id = /Scenario ID: (\S+)/.exec(prepared.out)?.[1], workspace = /Workspace: (.+)/.exec(prepared.out)?.[1]?.trim();
+  if (prepared.code !== 0 || !id) return { failure: failure(`the sandbox could not be prepared (${(prepared.err || prepared.out).trim().split('\n').at(-1)})`) };
+  for (const [i, command] of commands.entries()) {
+    const name = `${String(i + 1).padStart(2, '0')}-setup`;
+    const run = await toolCommand(agent, ['run', join(folder, 'setup'), name, id, command], setupEnv, signal);
+    const receipt = join(folder, 'setup', `${name}.txt`);
+    const outcome = /^(exit \S+|timed out after \S+|infrastructure error[^;]*?) in /m.exec(run.out)?.[1] ?? `exit ${run.code}`;
+    if (run.code !== 0 || outcome !== 'exit 0') return { id, workspace, failure: failure(`\`${command}\` ended with ${outcome}.`, receipt) };
+  }
+  return { id, workspace };
 }
 
 /** Map a workflow result, and the receipts it left, onto a tool result. */
@@ -163,15 +210,19 @@ function writeState(run, fields) {
 }
 
 function finish(input, result, folder, { attachImages, projectRun }) {
-  const verdict = verdictOf(result.answer);
-  if (projectRun) writeState(projectRun, { state: 'finished', finished: new Date().toISOString(), verdict, status: result.status });
+  const scenarios = scenarioResults(input.handoff?.request?.scenarios ?? input.scenarios, resultsOf(result.answer));
+  const verdict = overallVerdict(verdictOf(result.answer), scenarios);
+  if (projectRun) writeState(projectRun, { state: 'finished', finished: new Date().toISOString(), verdict, status: result.status, scenarios });
   // Regular files only: agent-created symlinks are never followed.
   const files = receiptsIn(folder);
+  // The agent's report normally starts with its own verdict line; when it
+  // does not, or its verdict contradicts a scenario's result, Toad's comes first.
+  const reported = verdictOf(result.answer);
+  const ownVerdict = /^\s*Verdict:/i.test(result.answer ?? '') && reported === verdict;
+  const corrected = reported !== 'UNKNOWN' && reported !== verdict ? `(The report said ${reported}; a scenario's result makes the run ${verdict}.)` : '';
   if (projectRun) {
-    // The agent's report normally starts with its own verdict line.
-    const ownVerdict = /^\s*Verdict:/i.test(result.answer ?? '');
     writeFileSync(join(projectRun, 'reports', 'report.md'), [
-      `# Toad run`, `Status: ${result.status}`, ...(ownVerdict ? [] : [`Verdict: ${verdict}`]),
+      `# Toad run`, `Status: ${result.status}`, ...(ownVerdict ? [] : [`Verdict: ${verdict}`]), corrected,
       result.answer ?? '', result.message ?? '',
     ].filter(Boolean).join('\n\n') + '\n', { mode: 0o600 });
   }
@@ -182,14 +233,14 @@ function finish(input, result, folder, { attachImages, projectRun }) {
   const failed = result.status !== 'ok' || result.cleanup === 'incomplete';
   const heading = failed
     ? `The test run did not complete: ${result.status}${result.message ? ` (${result.message})` : ''}.`
-    : /^\s*Verdict:/i.test(result.answer ?? '') ? '' : `Verdict: ${verdict}`;
+    : ownVerdict ? '' : [`Verdict: ${verdict}`, corrected].filter(Boolean).join('\n');
   return {
     isError: failed,
     content: [
       { type: 'text', text: [heading, result.answer, files.length ? `Receipts:\n${files.join('\n')}` : ''].filter(Boolean).join('\n\n') },
       ...images,
     ],
-    structuredContent: { verdict, status: result.status, runId: result.runId ?? null, receipts: folder, files, screenshots },
+    structuredContent: { verdict, status: result.status, runId: result.runId ?? null, scenarios, receipts: folder, files, screenshots },
   };
 }
 
@@ -205,6 +256,8 @@ const outputSchema = {
   verdict: z.enum(['PASS', 'FAIL', 'ERROR', 'UNKNOWN']),
   status: z.string().describe('How the run itself ended: ok, error, blocked, timeout, cancelled or configuration_error'),
   runId: z.string().nullable(),
+  scenarios: z.array(z.object({ name: z.string(), result: z.enum(['PASS', 'FAIL', 'ERROR']), missing: z.boolean().optional() }))
+    .describe("Each scenario's result, by the name the handoff gave it; a scenario the report left out is ERROR with missing: true"),
   receipts: z.string().describe("Folder holding this run's receipts"),
   files: z.array(z.string()).describe('Every receipt: screenshots and recorded commands'),
   screenshots: z.array(z.string()),
@@ -291,17 +344,20 @@ const valueOrEnv = z.object({ env: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/) 
 const handoffSchema = z.object({
   version: z.literal(1),
   kind: z.enum(['web', 'cli', 'api']),
+  title: z.string().min(1).max(120).optional().describe('A short name for the run, shown in the run viewer'),
   target: z.object({
     url: z.string().url().optional().describe('web: the app; api: the API base URL'),
     workdir: z.string().optional().describe('cli: where the program runs; api: the folder with the OpenAPI description and fixtures, default the project'),
     program: z.string().optional(),
     spec: z.string().min(1).optional().describe('api: the OpenAPI description, relative to workdir'),
     image: z.string().min(1).optional(),
+    setup: z.array(z.string().min(1)).max(20).optional().describe('cli/api: shell commands Toad runs once in the sandbox before any scenario, e.g. installing a pinned tool; every scenario starts from the result'),
   }).strict().optional()
     .describe('Omitted fields come from the project\'s .toad/toad.yaml'),
   request: z.object({ goal: z.string().min(1), scenarios }).strict(),
   credentials: z.record(z.string(), valueOrEnv).optional(),
   limitations: z.array(z.string()).optional(),
+  allow_installs: z.boolean().optional().describe('cli/api: let testers install a missing prerequisite inside the sandbox and retry; default false (they report it)'),
 }).strict();
 
 const LOOPBACK = /^(https?:\/\/)(localhost|127\.0\.0\.1|\[::1\])(?=[:/]|$)/i;
@@ -338,6 +394,7 @@ server.registerTool('run_project_test', {
   if (h.kind === 'cli' && (!h.target.workdir || !h.target.program)) throw new Error('A CLI handoff requires target.workdir and target.program, in the handoff or under cli: in .toad/toad.yaml');
   if (h.kind === 'api' && !h.target.url) throw new Error('An API handoff requires target.url, in the handoff or as api.url in .toad/toad.yaml');
   if (h.kind !== 'web' && Object.values(h.credentials ?? {}).some(ref => isReservedSecretName(ref.env))) throw new Error(`${h.kind.toUpperCase()} credentials contain a reserved environment name`);
+  if (h.kind === 'web' && (h.target.setup?.length || h.allow_installs)) throw new Error('setup and allow_installs apply to cli and api handoffs; a web test runs in a browser');
   const secretValues = resolveSecretReferences(folder, h.credentials);
   const id = `${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID()}`;
   const run = join(folder, 'runs', id);
@@ -346,16 +403,32 @@ server.registerTool('run_project_test', {
   ensureDirectory(join(run, 'reports'));
   // JSON is a YAML 1.2 subset and avoids an additional YAML parser dependency.
   writeFileSync(join(run, 'handoff.yaml'), JSON.stringify(h, null, 2) + '\n', { mode: 0o600 });
+  // Recorded at once, so a run that never starts is not shown as running.
+  writeState(run, { state: 'starting' });
+  try {
+    return await projectRun(input, extra, h, run, secretValues);
+  } catch (error) {
+    writeState(run, { state: 'failed', finished: new Date().toISOString(), error: error.message });
+    throw error;
+  }
+});
+
+async function projectRun(input, extra, h, run, secretValues) {
   const target = h.kind === 'web' ? [`Test ${h.target.url}.`]
     : h.kind === 'api' ? apiTarget(h.target)
       : [`Test the command-line program in the working folder ${h.target.workdir}.`, `Invoke it as: ${h.target.program}`];
   const text = [request(target, { what: h.request.goal, scenarios: h.request.scenarios }),
     ...(h.credentials ? [`Credential roles and secret names: ${JSON.stringify(h.credentials)}. ${h.kind === 'web' ? 'Use each env name as the Playwright secret name' : 'Use each env name as a shell environment variable'}; never print its value.`] : []),
+    ...(h.target.setup?.length ? [`Setup already ran in the sandbox, so every prepared scenario starts with its result: ${h.target.setup.map(c => `\`${c}\``).join('; ')}.`] : []),
+    ...(h.kind === 'web' ? [] : [h.allow_installs
+      ? 'Installing prerequisites is allowed: a tester may install a missing program, package or module inside the scenario workspace or $HOME, record the install, and retry the step.'
+      : 'Installing prerequisites is not allowed: report a missing program, package or module as a missing prerequisite (ERROR) instead of installing it.']),
     ...(h.limitations?.length ? ['Limitations:', ...h.limitations.map(item => `- ${item}`)] : [])].join('\n');
-  const result = await runTest(text, input, extra, { attachImages: h.kind === 'web' && input.screenshots !== 'paths', projectRun: run, secretValues, cliImage: h.kind === 'web' ? undefined : h.target.image });
+  const setup = h.target.setup?.length ? { commands: h.target.setup, workdir: h.target.workdir, names: (h.request.scenarios ?? []).map(s => s.name) } : undefined;
+  const result = await runTest(text, input, extra, { attachImages: h.kind === 'web' && input.screenshots !== 'paths', projectRun: run, secretValues, cliImage: h.kind === 'web' ? undefined : h.target.image, setup });
   result.content[0].text += `\n\nHandoff: ${join(run, 'handoff.yaml')}\nReport: ${join(run, 'reports', 'report.md')}`;
   return result;
-});
+}
 
 server.registerTool('run_web_test', {
   title: 'Run a web test',

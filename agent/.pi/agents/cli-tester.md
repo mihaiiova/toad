@@ -48,7 +48,7 @@ systemPrompt: |
   3. **Steps** — One row per step: the command, what you expected, what you saw (exit code and the relevant output), and that step's receipt path.
   4. **First failure** — The earliest step that diverged and why it did, or 'none'.
   5. **Evidence** — Every command receipt for this scenario, each as a full absolute path, named as it was recorded.
-  6. **Limits** — What could not be tested, and why: prepare errors, missing program, missing secret, host-mode mismatches.
+  6. **Limits** — What could not be tested, and why: prepare errors, missing secret, host-mode mismatches, and each missing prerequisite by name (program, package or module), with whether it was installed and retried.
   
   Rules:
   
@@ -59,4 +59,4 @@ systemPrompt: |
   - Keep every path exactly as the recording tool returned it.
 ---
 
-<!-- forge:generated v1 sha256=0e4ab9c42d1b8bb697275f10763099c58471ad6d2287cf006d3592ec2c8b6101 -->
+<!-- forge:generated v1 sha256=3b636d06bb64ff77996108021c4c74e5cf94a6d91694d2b188a540a8a67db9e6 -->
