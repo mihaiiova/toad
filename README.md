@@ -11,7 +11,7 @@ or any MCP client): the agent hands TOaD a test, TOaD runs it independently,
 and the agent gets back evidence instead of its own opinion of its work.
 
 ```sh
-npm install -g @mihaiiova/toad && toad setup
+npm install -g github:mihaiiova/toad && toad setup
 ```
 
 - [Requirements](#requirements)
@@ -40,9 +40,13 @@ Use WSL until a release says otherwise.
 ## Install
 
 ```sh
-npm install -g @mihaiiova/toad
+npm install -g github:mihaiiova/toad
 toad setup
 ```
+
+TOaD installs straight from GitHub for now (it is not on npm yet). While the
+repository is private, this needs git access to it over SSH. Add `#v0.3.0`, or
+any tag or commit, to install a specific version instead of `main`.
 
 `toad setup` walks through everything once, and can be run again at any time:
 
@@ -69,7 +73,7 @@ toad doctor
 toad update
 ```
 
-It installs the latest version, prepares its agent (your key and projects
+It installs the latest `main` from GitHub, prepares its agent (your key and projects
 stay), and asks you to restart your coding agents.
 
 ## Connect your coding agent
@@ -208,8 +212,8 @@ A project joins the list when it is set up or runs a test.
 | Command | |
 |---|---|
 | `toad setup [--yes] [--no-register] [--skip-browser] [--skip-image] [--force]` | Prepare or repair everything TOaD needs |
-| `toad doctor` | Check the agent, model key, browser, CLI sandbox, coding agents and updates |
-| `toad update` | Install the latest version and prepare it |
+| `toad doctor` | Check the agent, model key, browser, CLI sandbox and coding agents |
+| `toad update` | Install the latest version from GitHub and prepare it |
 | `toad mcp` | The MCP server; coding agents start it |
 | `toad ui [--port <port>]` | The run viewer |
 | `toad projects [forget <path>]` | The projects the viewer shows |
@@ -421,7 +425,8 @@ prepared copy. Change the agent with `/forge` inside `agent/run`.
 ### Releasing
 
 `.github/workflows/test.yml` runs the tests on Linux, macOS and Windows for
-every push. To publish a version to npm:
+every push. Installs come from GitHub for now, so pushing to `main` is a
+release. Once TOaD goes to npm, publish a version with:
 
 ```sh
 npm version minor          # or patch / major: updates package.json and tags

@@ -10,7 +10,7 @@ const USAGE = `Usage:
       --skip-image                do not download the CLI test image
       --force                     prepare the agent again from scratch
   toad doctor                   check that everything TOaD needs is in place
-  toad update [--from <dir>]    install the latest version (or a local checkout's) and prepare it
+  toad update [--from <dir>]    install the latest from GitHub (or a local checkout's) and prepare it
   toad mcp                      run the MCP server over stdio (coding agents start this)
   toad ui [--port <port>]       browse every project's runs on localhost
   toad projects                 list the projects TOaD has been set up in

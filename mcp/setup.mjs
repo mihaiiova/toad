@@ -11,7 +11,9 @@ import { pathToFileURL } from 'node:url';
 import { PACKAGE_ROOT, VERSION, installedAgentDir, modelReady, prepareAgent, readCredentials, resolveAgent, saveCredential } from './agent.mjs';
 import { chooseSandbox } from '../agent/tools/toad-sandbox.mjs';
 
-const NAME = JSON.parse(readFileSync(join(PACKAGE_ROOT, 'package.json'), 'utf8')).name;
+// TOaD installs straight from GitHub until it is published to npm. npm fetches
+// the tarball over HTTPS and falls back to an SSH clone for a private repository.
+const SOURCE = 'github:mihaiiova/toad';
 const CLI = join(PACKAGE_ROOT, 'mcp', 'cli.mjs');
 const KEY = 'DEEPSEEK_API_KEY';
 const MIN_NODE = [22, 19];
@@ -203,12 +205,10 @@ export async function doctor() {
   for (const client of CLIENTS.filter(c => onPath(c.command))) {
     if (client.registered()) ok(`${client.name}: registered`); else warn(`${client.name}: not registered (toad setup offers it)`);
   }
-  const latest = run('npm', ['view', NAME, 'version'], { timeout: 10000 });
-  if (latest.status === 0 && latest.stdout.trim() && latest.stdout.trim() !== VERSION) warn(`TOaD ${latest.stdout.trim()} is available: run \`toad update\``);
   if (!healthy) process.exitCode = 1;
 }
 
-/** Install the latest release, or with `from`, the version in a local checkout. */
+/** Install the latest version from GitHub, or with `from`, the version in a local checkout. */
 export async function update({ from } = {}) {
   if (existsSync(join(PACKAGE_ROOT, '.git'))) {
     console.log(`This is a git checkout (${PACKAGE_ROOT}). Update it with: git pull && npm install`);
@@ -219,8 +219,8 @@ export async function update({ from } = {}) {
     const { installLocal } = await import(pathToFileURL(join(from, 'scripts', 'install-local.mjs')).href);
     try { installLocal(from); } catch (error) { console.error(error.message); process.exitCode = 1; return; }
   } else {
-    console.log(`Updating ${NAME}…`);
-    const install = run('npm', ['install', '--global', `${NAME}@latest`], { stdio: 'inherit', encoding: undefined });
+    console.log(`Updating from ${SOURCE}…`);
+    const install = run('npm', ['install', '--global', SOURCE], { stdio: 'inherit', encoding: undefined });
     if (install.status !== 0) { console.error('npm could not install the update.'); process.exitCode = 1; return; }
   }
   // The files on disk are the new version now; let it prepare its own agent.
