@@ -27,7 +27,7 @@ npm install -g github:mihaiiova/toad && toad setup
 | | Needed for |
 |---|---|
 | Node.js 22.19+ on Linux or macOS | everything (Windows: see below) |
-| A [DeepSeek](https://platform.deepseek.com/api_keys) API key | the model the agent uses |
+| An API key for a model provider Pi supports (Anthropic, OpenAI, Google, DeepSeek, OpenRouter and [many more](https://pi.dev/models)) | the model the agent uses |
 | [Docker](https://docs.docker.com/get-docker/) or [Podman](https://podman.io), running | CLI tests; web tests work without it |
 
 On Linux without Docker or Podman, CLI tests can use
@@ -51,20 +51,57 @@ Toad installs straight from GitHub for now (it is not on npm yet). Add
 
 1. Prepares the testing agent in `~/.local/share/toad/agent/<version>/`.
 2. Downloads Chromium for web tests (about 150 MB the first time).
-3. Asks for your DeepSeek key, checks it, and saves it in
-   `~/.config/toad/credentials.json`, readable only by you.
+3. Asks which models to use: a lead model, which plans each test and writes
+   the report, and a tester model, which runs the scenarios (see
+   [Choosing models](#choosing-models)). For each, pick a provider, then one
+   of its suggested models or any other model Pi can run. It asks for each
+   provider's key, checks every model with one short call (a few dozen
+   tokens), and saves the keys in `~/.config/toad/credentials.json` and the
+   choice in `~/.config/toad/settings.json`, both readable only by you.
 4. Finds Docker or Podman for CLI tests and offers to download the default
    image (`node:22-bookworm`, about 1 GB; otherwise it downloads on the first
    CLI test).
 5. Finds Claude Code, Codex and Pi on your machine and offers to register
    Toad with each.
 
-`toad setup --yes` accepts every default without asking; it then takes the key
-from `DEEPSEEK_API_KEY`. Check the result any time with:
+`toad setup --yes` accepts every default without asking: it keeps the current
+models (DeepSeek's `deepseek-flash` for both on a new install) and takes each
+key from the provider's variable, such as `DEEPSEEK_API_KEY`. Choose models
+without the questions with `--lead-model` and `--tester-model`, or `--model`
+for both, for example:
+
+```sh
+ANTHROPIC_API_KEY=… toad setup --yes --lead-model anthropic/claude-opus-5-5 --tester-model anthropic/claude-haiku-5-5
+```
+
+Check the result any time with:
 
 ```sh
 toad doctor
 ```
+
+### Choosing models
+
+Toad runs on two models, which can come from different providers:
+
+| | Does | Choose |
+|---|---|---|
+| Lead | plans the scenarios and writes the report, a few calls per test | a strong model |
+| Tester | runs each scenario in a browser or shell, in long tool loops, often several at once | a fast, cheaper model; most of the cost is here |
+
+Toad keeps no list of models. When setup runs, it reads two public catalogs:
+[Pi's](https://pi.dev/models), for the models Pi can run, and
+[models.dev](https://models.dev), for release dates, prices and tool support.
+It takes the newest model of each family from the provider's current
+generation, offers the pricier ones for the lead and the cheaper ones for the
+testers, so a model released after your version of Toad is offered without
+updating Toad. Any other model the provider offers is a search away. Without
+models.dev there are no suggestions, only the search. Without pi.dev, the
+search covers the models bundled with Pi.
+
+The testers rely on tool calls over long browser and shell sessions, so a
+weak tester model gives wrong verdicts more often. Run `toad setup` again to
+change models; your projects and runs stay.
 
 ### Update
 
@@ -72,8 +109,8 @@ toad doctor
 toad update
 ```
 
-It installs the latest `main` from GitHub, prepares its agent (your key and projects
-stay), and asks you to restart your coding agents.
+It installs the latest `main` from GitHub, prepares its agent (your models, keys and
+projects stay), and asks you to restart your coding agents.
 
 ## Connect your coding agent
 
@@ -271,7 +308,7 @@ Toad is installed once; everything about a project stays in that project.
 | Where | What |
 |---|---|
 | `<project>/.toad/` | defaults, secret values, runs |
-| `~/.config/toad/` | `projects.json` (the viewer's list), `credentials.json` (the model key) |
+| `~/.config/toad/` | `projects.json` (the viewer's list), `credentials.json` (model keys), `settings.json` (the chosen models) |
 | `~/.local/share/toad/agent/<version>/` | the prepared agent; older versions are removed on update |
 | `~/.cache/toad/scenarios/` | CLI workspaces, removed after 7 days unused |
 | `$XDG_RUNTIME_DIR/toad/` | run slots and per-run secret files (falls back to a private folder in the system temp directory) |
@@ -284,7 +321,7 @@ Environment variables, set where the MCP server is registered:
 
 | Variable | Default | |
 |---|---|---|
-| `DEEPSEEK_API_KEY` | the saved key | The model key; overrides the one `toad setup` saved |
+| The provider's key variable (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, …) | the saved key | The model key; overrides the one `toad setup` saved |
 | `TOAD_MAX_CONCURRENT_RUNS` | `2` | Runs at once across every Toad server on the machine; further calls wait |
 | `TOAD_CLI_SANDBOX` | `auto` | `container`, `bwrap`, or `auto` (a running container runtime, else Bubblewrap) |
 | `TOAD_CONTAINER_RUNTIME` | first that answers | `docker` or `podman` |
@@ -379,7 +416,7 @@ them.
   empty file, never the shared store. Names that affect process startup or the
   container runtime (`PATH`, `LD_*`, `NODE_OPTIONS`, `DOCKER_*`, …) are
   rejected for CLI runs.
-- The DeepSeek key is passed to the agent's environment. Pi Forge passes that
+- The model key is passed to the agent's environment. Pi Forge passes that
   whole environment to Pi, its tools and subprocesses, and other processes of
   your user can read it. A tested program can send credentials over the
   network or write them into its workspace.
@@ -413,7 +450,7 @@ only the names requested. Prefer `run_project_test`.
 ```sh
 git clone https://github.com/mihaiiova/toad.git && cd toad
 npm install
-cd agent && ./run          # installs the agent's Pi packages; /login to DeepSeek, then exit
+cd agent && ./run          # installs the agent's Pi packages; /login to a provider, then exit
 cd .. && npm link          # `toad` now runs this checkout
 npm test                   # MCP server, viewer, slots, launcher, and the CLI sandbox on every backend present
 ```

@@ -4,20 +4,23 @@
  *
  * The npm package ships the agent's definition (agent/). It is never run in
  * place: `toad setup` copies it to <data>/agent/<version>/ and installs its
- * pinned Pi packages there, so an update gets a fresh copy while the model key
- * stays in <config>/credentials.json. A git checkout whose agent/ has already
- * been set up with ./run is used in place, for development.
+ * pinned Pi packages there, so an update gets a fresh copy while the model keys
+ * stay in <config>/credentials.json and the chosen models in
+ * <config>/settings.json. A git checkout whose agent/ has already been set up
+ * with ./run is used in place, for development.
  */
 import { spawnSync } from 'node:child_process';
 import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, renameSync, closeSync, constants, fstatSync, openSync } from 'node:fs';
 import { delimiter, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import YAML from 'yaml';
 import { privateDir, toadDirs } from '../agent/tools/toad-dirs.mjs';
 
 export const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const VERSION = JSON.parse(readFileSync(join(PACKAGE_ROOT, 'package.json'), 'utf8')).version;
-const TEMPLATE = join(PACKAGE_ROOT, 'agent');
-const RUNNER = join('.pi', 'git', 'github.com', 'mihaiiova', 'pi-forge', 'skills', 'forge', 'workflow-runner.mjs');
+export const TEMPLATE = join(PACKAGE_ROOT, 'agent');
+const FORGE = join('.pi', 'git', 'github.com', 'mihaiiova', 'pi-forge', 'skills', 'forge');
+const RUNNER = join(FORGE, 'workflow-runner.mjs');
 const READY = '.toad-ready.json';
 
 /** The folder holding the `pi` command this package depends on. */
@@ -91,6 +94,11 @@ export function prepareAgent({ log = () => {}, force = false } = {}) {
     }
   }
   if (!existsSync(join(staging, RUNNER))) { rmSync(staging, { recursive: true, force: true }); throw new Error('The Forge workflow runner was not installed'); }
+  const chosen = readModels();
+  if (chosen) {
+    try { if (applyModels(staging, chosen)) log(`Using ${describeModels(chosen)}`); }
+    catch (error) { rmSync(staging, { recursive: true, force: true }); throw error; }
+  }
   writeFileSync(join(staging, READY), JSON.stringify({ version: VERSION, prepared: new Date().toISOString() }) + '\n');
   rmSync(target, { recursive: true, force: true });
   renameSync(staging, target);
@@ -146,10 +154,77 @@ export function saveCredential(name, value) {
   renameSync(temp, credentialsPath());
 }
 
-/** Whether Pi, as a run would start it, has a DeepSeek key (saved, inherited, or a /login). */
+const settingsPath = () => join(toadDirs().config, 'settings.json');
+
+function readSettings() {
+  try { const data = JSON.parse(readFileSync(settingsPath(), 'utf8')); return data && typeof data === 'object' && !Array.isArray(data) ? data : {}; }
+  catch { return {}; }
+}
+
+/** The models `toad setup` chose, as { lead, tester } `provider/id` references, or null before any choice. */
+export function readModels() {
+  const models = readSettings().models;
+  const valid = ref => typeof ref === 'string' && /^[^/\s]+\/\S+$/.test(ref);
+  return valid(models?.lead) && valid(models?.tester) ? { lead: models.lead, tester: models.tester } : null;
+}
+
+export function saveModels(models) {
+  const dir = privateDir(toadDirs().config);
+  const data = { ...readSettings(), models: { lead: models.lead, tester: models.tester } };
+  const temp = join(dir, `.settings-${process.pid}.json`);
+  writeFileSync(temp, JSON.stringify(data, null, 2) + '\n', { mode: 0o600 });
+  renameSync(temp, settingsPath());
+}
+
+export const describeModels = ({ lead, tester }) => (lead === tester ? lead : `${lead} (lead) and ${tester} (testers)`);
+
+/** The models the agent's definition runs on: the orchestrator's (lead) and each tester's. */
+export function agentModels(agentDir) {
+  const system = YAML.parse(readFileSync(join(agentDir, '.pi', 'system.yaml'), 'utf8'));
+  return {
+    lead: { name: system.orchestrator.name, model: system.orchestrator.model },
+    testers: (system.agents ?? []).map(agent => ({ name: agent.name, model: agent.model })),
+  };
+}
+
+/**
+ * Point the agent at `models` with Forge's validated `assign` change, which
+ * also regenerates the files derived from system.yaml (the testers' agent
+ * files and .pi/settings.json). Returns whether anything changed.
+ */
+export function applyModels(agentDir, models) {
+  const current = agentModels(agentDir);
+  const operations = [current.lead.model === models.lead ? null : { op: 'assign', name: current.lead.name, model: models.lead },
+    ...current.testers.filter(t => t.model !== models.tester).map(t => ({ op: 'assign', name: t.name, model: models.tester }))].filter(Boolean);
+  if (!operations.length) return false;
+  const forge = join(agentDir, FORGE, 'forge.mjs');
+  if (!existsSync(forge)) throw new Error(`Forge is not installed in ${agentDir}`);
+  const file = join(privateDir(join(agentDir, '.forge')), `models-${process.pid}.json`);
+  writeFileSync(file, JSON.stringify(operations));
+  try {
+    const path = pathWithPi();
+    const result = spawnSync(process.execPath, [forge, 'change', agentDir, '--operations', file, '--yes'], {
+      cwd: agentDir, encoding: 'utf8', timeout: 60000, stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, [path.key]: path.value, PI_CODING_AGENT_DIR: join(agentDir, '.forge', 'pi-home') },
+    });
+    if (result.status !== 0) throw new Error(`Forge could not change the models: ${(result.stderr || result.stdout || result.error?.message || '').trim().split('\n').slice(-3).join(' ')}`);
+  } finally { rmSync(file, { force: true }); }
+  return true;
+}
+
+/**
+ * For each provider the agent's models use, whether Pi, as a run would start
+ * it, has credentials (a saved key, an inherited one, or a /login).
+ */
 export function modelReady(agentDir) {
-  const result = spawnSync('pi', ['auth', 'check', '--provider', 'deepseek', '--json', '--no-refresh'], {
-    cwd: agentDir, env: workflowEnv(agentDir, process.env), encoding: 'utf8', timeout: 30000, shell: process.platform === 'win32',
-  });
-  return result.status === 0;
+  const { lead, testers } = agentModels(agentDir);
+  const providers = [...new Set([lead.model, ...testers.map(t => t.model)].map(ref => String(ref).split('/')[0]))];
+  return providers.map(provider => ({ provider, ready: providerReady(agentDir, provider) }));
+}
+
+/** Whether Pi, as a run would start it, has credentials for `provider`. */
+export function providerReady(agentDir, provider, env = process.env) {
+  return spawnSync('pi', ['auth', 'check', '--provider', provider, '--json', '--no-refresh'], {
+    cwd: agentDir, env: workflowEnv(agentDir, env), encoding: 'utf8', timeout: 30000, shell: process.platform === 'win32',
+  }).status === 0;
 }
