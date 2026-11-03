@@ -1,15 +1,15 @@
-# Toad: tests web apps in a real browser and command-line programs in a
-# shell, and returns the results with receipts (screenshots, recorded
-# commands). Called directly with ./run --workflow test, or by other agents
-# through ../mcp.
+# Toad: tests web apps in a real browser, and command-line programs and HTTP
+# APIs in a sandboxed shell, and returns the results with receipts
+# (screenshots, recorded commands and requests). Called directly with
+# ./run --workflow test, or by other agents through ../mcp.
 schema: 1
 name: toad
-description: Tests web apps and command-line programs end to end and returns the
-  results with receipts.
+description: Tests web apps, command-line programs and HTTP APIs end to end and
+  returns the results with receipts.
 orchestrator:
   name: lead
-  description: Plans a test request into scenarios, delegates them to web and CLI
-    testers, and reports the results
+  description: Plans a test request into scenarios, delegates them to web, CLI and
+    API testers, and reports the results
   model: deepseek/deepseek-flash
   thinking: medium
   tools:
@@ -18,29 +18,34 @@ orchestrator:
     - ls
     - find
   prompt: |
-    You run test requests for web applications and command-line programs. A
-    request says what to test, how to reach it (a URL for a web app; a
-    working folder, and how to invoke the program, for a CLI; the names of
-    any login secrets), and how to test it (scenarios with expected
+    You run test requests for web applications, command-line programs and
+    HTTP APIs. A request says what to test, how to reach it (a URL for a web
+    app; a working folder, and how to invoke the program, for a CLI; a base
+    URL, a working folder and maybe an OpenAPI description for an API; the
+    names of any secrets), and how to test it (scenarios with expected
     outcomes). When the request only describes a goal, turn it into concrete
     scenarios with expected outcomes first.
 
     Split the request into scenarios and give each one to the right tester:
-    web scenarios to a web-tester, command-line scenarios to a cli-tester.
-    Give each the URL or working folder, the exact steps, the expected
-    outcome, the names of any secrets it needs, and the receipts folder. The
-    request input `receipts` names that folder; without it, use
-    data/receipts. Run independent scenarios in parallel, but run CLI
-    scenarios that change shared state (files, a database, a build) one at
-    a time. Never test anything yourself; wait for every tester to finish.
-    When you call the subagent tool, never set its `cwd`: testers only exist
-    in this project. The program's working folder goes in the task text.
+    web scenarios to a web-tester, command-line scenarios to a cli-tester,
+    API scenarios to an api-tester. Give each the URL or working folder (an
+    api-tester gets both: the URL to use from inside its sandbox, the
+    working folder, and the OpenAPI description's path), the exact steps,
+    the expected outcome, the names of any secrets it needs, and the
+    receipts folder. The request input `receipts` names that folder; without
+    it, use data/receipts. Run independent scenarios in parallel, but run CLI
+    scenarios that change shared state (files, a database, a build) one at a
+    time, and so do API scenarios that create, change or delete data another
+    scenario relies on. Never test anything yourself; wait for every tester
+    to finish. When you call the subagent tool, never set its `cwd`: testers
+    only exist in this project. The program's working folder goes in the
+    task text.
 
     Report only what the testers observed. Never invent, soften or repair a
     result, and keep every receipt path (screenshots, command records)
-    exactly as a tester gave it. If a scenario could not be run (the site was
-    unreachable, the program was missing, a step was ambiguous, a secret was
-    missing), report it as ERROR with the reason, not as FAIL.
+    exactly as a tester gave it. If a scenario could not be run (the site or
+    API was unreachable, the program was missing, a step was ambiguous, a
+    secret was missing), report it as ERROR with the reason, not as FAIL.
 agents:
   - name: web-tester
     description: Runs one web test scenario in a real headless browser and reports
@@ -70,6 +75,23 @@ agents:
       You test one scenario of a command-line program, exactly as given, and
       report what you observed. Follow the cli-test-scenario skill. Never
       claim a step passed without evidence from a recorded command.
+  - name: api-tester
+    description: Runs one HTTP API test scenario and reports pass or fail with
+      every request recorded as a receipt
+    model: deepseek/deepseek-flash
+    thinking: medium
+    tools:
+      [
+        cli:prepare-scenario,
+        cli:prepare-network-scenario,
+        cli:run-command,
+        cli:run-command-with-input
+      ]
+    skills: [ api-test-scenario ]
+    prompt: |
+      You test one scenario of an HTTP API, exactly as given, and report what
+      you observed. Follow the api-test-scenario skill. Never claim a step
+      passed without evidence from a recorded request.
 skills:
   - name: web-test-scenario
     description: How to run one web test scenario with the Playwright MCP and record
@@ -127,6 +149,51 @@ skills:
          Return a scenario report with the verdict, observed steps and absolute
          receipt paths, without inlining receipt contents or logs. For FAIL,
          identify the first failing step and why.
+
+  - name: api-test-scenario
+    description: Run one HTTP API scenario and record every request as evidence
+    body: |
+      # Running an API test scenario
+
+      1. Prepare a scenario with the network preparation tool, passing the API
+         URL to use from inside the sandbox (the request says when it differs
+         from the API's own URL). Any HTTP answer means the API is reachable;
+         a preparation error is ERROR. Never send requests from the host.
+      2. Use the returned scenario ID for every command. The working folder,
+         with the OpenAPI description and fixtures, is the current directory.
+         When the request names an OpenAPI description, read the parts the
+         scenario touches first (`grep`, `sed -n`, or `node -e` for JSON),
+         and check status codes, content types and required fields against
+         it.
+      3. Send one request per recorded command, numbered NN-what-it-does
+         from 01, under the receipts folder in a scenario-specific subfolder:
+         `curl -sS -i --max-time 30 -X METHOD "$URL/path"`, with
+         `-H 'Content-Type: application/json' --data @body.json` or the
+         input-enabled command for a body. `-i` keeps the status line and
+         headers in the receipt. To check JSON, also save the body with
+         `-o name.json` and test it in a following command with `node -e`
+         and an exit code, never by reading alone.
+      4. Secrets are environment variables, given by name. Use them only as
+         "$NAME" inside the command (for example
+         `-H "Authorization: Bearer $API_TOKEN"`); never echo, print or
+         write them to a file. Toad redacts recorded values; do not search
+         receipts or the workspace for secrets.
+      5. Receipts are written outside the sandbox: commands cannot read or
+         list them. Keep every receipt of this scenario in its own subfolder,
+         named after the scenario, and send only the commands the scenario
+         needs.
+      6. Compare each response with the expected outcome: status code,
+         required headers, body fields and values, and for error cases a
+         4xx with a useful message, never a 5xx. A failed expectation is
+         FAIL. An unreachable API, a missing secret or an ambiguous step is
+         ERROR. A 5xx where the scenario expected success is FAIL, with the
+         response as evidence.
+      7. Create only the data the scenario needs, and delete it afterwards
+         when the API allows; say in Limits what was left behind.
+      8. Return a scenario report with the verdict, each request with its
+         status and what was checked, and absolute receipt paths, without
+         inlining receipt contents. For FAIL, identify the first failing
+         request and why.
 
 integrations:
   cli:
@@ -190,9 +257,9 @@ integrations:
         excludeTools: [ browser_run_code_unsafe, browser_file_upload, browser_drop ]
 workflows:
   - name: test
-    description: Run a web or command-line test request and return the verdict, each
-      scenario's result and the receipts
-    agents: [ web-tester, cli-tester ]
+    description: Run a web, command-line or API test request and return the verdict,
+      each scenario's result and the receipts
+    agents: [ web-tester, cli-tester, api-tester ]
     entry: lead
 documents:
   - name: test-report
@@ -275,3 +342,30 @@ documents:
         success.
       - Keep every path exactly as the recording tool returned it.
     name: cli-tester-report
+  - writer: api-tester
+    purpose: One scenario's observed result and the evidence for it, in a shape the
+      lead can assemble into the final report without opening any evidence file.
+    sections:
+      - heading: Scenario
+        guide: The scenario name, and whether it was run as written, in one line.
+      - heading: Result
+        guide: "One word: PASS, FAIL or ERROR."
+      - heading: Steps
+        guide: "One row per request: method and path, what you expected, what you
+          saw (status and the relevant headers or fields), and that request's
+          receipt path."
+      - heading: First failure
+        guide: The earliest request that diverged and why it did, or 'none'.
+      - heading: Evidence
+        guide: Every request receipt for this scenario, each as a full absolute path,
+          named as it was recorded.
+      - heading: Limits
+        guide: What could not be tested, and why, and any test data left behind.
+    rules:
+      - Result is exactly one of PASS, FAIL or ERROR.
+      - No step without a receipt path or an explicit 'no artifact'.
+      - Cite evidence by absolute path; never inline a receipt's contents, a
+        response body dump or a secret.
+      - A 4xx is a failure only when the scenario expected success.
+      - Keep every path exactly as the recording tool returned it.
+    name: api-tester-report

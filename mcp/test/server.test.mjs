@@ -187,6 +187,39 @@ test('project CLI handoffs select referenced credentials and empty selections ex
   assert.equal(missing.isError, true); assert.match(JSON.stringify(missing), /Missing/);
 });
 
+test('API handoffs take defaults from toad.yaml, run in the CLI sandbox and map localhost for containers', async t => {
+  const dir = agent(t, { status: 'ok', answer: 'Verdict: PASS', code: 0 });
+  const project = mkdtempSync(join(tmpdir(), 'toad-api-'));
+  t.after(() => rmSync(project, { recursive: true, force: true }));
+  const client = await connect(t, dir);
+  await client.callTool({ name: 'setup_project', arguments: { project_path: project } });
+  writeFileSync(join(project, '.toad', 'toad.yaml'), 'api:\n  url: http://localhost:8080/api\n  spec: openapi.yaml\n');
+  writeFileSync(join(project, '.toad', '.env'), 'API_TOKEN=api-secret-731\n');
+  const handoff = { version: 1, kind: 'api', request: { goal: 'Check orders', scenarios: [{ name: 'No token', steps: 'GET /orders without a token', expected: '401' }] }, credentials: { token: { env: 'API_TOKEN' } } };
+  const result = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff } });
+  assert.equal(result.isError, false);
+  const text = JSON.parse(readFileSync(join(dir, 'args.json'), 'utf8')).find(a => a.startsWith('request='));
+  assert.match(text, /Test the HTTP API at http:\/\/localhost:8080\/api\./);
+  assert.match(text, new RegExp(`with the API's description and test fixtures: ${project.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.`), 'workdir defaults to the project');
+  assert.match(text, /The OpenAPI description is openapi\.yaml/);
+  assert.match(text, /Use each env name as a shell environment variable/);
+  let container = false;
+  try { container = chooseSandbox().sandbox === 'container'; } catch {}
+  if (container) assert.match(text, /use http:\/\/host\.docker\.internal:8080\/api instead/);
+  else assert.doesNotMatch(text, /host\.docker\.internal/);
+  // Secrets reach the sandbox as variables (JSON), as for CLI runs, never the call or the records.
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, 'secret-observed'), 'utf8')), { API_TOKEN: 'api-secret-731' });
+  const run = resolve(result.structuredContent.receipts, '..');
+  for (const record of [JSON.stringify(result), text, readFileSync(join(run, 'handoff.yaml'), 'utf8')]) assert.doesNotMatch(record, /api-secret-731/);
+  assert.equal(JSON.parse(readFileSync(join(run, 'handoff.yaml'), 'utf8')).target.workdir, project);
+
+  writeFileSync(join(project, '.toad', 'toad.yaml'), '# no defaults\n');
+  const missing = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff } });
+  assert.equal(missing.isError, true); assert.match(JSON.stringify(missing), /API handoff requires target\.url/);
+  const reserved = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff: { ...handoff, target: { url: 'https://api.example.test' }, credentials: { bad: { env: 'NODE_OPTIONS' } } } } });
+  assert.equal(reserved.isError, true); assert.match(JSON.stringify(reserved), /reserved/);
+});
+
 let sandboxAvailable = true;
 try { chooseSandbox(); } catch { sandboxAvailable = false; }
 test('MCP CLI run delivers only selected variables through the actual sandboxed recorder', { skip: !sandboxAvailable && 'no CLI sandbox on this machine' }, async t => {

@@ -1,7 +1,7 @@
-<!-- forge:generated v1 sha256=b0222b12952142867a750ba848ec8470976ef02cbdbbc88ffef70a276b421f47 -->
+<!-- forge:generated v1 sha256=ca1253db13695078229ccdc49cddcb623340291fcfcc90120a76d47a26626276 -->
 # toad
 
-Tests web apps and command-line programs end to end and returns the results with receipts.
+Tests web apps, command-line programs and HTTP APIs end to end and returns the results with receipts.
 
 ## Run
 

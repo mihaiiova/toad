@@ -73,6 +73,7 @@ function targetOf(handoff) {
   if (!handoff) return '';
   if (handoff.kind === 'web') return handoff.target?.url ?? '';
   if (handoff.kind === 'cli') return [handoff.target?.program, handoff.target?.image && `in ${handoff.target.image}`].filter(Boolean).join(' ');
+  if (handoff.kind === 'api') return handoff.target?.url ?? '';
   return '';
 }
 
