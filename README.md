@@ -9,6 +9,9 @@ every command or request (exit code, output, duration) for CLI and API steps.
 It is built to be called by your coding agent (Claude Code, Pi, Codex, Cursor
 or any MCP client): the agent hands Toad a test, Toad runs it independently,
 and the agent gets back evidence instead of its own opinion of its work.
+Tests worth keeping are saved as suites in the project, and `toad run` runs
+them again without a coding agent: before a release, or in CI on every
+deploy.
 
 ```sh
 npm install -g github:mihaiiova/toad && toad setup
@@ -19,6 +22,7 @@ npm install -g github:mihaiiova/toad && toad setup
 - [Connect your coding agent](#connect-your-coding-agent)
 - [Test a project](#test-a-project)
 - [See results in the browser](#see-results-in-the-browser)
+- [Run tests on every deploy](#run-tests-on-every-deploy)
 - [Reference](#reference)
 - [Security and limits](#security-and-limits)
 
@@ -28,7 +32,7 @@ npm install -g github:mihaiiova/toad && toad setup
 |---|---|
 | Node.js 22.19+ on Linux or macOS | everything (Windows: see below) |
 | An API key for a model provider Pi supports (Anthropic, OpenAI, Google, DeepSeek, OpenRouter and [many more](https://pi.dev/models)) | the model the agent uses |
-| [Docker](https://docs.docker.com/get-docker/) or [Podman](https://podman.io), running | CLI and API tests; web tests work without it |
+| [Docker](https://docs.docker.com/get-docker/) or [Podman](https://podman.io), running | CLI and API tests; web tests work without it (on a CI runner without either, see `--sandbox none`) |
 
 On Linux without Docker or Podman, CLI tests can use
 [Bubblewrap](https://github.com/containers/bubblewrap) 0.8 or later instead.
@@ -44,8 +48,9 @@ npm install -g github:mihaiiova/toad
 toad setup
 ```
 
-Toad installs straight from GitHub for now (it is not on npm yet). Add
-`#<commit>` to install a specific version instead of `main`.
+Toad installs straight from GitHub for now (it is not on npm yet). Add a
+release tag, such as `#v0.7.0`, or `#<commit>` to install that version
+instead of `main`.
 
 `toad setup` walks through everything once, and can be run again at any time:
 
@@ -166,7 +171,11 @@ In your project, ask your coding agent in plain words, for example:
 
 The agent calls `setup_project` once, writes a handoff (the target, the goal
 and scenarios with expected outcomes) and calls `run_project_test`. It gets
-back the verdict, the report and the receipt paths.
+back the verdict, each scenario's result, the report and the receipt paths.
+
+To keep a test, ask for a suite: *"Save that as a Toad suite tagged smoke."*
+The agent writes `.toad/suites/<name>.yaml`, which you commit and run with
+`toad run` (see [Run tests on every deploy](#run-tests-on-every-deploy)).
 
 Before you ask:
 
@@ -622,7 +631,8 @@ restricted keys.
 code.** Containers share the host kernel, and both backends allow network
 access. Workspaces persist (until pruned) and may contain sensitive data.
 Copying and workspace checks assume no hostile process of your user is racing
-them.
+them. `--sandbox none` removes even that: commands run on the machine as your
+user. Use it only on disposable CI runners.
 
 **Credentials are best-effort protected, not isolated.**
 
@@ -644,9 +654,14 @@ them.
   cleanup, or the server is killed, it stays in the runtime folder's
   `secrets/` and the result names it; remove it once no process can still be
   using it.
+- With `toad run --env NAME`, values come from the CI job's environment
+  instead of `.toad/.env`; the same rules apply once they are read. The
+  whole job environment, including other secrets, is inherited by the agent
+  (as above), so give the job only the secrets its suites need.
 - Redaction of the report and result is best effort. Screenshots, page
-  content, logs, files and transformed values can still expose secrets; treat
-  every run folder as sensitive.
+  content, logs, files, transformed values and the Pi session transcripts in
+  `runs/<id>/sessions/` can still expose secrets; treat every run folder,
+  and any CI artifact made from it, as sensitive.
 
 **Paths are checked, not confined.** `project_path` must be absolute and
 canonical; symlinked projects and `.toad` folders are rejected, and the `.env`
@@ -654,7 +669,14 @@ file is opened without following symlinks. These checks assume no hostile
 process is changing the project at the same time.
 
 **Web tests act on the site.** The browser clicks, types and submits forms.
-Point it at test or staging environments.
+Point it at test or staging environments. A suite's `writes: false` is an
+instruction to the agent, not an enforced limit; `--allow-writes` only
+decides which suites `toad run` starts.
+
+**Spending limits are approximate.** `--max-cost` adds up the prices Pi
+records for each reply, checked every two seconds, so a run can go slightly
+over before it stops, and a model without catalog prices counts as free. Set
+a limit with your provider too.
 
 ### Legacy tools
 
@@ -672,7 +694,7 @@ git clone https://github.com/mihaiiova/toad.git && cd toad
 npm install
 cd agent && ./run          # installs the agent's Pi packages; /login to a provider, then exit
 cd .. && npm link          # `toad` now runs this checkout
-npm test                   # MCP server, viewer, slots, launcher, and the CLI sandbox on every backend present
+npm test                   # MCP server, toad run, viewer, slots, launcher, and the CLI sandbox on every backend present
 ```
 
 A checkout whose `agent/` has been set up this way is used in place of the
@@ -681,15 +703,18 @@ prepared copy. Change the agent with `/forge` inside `agent/run`.
 ### Releasing
 
 `.github/workflows/test.yml` runs the tests on Linux, macOS and Windows for
-every push. Installs come from GitHub for now, so pushing to `main` is a
-release. Once Toad goes to npm, publish a version with:
+every push. Installs come from GitHub for now: `main` is the latest, and each
+release is a tag that installs and CI jobs can pin (`github:mihaiiova/toad#v0.7.0`).
+Release a version with:
 
 ```sh
 npm version minor          # or patch / major: updates package.json and tags
-git push --follow-tags     # the release workflow tests and publishes the tag
+git push --follow-tags     # the release workflow tests the tag and publishes it to npm
 ```
 
-Publishing needs an npm automation token in the repository secret `NPM_TOKEN`.
+Publishing to npm needs an npm automation token in the repository secret
+`NPM_TOKEN`; until it is set, the workflow's publish step fails and the tag is
+still installable from GitHub.
 
 ## License
 

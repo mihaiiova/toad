@@ -1,7 +1,7 @@
 {
   "name": "@mihaiiova/toad",
   "version": "0.7.0",
-  "description": "Toad: a testing agent your coding agent can call. Tests web apps in a real browser and CLIs in a container, and returns a verdict with receipts.",
+  "description": "Toad: a testing agent your coding agent can call. Tests web apps in a real browser, and CLIs and HTTP APIs in a sandbox, returns a verdict with receipts, and reruns saved suites in CI with toad run.",
   "type": "module",
   "bin": {
     "toad": "mcp/cli.mjs"
