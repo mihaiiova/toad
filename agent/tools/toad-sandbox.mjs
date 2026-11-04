@@ -6,10 +6,13 @@
  *              (TOAD_CLI_IMAGE, default node:22-bookworm) with a read-only root
  *              filesystem, no capabilities and only the workspace writable.
  *   bwrap      Bubblewrap 0.8+ on Linux, with the host's /usr read-only.
+ *   none       No isolation: commands run on the host, in the copied workspace,
+ *              with a minimal environment. Only when TOAD_CLI_SANDBOX=none asks
+ *              for it (CI runners without a container runtime); receipts say so.
  *
- * TOAD_CLI_SANDBOX picks one (container | bwrap); the default, auto, prefers a
- * running container runtime and falls back to Bubblewrap. There is never a
- * fallback to running on the host.
+ * TOAD_CLI_SANDBOX picks one (container | bwrap | none); the default, auto,
+ * prefers a running container runtime and falls back to Bubblewrap. There is
+ * never a fallback to running on the host.
  */
 import { spawnSync } from 'node:child_process';
 import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -36,6 +39,17 @@ export function isReservedSecretName(name) {
 export function sandboxEnv(secret = {}) {
   return { ...secret, PATH: '/usr/local/bin:/usr/bin:/bin', LANG: 'C.UTF-8' };
 }
+/**
+ * The environment for an unsandboxed command: the host's PATH (so its tools
+ * are found), the workspace's home and the selected secrets, nothing else.
+ */
+export function hostEnv(workspace, secret = {}) {
+  const keep = process.platform === 'win32' ? ['SYSTEMROOT', 'COMSPEC', 'PATHEXT', 'WINDIR'] : [];
+  const kept = Object.fromEntries(Object.entries(process.env).filter(([k]) => keep.includes(k.toUpperCase())));
+  return { ...kept, ...secret, PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin', HOME: join(workspace, 'home'), TMPDIR: join(workspace, 'tmp'), LANG: 'C.UTF-8', TOAD_SANDBOX: 'none' };
+}
+/** The shell an unsandboxed command runs in. */
+export const hostShell = () => (process.platform === 'win32' ? 'sh' : '/bin/sh');
 
 /** A container runtime whose daemon (or machine) answers, or null. */
 export function containerRuntime(env = process.env) {
@@ -63,7 +77,8 @@ const atLeast = (version, min) => {
 /** Pick the backend for a new scenario, or explain why CLI tests cannot run. */
 export function chooseSandbox(env = process.env) {
   const wanted = env.TOAD_CLI_SANDBOX || 'auto';
-  if (!['auto', 'container', 'bwrap'].includes(wanted)) throw new Error(`Unknown TOAD_CLI_SANDBOX: ${wanted}`);
+  if (!['auto', 'container', 'bwrap', 'none'].includes(wanted)) throw new Error(`Unknown TOAD_CLI_SANDBOX: ${wanted}`);
+  if (wanted === 'none') return { sandbox: 'none' };
   if (wanted !== 'bwrap') {
     const container = containerRuntime(env);
     if (container) return { sandbox: 'container', ...container, image: env.TOAD_CLI_IMAGE || DEFAULT_IMAGE };
@@ -140,7 +155,19 @@ function preflight(sandbox, workspace, script, extra = []) {
     if (result.status === null) spawnSync(sandbox.runtime, ['kill', name], { stdio: 'ignore', timeout: 15000 });
     return result;
   }
+  if (sandbox.sandbox === 'none') {
+    // The host's /usr is writable here; only the workspace itself is checked.
+    const host = script === PREFLIGHT ? 'set -eu; printf ok > .toad-preflight; test "$(cat .toad-preflight)" = ok; rm .toad-preflight; test -w "$HOME"' : script;
+    return spawnSync(hostShell(), ['-c', host, ...extra], { cwd: join(workspace, 'project'), env: hostEnv(workspace), encoding: 'utf8', timeout: 15000 });
+  }
   return spawnSync('bwrap', sandboxArgs(workspace, ['/bin/sh', '-c', script, ...extra]), { env: sandboxEnv(), encoding: 'utf8', timeout: 15000 });
+}
+
+/** How a receipt and the lead describe a backend. */
+export function describeSandbox(sandbox) {
+  if (sandbox.sandbox === 'container') return `${sandbox.runtime} ${sandbox.image}`;
+  if (sandbox.sandbox === 'none') return 'none (commands ran on the host, unsandboxed)';
+  return 'bubblewrap';
 }
 
 /**
@@ -177,6 +204,7 @@ export function prepare(root, sourcePath, networkUrl) {
       cpSync(join(prepared, 'project'), project, { recursive: true, dereference: false, verbatimSymlinks: true });
       cpSync(join(prepared, 'home'), join(workspace, 'home'), { recursive: true, dereference: false, verbatimSymlinks: true });
     } else mkdirSync(join(workspace, 'home'), { mode: 0o700 });
+    if (sandbox.sandbox === 'none') mkdirSync(join(workspace, 'tmp'), { recursive: true, mode: 0o700 });
     if (!prepared) cpSync(source, project, { recursive: true, dereference: false, filter: path => {
       const rel = relative(source, path);
       if (!rel) return true;
@@ -193,7 +221,7 @@ export function prepare(root, sourcePath, networkUrl) {
     if (networkUrl) {
       // Reachability, not success: an API's base URL may well answer 401 or 404.
       const node = 'node -e "fetch(process.argv[1], {signal: AbortSignal.timeout(10000)}).catch(() => { process.exitCode=1 })" "$0"';
-      const script = sandbox.sandbox === 'container'
+      const script = sandbox.sandbox !== 'bwrap'
         ? `if command -v node >/dev/null 2>&1; then ${node}; elif command -v curl >/dev/null 2>&1; then curl -sS -o /dev/null --max-time 10 "$0"; else wget -q -T 10 -O /dev/null "$0" || [ $? -eq 8 ]; fi`
         : `exec ${node}`;
       const network = preflight(sandbox, workspace, script, [networkUrl]);

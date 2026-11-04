@@ -100,11 +100,21 @@ function playwrightSpec(agent) {
   } catch { return null; }
 }
 
-function browserInstalled() {
-  const roots = [process.env.PLAYWRIGHT_BROWSERS_PATH,
-    process.platform === 'darwin' ? join(homedir(), 'Library', 'Caches', 'ms-playwright')
-      : windows ? join(process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local'), 'ms-playwright')
-        : join(process.env.XDG_CACHE_HOME || join(homedir(), '.cache'), 'ms-playwright')].filter(Boolean);
+/**
+ * Install (or update) the browser the agent's Playwright MCP drives. Quick
+ * when it is there already. Resolves with { status, output }.
+ */
+export function installBrowser(agent) {
+  const spec = playwrightSpec(agent);
+  if (!spec) return Promise.resolve({ status: null, output: 'Could not find the Playwright version in the agent' });
+  return runQuietly('npx', ['-y', spec, 'install-browser', 'chrome-for-testing'], { timeout: 20 * 60 * 1000 });
+}
+
+export function browserInstalled(env = process.env) {
+  // Playwright looks only in PLAYWRIGHT_BROWSERS_PATH when it is set.
+  const roots = [env.PLAYWRIGHT_BROWSERS_PATH || (process.platform === 'darwin' ? join(homedir(), 'Library', 'Caches', 'ms-playwright')
+      : windows ? join(env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local'), 'ms-playwright')
+        : join(env.XDG_CACHE_HOME || join(homedir(), '.cache'), 'ms-playwright'))];
   return roots.some(root => { try { return readdirSync(root).some(name => name.startsWith('chrom')); } catch { return false; } });
 }
 
@@ -301,7 +311,7 @@ export async function setup(options = {}) {
     // The installer is quick when the right browser is there; a newer Playwright may need a newer one.
     s.start(browserInstalled() ? 'Checking the browser for web tests' : 'Downloading Chromium for web tests (about 150 MB)');
     // Playwright's installer prints advice meant for its own projects; show its output only on failure.
-    const result = await runQuietly('npx', ['-y', spec, 'install-browser', 'chrome-for-testing'], { timeout: 20 * 60 * 1000 });
+    const result = await installBrowser(agent);
     if (result.status === 0) s.stop('Browser for web tests: installed');
     else {
       s.error('The browser download failed; web tests will not work until it succeeds. Run `toad setup` again.');

@@ -17,6 +17,7 @@ const USAGE = `Usage:
       --force                     prepare the agent again from scratch
   toad doctor                   check that everything Toad needs is in place
   toad update [--from <dir>]    install the latest from GitHub (or a local checkout's) and prepare it
+  toad run [options]            run the project's saved suites, e.g. in CI (toad run --help)
   toad mcp                      run the MCP server over stdio (coding agents start this)
   toad ui [--port <port>]       browse every project's runs on localhost
   toad projects                 list the projects Toad has been set up in
@@ -34,6 +35,19 @@ function portOf(args) {
 const [command, ...args] = process.argv.slice(2);
 try {
   if (command === 'mcp') await import('./server.mjs');
+  else if (command === 'run') {
+    const { RUN_USAGE, UsageError, parseRunArgs, toadRun } = await import('./toad-run.mjs');
+    if (args.includes('--help') || args.includes('-h')) console.log(RUN_USAGE);
+    else {
+      let options;
+      try { options = parseRunArgs(args); }
+      catch (error) { if (!(error instanceof UsageError)) throw error; console.error(`toad run: ${error.message}\n\n${RUN_USAGE}`); process.exit(3); }
+      // Ctrl-C or a CI cancellation stops the runs in progress, which then report as errors.
+      const stop = new AbortController();
+      for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => { console.error('toad run: stopping…'); stop.abort(); });
+      process.exitCode = await toadRun(options, { signal: stop.signal });
+    }
+  }
   else if (command === 'setup') {
     const known = ['--yes', '--no-register', '--skip-browser', '--skip-image', '--force'];
     const models = {};
@@ -73,5 +87,6 @@ try {
   else { console.error(USAGE); process.exitCode = 1; }
 } catch (error) {
   console.error(`toad: ${error.message}`);
-  process.exitCode = 1;
+  // toad run's codes are for CI: 3 means it could not start.
+  process.exitCode = command === 'run' ? 3 : 1;
 }

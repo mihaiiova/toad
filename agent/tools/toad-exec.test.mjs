@@ -7,7 +7,7 @@ const tmpdir = () => realpathSync(osTmpdir());
 import { join, resolve } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 
-import { bwrapVersion, containerRuntime, MIN_BWRAP } from './toad-sandbox.mjs';
+import { bwrapVersion, chooseSandbox, containerRuntime, MIN_BWRAP } from './toad-sandbox.mjs';
 
 const recorder = resolve(import.meta.dirname, 'toad-exec.mjs');
 // Every test runs against each sandbox this machine has. The container tests
@@ -209,4 +209,40 @@ for (const name of BACKENDS) describe(`with ${name}`, () => {
     assert.match(receipt, backend === 'container' ? new RegExp(`sandbox: (docker|podman) ${IMAGE}`) : /sandbox: bubblewrap/);
     assert.equal(existsSync(join(root, 'runtime', 'secrets')) ? readdirSync(join(root, 'runtime', 'secrets')).length : 0, 0);
   });
+});
+
+describe('with --sandbox none', () => {
+  beforeEach(() => { backend = 'none'; });
+  test('commands run on the host in the copied workspace, with a minimal environment, and receipts say so', t => {
+    const { root, target, run, prepare } = setup(t, 'API_TOKEN=s3cret-value\n');
+    const id = prepare();
+    const workspace = join(root, 'cache/scenarios', id);
+    const result = run(['run', 'data/receipts/r1', 'scenario-01', id, 'cat hello.txt; echo made > made.txt; echo "home=$HOME"; echo "token=$API_TOKEN"; echo "leak=${SHOULD_NOT_LEAK:-none}"'], { env: { ...process.env, SHOULD_NOT_LEAK: 'visible' } });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /hello from project/);
+    assert.match(result.stdout, new RegExp(`home=${join(workspace, 'home')}`));
+    assert.match(result.stdout, /token=\[secret:API_TOKEN\]/, 'selected secrets arrive, and are redacted');
+    assert.match(result.stdout, /leak=none/, 'the host environment is not inherited');
+    assert.equal(existsSync(join(target, 'made.txt')), false, 'the original project is untouched');
+    assert.equal(readFileSync(join(workspace, 'project', 'made.txt'), 'utf8'), 'made\n');
+    assert.match(readFileSync(join(root, 'data/receipts/r1/scenario-01.txt'), 'utf8'), /sandbox: none \(commands ran on the host, unsandboxed\)/);
+    const prepared = run(['prepare', target]);
+    assert.match(prepared.stdout, /Sandbox: none: commands run on the host/);
+    assert.match(prepared.stdout, /Working folder: .*project \(use it, or relative paths, instead of \/work\)/);
+  });
+  test('a timed-out command is stopped with its children', t => {
+    const { run, prepare } = setup(t);
+    const id = prepare();
+    const started = Date.now();
+    const result = run(['run', 'data/receipts/r1', 'scenario-01', id, 'sleep 30 & sleep 30; wait'], { env: { ...process.env, TOAD_COMMAND_TIMEOUT_S: '1' } });
+    assert.match(result.stdout, /timed out after 1s/);
+    assert.ok(Date.now() - started < 10000);
+  });
+});
+
+test('auto never picks the unsandboxed backend', () => {
+  let picked;
+  try { picked = chooseSandbox({ TOAD_CLI_SANDBOX: 'auto' }).sandbox; } catch { picked = 'unavailable'; }
+  assert.notEqual(picked, 'none');
+  assert.equal(chooseSandbox({ TOAD_CLI_SANDBOX: 'none' }).sandbox, 'none');
 });

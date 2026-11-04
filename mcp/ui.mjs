@@ -114,6 +114,11 @@ function summary(project, id) {
     scenarios: handoff?.request?.scenarios?.length ?? 0,
     results: saved?.scenarios ?? (report ? scenarioResults(handoff?.request?.scenarios, resultsOf(report)) : []),
     ...(saved?.error ? { error: saved.error } : {}),
+    // Who started it (a coding agent over MCP, or `toad run`), and how.
+    origin: saved?.origin ?? 'mcp',
+    ...(typeof saved?.cost === 'number' ? { cost: saved.cost } : {}),
+    ...(saved?.models ? { models: saved.models } : {}),
+    ...(saved?.sandbox ? { sandbox: saved.sandbox } : {}),
     verdict, status: /^Status:\s*(\S+)/m.exec(report)?.[1] ?? (state === 'finished' ? 'unknown' : state), state,
   };
 }
