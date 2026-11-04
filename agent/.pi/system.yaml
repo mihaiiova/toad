@@ -41,6 +41,16 @@ orchestrator:
     only exist in this project. The program's working folder goes in the
     task text.
 
+    Give each tester its own receipts folder, `<receipts folder>/<slug>`,
+    where the slug is the scenario's name in lowercase with every run of
+    other characters replaced by one hyphen (for example "Pi is available"
+    becomes `pi-is-available`), and tell it to save every receipt there.
+    Give each tester the scenario's name exactly as the request wrote it, and
+    pass on what the request says about setup and installing prerequisites.
+    When a scenario fails or errors because a program, package or module it
+    needs is missing, say so as a missing prerequisite, apart from product
+    failures.
+
     Report only what the testers observed. Never invent, soften or repair a
     result, and keep every receipt path (screenshots, command records)
     exactly as a tester gave it. If a scenario could not be run (the site or
@@ -142,10 +152,26 @@ skills:
          receipts folder, in a scenario-specific subfolder. Name each command
          NN-what-it-does, numbering from 01. Use the input-enabled command
          when needed. The workspace is scratch space, not evidence.
+         Commands run with `/bin/sh`, not bash: use POSIX shell only (no
+         `${PIPESTATUS[@]}`, `[[ ]]`, arrays or `source`), or run
+         `bash -c '...'` when the image has bash.
       4. Compare recorded exit codes and output with the expected outcomes.
          A failed expectation is FAIL; missing dependencies, sandbox errors,
          missing secrets or ambiguous steps are ERROR. Do not infer success.
-      5. Secrets are referenced by environment variable name, never value.
+      5. If a step fails because a program, package or module it needs is
+         missing ("command not found", "Cannot find module", "is not
+         installed"), that is a missing prerequisite, not a product failure:
+         record a command that shows it is missing and name it in the report.
+         Install it only when the request says installing prerequisites is
+         allowed, and then only inside the workspace or $HOME: the rest of
+         the filesystem is read-only, so `npm install -g`, `apt-get` and
+         `sudo` do not work. Use a local install (`npm install --no-save
+         pkg@version`, `pip install --target .toad-deps pkg==version`) and
+         put its bin folder first on PATH within the same command (for
+         example `PATH="$PWD/node_modules/.bin:$PATH" tool --version`).
+         Record the install and the retried step as receipts. If installing
+         is not allowed, or the install fails, the step is ERROR.
+      6. Secrets are referenced by environment variable name, never value.
          Return a scenario report with the verdict, observed steps and absolute
          receipt paths, without inlining receipt contents or logs. For FAIL,
          identify the first failing step and why.
@@ -159,7 +185,8 @@ skills:
          URL to use from inside the sandbox (the request says when it differs
          from the API's own URL). Any HTTP answer means the API is reachable;
          a preparation error is ERROR. Never send requests from the host.
-      2. Use the returned scenario ID for every command. The working folder,
+      2. Use the returned scenario ID for every command. Commands run with
+         `/bin/sh`, not bash: use POSIX shell only. The working folder,
          with the OpenAPI description and fixtures, is the current directory.
          When the request names an OpenAPI description, read the parts the
          scenario touches first (`grep`, `sed -n`, or `node -e` for JSON),
@@ -185,7 +212,9 @@ skills:
       6. Compare each response with the expected outcome: status code,
          required headers, body fields and values, and for error cases a
          4xx with a useful message, never a 5xx. A failed expectation is
-         FAIL. An unreachable API, a missing secret or an ambiguous step is
+         FAIL. An unreachable API, a missing secret, a missing tool the
+         scenario needs (handle it as the cli-test-scenario skill describes,
+         installing only when the request allows it) or an ambiguous step is
          ERROR. A 5xx where the scenario expected success is FAIL, with the
          response as evidence.
       7. Create only the data the scenario needs, and delete it afterwards
@@ -267,6 +296,10 @@ documents:
     purpose: A test result another agent or a person can act on without rerunning
       the test.
     sections:
+      - heading: Results
+        guide: "One line per requested scenario, in request order, exactly
+          `- PASS | <scenario name>`, `- FAIL | <scenario name>` or
+          `- ERROR | <scenario name>`, under a line that is exactly `Results:`."
       - heading: Verdict
         guide: One sentence on why the whole request passed, failed or could not be
           tested.
@@ -281,7 +314,20 @@ documents:
         guide: Anything requested that could not be tested, and the reason.
     rules:
       - "The report's first line is exactly `Verdict: PASS`, `Verdict: FAIL` or
-        `Verdict: ERROR`. Callers read it."
+        `Verdict: ERROR`. Nothing comes before it: no greeting, progress note
+        or summary. Callers read it."
+      - "The second line is exactly `Results:`, followed by the result lines,
+        before any other text. Callers read them."
+      - Copy each scenario name character for character from the request. A
+        request without named scenarios gets one result line named after its
+        goal; scenarios you derived from a goal use the names you gave them.
+      - Every requested scenario has exactly one result line. A scenario that
+        was not run, was blocked or has no tester report is ERROR, never left
+        out.
+      - The verdict is FAIL if any result is FAIL, otherwise ERROR if any is
+        ERROR, otherwise PASS.
+      - Name every missing prerequisite (program, package or module) in Not
+        tested, with the scenarios it blocked.
       - Use only what the testers reported.
       - Keep receipt paths exactly as reported.
       - Write every receipt, screenshot and artifact path as a full absolute
@@ -331,8 +377,9 @@ documents:
         guide: Every command receipt for this scenario, each as a full absolute path,
           named as it was recorded.
       - heading: Limits
-        guide: "What could not be tested, and why: prepare errors, missing program,
-          missing secret, host-mode mismatches."
+        guide: "What could not be tested, and why: prepare errors, missing secret,
+          host-mode mismatches, and each missing prerequisite by name (program,
+          package or module), with whether it was installed and retried."
     rules:
       - Result is exactly one of PASS, FAIL or ERROR.
       - No step without a receipt path or an explicit 'no artifact'.
@@ -360,7 +407,8 @@ documents:
         guide: Every request receipt for this scenario, each as a full absolute path,
           named as it was recorded.
       - heading: Limits
-        guide: What could not be tested, and why, and any test data left behind.
+        guide: What could not be tested, and why (naming any missing
+          prerequisite), and any test data left behind.
     rules:
       - Result is exactly one of PASS, FAIL or ERROR.
       - No step without a receipt path or an explicit 'no artifact'.

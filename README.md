@@ -198,6 +198,8 @@ cli:
   workdir: .                  # relative to the project, or absolute
   program: node dist/cli.js
   image: node:22-bookworm     # the container image CLI commands run in
+  setup:                      # run once in the sandbox before any scenario
+    - npm ci --ignore-scripts
 api:
   url: http://localhost:8080/api
   spec: openapi.yaml          # relative to workdir, which defaults to the project
@@ -206,6 +208,25 @@ timeout_minutes: 15
 
 It holds no secrets; commit it. Pick an `image` with your CLI's runtime, for
 example `python:3.12` or `golang:1.23`.
+
+`setup` (for `cli` and `api`) lists commands Toad itself runs once, in the
+sandbox, before any scenario: installing dependencies, or a tool the tests
+need that is not in `package.json`. Every scenario then starts from a copy of
+the result, and each command is recorded under `receipts/setup/`. If one
+fails, the run ends as `ERROR` with `status: setup_failed` and no scenario
+runs. The sandbox's root is read-only, so install locally rather than
+globally:
+
+```yaml
+cli:
+  setup:
+    - npm ci --ignore-scripts
+    - npm install --no-save @earendil-works/pi-coding-agent@1.5.0  # its bin is node_modules/.bin
+```
+
+By default a tester that finds a program, package or module missing reports
+it as a missing prerequisite (`ERROR`). A handoff with `"allow_installs": true`
+lets the tester install it inside the sandbox, record the install, and retry.
 
 ### 3. Add test logins (if needed)
 
@@ -316,9 +337,17 @@ derives them from the goal.
 The result has the report as text and as structured content: `verdict`
 (`PASS`, `FAIL`, `ERROR`, or `UNKNOWN` when the report has none), `status`
 (how the run itself ended: `ok`, `timeout`, `blocked`, `cancelled`, `error`,
-`configuration_error`), `runId`, `receipts` (the folder), `files` and
-`screenshots`. A run that could not complete is a tool error; a failing test
-is not.
+`configuration_error`, `setup_failed`), `runId`, `scenarios` (each one's
+`name` and `result`; a scenario the report left out is `ERROR` with
+`missing: true`), `receipts` (the folder), `files` and `screenshots`. The
+verdict never contradicts a scenario: any `FAIL` makes the run `FAIL`,
+otherwise any `ERROR` makes it `ERROR`. A run that could not complete is a
+tool error; a failing test is not.
+
+A handoff may also carry a short `title`, which the run viewer shows instead
+of the goal. Each run's page shows every scenario's result with its own
+receipts, and has buttons that copy the handoff (all scenarios, or only those
+that failed or errored) for your coding agent to run again.
 
 ### Where things live
 
@@ -413,7 +442,8 @@ cd agent
 ```
 
 The last line of output is JSON with `status` and the report in `answer`,
-whose first line is `Verdict: PASS`, `FAIL` or `ERROR`.
+whose first line is `Verdict: PASS`, `FAIL` or `ERROR`, followed by a
+`Results:` block with one `- PASS | <scenario name>` line per scenario.
 
 ## Security and limits
 

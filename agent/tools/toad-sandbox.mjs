@@ -13,7 +13,7 @@
  */
 import { spawnSync } from 'node:child_process';
 import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { join, relative, resolve, sep } from 'node:path';
+import { basename, join, relative, resolve, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { privateDir, toadDirs } from './toad-dirs.mjs';
 
@@ -143,12 +143,27 @@ function preflight(sandbox, workspace, script, extra = []) {
   return spawnSync('bwrap', sandboxArgs(workspace, ['/bin/sh', '-c', script, ...extra]), { env: sandboxEnv(), encoding: 'utf8', timeout: 15000 });
 }
 
+/**
+ * The workspace a run's setup commands prepared, when it was made from this
+ * source: TOAD_BASE_SCENARIO names it. Scenarios then start from a copy of it
+ * (project and home, symlinks kept as links) instead of the original project.
+ */
+function baseFor(source, env = process.env) {
+  const id = env.TOAD_BASE_SCENARIO;
+  if (!id) return null;
+  const workspace = scenarioPath(null, id);
+  let meta;
+  try { meta = JSON.parse(readFileSync(join(workspace, 'metadata.json'), 'utf8')); } catch { throw new Error('The prepared setup workspace is unreadable'); }
+  return meta.source === source ? workspace : null;
+}
+
 export function prepare(root, sourcePath, networkUrl) {
   const source = realpathSync(resolve(sourcePath));
   if (!statSync(source).isDirectory()) throw new Error('Project path must be a directory');
   if (networkUrl) { const u = new URL(networkUrl); if (!['http:', 'https:'].includes(u.protocol) || u.username || u.password) throw new Error('Network preflight requires an HTTP(S) URL without credentials'); }
   const sandbox = chooseSandbox();
   if (sandbox.sandbox === 'container') ensureImage(sandbox);
+  const prepared = baseFor(source);
   const base = privateDir(scenariosRoot());
   if (realpathSync(base) !== base) throw new Error('Scenario root must not contain symlinks');
   pruneScenarios(base);
@@ -156,8 +171,13 @@ export function prepare(root, sourcePath, networkUrl) {
   mkdirSync(workspace, { mode: 0o700 });
   try {
     const project = join(workspace, 'project');
-    mkdirSync(join(workspace, 'home'), { mode: 0o700 });
-    cpSync(source, project, { recursive: true, dereference: false, filter: path => {
+    if (prepared) {
+      // Already filtered when the setup workspace was made; its installs may
+      // contain links (node_modules/.bin), which stay links inside the sandbox.
+      cpSync(join(prepared, 'project'), project, { recursive: true, dereference: false, verbatimSymlinks: true });
+      cpSync(join(prepared, 'home'), join(workspace, 'home'), { recursive: true, dereference: false, verbatimSymlinks: true });
+    } else mkdirSync(join(workspace, 'home'), { mode: 0o700 });
+    if (!prepared) cpSync(source, project, { recursive: true, dereference: false, filter: path => {
       const rel = relative(source, path);
       if (!rel) return true;
       const segments = rel.split(sep), name = segments.at(-1);
@@ -179,7 +199,7 @@ export function prepare(root, sourcePath, networkUrl) {
       const network = preflight(sandbox, workspace, script, [networkUrl]);
       if (network.status !== 0) throw new Error('Sandbox network preflight failed');
     }
-    writeFileSync(join(workspace, 'metadata.json'), JSON.stringify({ id, source, networkPreflight: networkUrl || null, sandbox }) + '\n', { mode: 0o600 });
+    writeFileSync(join(workspace, 'metadata.json'), JSON.stringify({ id, source, networkPreflight: networkUrl || null, sandbox, ...(prepared ? { from: basename(prepared) } : {}) }) + '\n', { mode: 0o600 });
     return { id, workspace, project, sandbox };
   } catch (error) { rmSync(workspace, { recursive: true, force: true }); throw error; }
 }

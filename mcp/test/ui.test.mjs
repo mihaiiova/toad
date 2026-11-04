@@ -89,6 +89,10 @@ test('runs report whether they are running, finished or interrupted', async t =>
     writeFileSync(join(runs, id, 'state.json'), JSON.stringify(state));
   };
   make('2026-11-03T10-00-00-000Z-live', { state: 'running', pid: process.pid, started: '2026-11-03T10:00:00.000Z' });
+  make('2026-11-03T11-30-00-000Z-failed', { state: 'failed', pid: process.pid, error: 'The Toad agent is not set up on this machine.', started: '2026-11-03T11:30:00.000Z' });
+  // A run that never recorded a state, as an older server left them.
+  mkdirSync(join(runs, '2026-11-03T11-40-00-000Z-orphan', 'receipts'), { recursive: true });
+  writeFileSync(join(runs, '2026-11-03T11-40-00-000Z-orphan', 'handoff.yaml'), JSON.stringify({ version: 1, kind: 'cli', title: 'Orphan', request: { goal: 'Check the orphan. It has two sentences.' } }));
   const dead = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' }).stdout;
   make('2026-11-03T11-00-00-000Z-dead', { state: 'running', pid: Number(dead), started: '2026-11-03T11:00:00.000Z' });
   const { server, url } = await startUi({ port: 0 });
@@ -97,6 +101,8 @@ test('runs report whether they are running, finished or interrupted', async t =>
   const id = projectId(path);
   const list = await get(`/api/projects/${id}/runs`);
   assert.deepEqual(list.map(r => [r.goal, r.state, r.verdict]), [
+    ['Check the orphan. It has two sentences.', 'interrupted', 'INTERRUPTED'],
+    ['2026-11-03T11-30-00-000Z-failed', 'failed', 'ERROR'],
     ['2026-11-03T11-00-00-000Z-dead', 'interrupted', 'INTERRUPTED'],
     ['2026-11-03T10-00-00-000Z-live', 'running', 'RUNNING'],
     ['Finished run', 'finished', 'FAIL'],
@@ -104,11 +110,34 @@ test('runs report whether they are running, finished or interrupted', async t =>
   const summary = (await get('/api/projects')).find(p => p.id === id);
   assert.equal(summary.active, 1);
   assert.equal(summary.finished, 1);
-  assert.equal(summary.recent.length, 3);
+  assert.equal(summary.recent.length, 5);
+  assert.equal(list[0].title, 'Orphan');
+  assert.equal(list[1].error, 'The Toad agent is not set up on this machine.');
   const detail = await get(`/api/projects/${id}/runs/2026-11-03T10-00-00-000Z-live`);
   assert.equal(detail.older, '2026-11-03T09-00-00-000Z-done');
   assert.equal(detail.newer, '2026-11-03T11-00-00-000Z-dead');
   const page = await fetch(url);
   assert.match(page.headers.get('content-security-policy'), /default-src 'self'/);
   assert.doesNotMatch(await page.text(), /__VERSION__/);
+});
+
+test('a run is titled by its handoff title or its goal\'s first sentence', async () => {
+  const { titleOf } = await import('../ui.mjs');
+  assert.equal(titleOf({ title: 'Smoke', request: { goal: 'Long goal.' } }), 'Smoke');
+  assert.equal(titleOf({ request: { goal: 'Investigate import safety. Use only disposable files.' } }), 'Investigate import safety.');
+  assert.ok(titleOf({ request: { goal: 'word '.repeat(40) } }).length <= 90);
+});
+
+test('a finished run carries each scenario\'s result from its report', async t => {
+  const path = mkdtempSync(join(tmpdir(), 'toad-ui-results-'));
+  t.after(() => rmSync(path, { recursive: true, force: true }));
+  const run = join(path, '.toad', 'runs', '2026-11-03T12-00-00-000Z-r');
+  mkdirSync(join(run, 'reports'), { recursive: true });
+  writeFileSync(join(run, 'handoff.yaml'), JSON.stringify({ version: 1, kind: 'cli', request: { goal: 'g', scenarios: [{ name: 'A', steps: 's', expected: 'e' }, { name: 'B', steps: 's', expected: 'e' }] } }));
+  writeFileSync(join(run, 'reports', 'report.md'), '# Toad run\n\nStatus: ok\n\nVerdict: FAIL\nResults:\n- PASS | A\n- FAIL | B\n');
+  registerProject(path);
+  const { server, url } = await startUi({ port: 0 });
+  t.after(() => server.close());
+  const [r] = await (await fetch(new URL(`/api/projects/${projectId(path)}/runs`, url))).json();
+  assert.deepEqual(r.results, [{ name: 'A', result: 'PASS' }, { name: 'B', result: 'FAIL' }]);
 });

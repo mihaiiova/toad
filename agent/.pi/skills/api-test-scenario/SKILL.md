@@ -9,7 +9,8 @@ description: "Run one HTTP API scenario and record every request as evidence"
    URL to use from inside the sandbox (the request says when it differs
    from the API's own URL). Any HTTP answer means the API is reachable;
    a preparation error is ERROR. Never send requests from the host.
-2. Use the returned scenario ID for every command. The working folder,
+2. Use the returned scenario ID for every command. Commands run with
+   `/bin/sh`, not bash: use POSIX shell only. The working folder,
    with the OpenAPI description and fixtures, is the current directory.
    When the request names an OpenAPI description, read the parts the
    scenario touches first (`grep`, `sed -n`, or `node -e` for JSON),
@@ -35,7 +36,9 @@ description: "Run one HTTP API scenario and record every request as evidence"
 6. Compare each response with the expected outcome: status code,
    required headers, body fields and values, and for error cases a
    4xx with a useful message, never a 5xx. A failed expectation is
-   FAIL. An unreachable API, a missing secret or an ambiguous step is
+   FAIL. An unreachable API, a missing secret, a missing tool the
+   scenario needs (handle it as the cli-test-scenario skill describes,
+   installing only when the request allows it) or an ambiguous step is
    ERROR. A 5xx where the scenario expected success is FAIL, with the
    response as evidence.
 7. Create only the data the scenario needs, and delete it afterwards
@@ -45,4 +48,4 @@ description: "Run one HTTP API scenario and record every request as evidence"
    inlining receipt contents. For FAIL, identify the first failing
    request and why.
 
-<!-- forge:generated v1 sha256=0d565bd0f4a94537a76c99f2bf6c023695be8b882fef92347dede0de946f0c1b -->
+<!-- forge:generated v1 sha256=83fad25f2c4139f90418b0cc79b5f20d841bd6d0d0300b42d4acd8f71f9e9008 -->

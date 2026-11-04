@@ -1,6 +1,6 @@
 {
   "name": "@mihaiiova/toad",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Toad: a testing agent your coding agent can call. Tests web apps in a real browser and CLIs in a container, and returns a verdict with receipts.",
   "type": "module",
   "bin": {

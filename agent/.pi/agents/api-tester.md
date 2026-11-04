@@ -48,7 +48,7 @@ systemPrompt: |
   3. **Steps** — One row per request: method and path, what you expected, what you saw (status and the relevant headers or fields), and that request's receipt path.
   4. **First failure** — The earliest request that diverged and why it did, or 'none'.
   5. **Evidence** — Every request receipt for this scenario, each as a full absolute path, named as it was recorded.
-  6. **Limits** — What could not be tested, and why, and any test data left behind.
+  6. **Limits** — What could not be tested, and why (naming any missing prerequisite), and any test data left behind.
   
   Rules:
   
@@ -59,4 +59,4 @@ systemPrompt: |
   - Keep every path exactly as the recording tool returned it.
 ---
 
-<!-- forge:generated v1 sha256=f284e331161b1aa4f39d2029cc47ad2d380782736537f946d949f453ea915a0b -->
+<!-- forge:generated v1 sha256=967ffe79ba5249195224832c35a1d0b122fa0f47cada3113a14093006bb8cf52 -->

@@ -190,6 +190,14 @@ h1 { font-size: 22px; line-height: 1.25; margin: 0; letter-spacing: -.015em; }
 .scenario .name { font-weight: 650; }
 .scenario .line { grid-column: 2 / 4; color: var(--muted); font-size: 13px; }
 .scenario .line b { color: var(--text); font-weight: 600; }
+.scenario .files { grid-column: 2 / 4; display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.scenario .files a { font-family: var(--mono); font-size: 12px; padding: 2px 8px; border-radius: 6px; background: var(--panel-2); border: 1px solid var(--border); color: var(--muted); }
+.scenario .files a:hover { color: var(--text); border-color: var(--border-strong); }
+.scenario.r-FAIL { box-shadow: inset 3px 0 0 var(--fail); } .scenario.r-ERROR { box-shadow: inset 3px 0 0 var(--error); } .scenario.r-PASS { box-shadow: inset 3px 0 0 var(--pass); }
+.goal-text { margin: 8px 0 0; color: var(--muted); font-size: 13.5px; max-width: 90ch; }
+.tally { display: inline-flex; gap: 10px; font-size: 13px; }
+.tally .PASS { color: var(--pass); } .tally .FAIL { color: var(--fail); } .tally .ERROR { color: var(--error); }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 0; }
 
 .group { margin-bottom: 22px; }
 .group h3 { font-size: 13px; margin: 0 0 10px; display: flex; gap: 8px; align-items: center; color: var(--muted); font-weight: 600; }
@@ -404,7 +412,7 @@ function renderSidebar() {
   $('#project-count').textContent = data.projects.length || '';
   $('#projects').innerHTML = data.projects.map((p, i) => {
     const v = p.active ? 'RUNNING' : p.last?.verdict ?? 'NONE';
-    const sub = p.active ? `${p.active} running now` : p.last ? `${ago(p.last.started)} · ${p.last.goal || p.last.target || p.last.kind}` : 'No runs yet';
+    const sub = p.active ? `${p.active} running now` : p.last ? `${ago(p.last.started)} · ${p.last.title || p.last.goal || p.last.target || p.last.kind}` : 'No runs yet';
     return `<a class="project-item${(r.pid === p.id) ? ' active' : ''}" href="${href.project(p.id)}" title="${esc(p.path)}">
       <span class="dot ${v}"></span><span class="name">${esc(p.name)}</span><span class="count">${p.runs}</span>
       <span></span><span class="sub">${esc(sub)}</span></a>`;
@@ -447,7 +455,7 @@ function homePage() {
       return `<a class="card" href="${href.project(p.id)}">
         <div class="head"><span class="dot ${v}"></span><span class="name">${esc(p.name)}</span>${p.last ? badge(p.last.verdict) : ''}</div>
         <div class="path mono">${esc(p.path)}</div>
-        <div class="last">${p.last ? esc(p.last.goal || p.last.target) : 'No runs yet'}</div>
+        <div class="last">${p.last ? esc(p.last.title || p.last.goal || p.last.target) : 'No runs yet'}</div>
         <div class="foot">${strip(p, 20, false)}<span>${p.runs} run${p.runs === 1 ? '' : 's'} · ${p.last ? esc(ago(p.last.started)) : '—'}</span></div>
       </a>`;
     }).join('')}</div></div>`;
@@ -457,7 +465,7 @@ function filtered(runs) {
   const words = ui.filter.toLowerCase().split(/\s+/).filter(Boolean);
   return runs.filter(r => (ui.kind === 'all' || r.kind === ui.kind)
     && (ui.verdict === 'all' || (ui.verdict === 'RUNNING' ? live(r) : r.verdict === ui.verdict))
-    && words.every(w => `${r.goal} ${r.target} ${r.projectName} ${r.verdict}`.toLowerCase().includes(w)));
+    && words.every(w => `${r.title} ${r.goal} ${r.target} ${r.projectName} ${r.verdict}`.toLowerCase().includes(w)));
 }
 function runList(runs, showProject) {
   if (!runs.length) return `<div class="runs"><div class="empty">${data.loaded ? 'No runs match.' : 'Loading…'}</div></div>`;
@@ -465,7 +473,7 @@ function runList(runs, showProject) {
   return `<div class="runs" role="list"><div class="list-head"><span>Verdict</span><span>Run</span><span>Kind</span><span>Started</span><span>Took</span></div>${runs.map((r, i) => `
     <a class="run-row${i === ui.sel ? ' sel' : ''}" role="listitem" data-i="${i}" href="${href.run(r.project, r.id)}">
       <span>${badge(r.verdict)}</span>
-      <span style="min-width:0"><div class="goal">${showProject ? `<span class="proj">${esc(r.projectName)}</span>` : ''}${esc(r.goal || '(no goal)')}</div><div class="target">${esc(r.target)}</div></span>
+      <span style="min-width:0"><div class="goal">${showProject ? `<span class="proj">${esc(r.projectName)}</span>` : ''}${esc(r.title || r.goal || '(no goal)')}</div><div class="target">${esc(r.target)}</div></span>
       <span class="kind"><span class="tag">${esc(r.kind)}</span></span>
       <span class="when" title="${esc(stamp(r.started))}">${esc(ago(r.started))}</span>
       <span class="dur" data-live="${live(r) ? r.started : ''}">${dur(elapsed(r))}</span>
@@ -584,6 +592,23 @@ function scenarioVerdict(name, report) {
   }
   return null;
 }
+const slug = t => String(t).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+/** The receipt folder a tester used for scenario i: its name's slug, or scenario-N. */
+function scenarioFolder(name, i, folders) {
+  const s = slug(name);
+  return folders.find(f => f === s) ?? folders.find(f => f === `scenario-${i + 1}` || f === `scenario-${String(i + 1).padStart(2, '0')}` || f === String(i + 1))
+    ?? folders.find(f => s && (f.startsWith(s) || s.startsWith(f)) && f.length > 3) ?? null;
+}
+function resultOf(d, name) {
+  const n = name.trim().toLowerCase();
+  return (d.results || []).find(x => x.name.trim().toLowerCase() === n)?.result ?? (d.report ? scenarioVerdict(name, d.report) : null);
+}
+/** The handoff to paste back to a coding agent, optionally only some scenarios. */
+function rerunText(d, which) {
+  const handoff = JSON.parse(JSON.stringify(d.handoff || {}));
+  if (which && handoff.request?.scenarios) handoff.request.scenarios = handoff.request.scenarios.filter(s => which.includes(s.name));
+  return `Run this Toad handoff again with run_project_test.\n\n${JSON.stringify({ project_path: d.projectPath, handoff }, null, 2)}`;
+}
 function groups(files) {
   const by = new Map();
   for (const f of files) {
@@ -631,13 +656,26 @@ function runPage(r) {
   const shots = d.files.filter(f => isImage(f.path));
   const tabs = [['report', 'Report', ''], ['scenarios', 'Scenarios', scenarios.length], ['receipts', 'Receipts', d.files.length], ['handoff', 'Handoff', '']];
   const nav = `<button class="btn" data-act="go" data-href="${d.newer ? href.run(r.pid, d.newer, r.tab) : ''}" ${d.newer ? '' : 'disabled'} title="Newer run (k)">${ICON.left} Newer</button><button class="btn" data-act="go" data-href="${d.older ? href.run(r.pid, d.older, r.tab) : ''}" ${d.older ? '' : 'disabled'} title="Older run (j)">Older ${ICON.right}</button>`;
+  const counts = { PASS: 0, FAIL: 0, ERROR: 0 };
+  const redo = [];
+  for (const s of scenarios) { const v = resultOf(d, s.name); if (v) counts[v]++; if (v === 'FAIL' || v === 'ERROR') redo.push(s.name); }
+  const tally = counts.PASS + counts.FAIL + counts.ERROR ? `<span class="item tally">${['PASS', 'FAIL', 'ERROR'].filter(k => counts[k]).map(k => `<span class="${k}">${counts[k]} ${k.toLowerCase()}</span>`).join('')}</span>` : '';
   let body = '';
   if (r.tab === 'report') body = d.report ? `<div class="md">${markdown(reportBody(d.report), ctx)}</div>` : `<div class="empty">${live(d) ? 'The report is written when the run finishes. Receipts appear as they are recorded.' : 'This run has no report.'}</div>`;
-  if (r.tab === 'scenarios') body = scenarios.length ? scenarios.map((s, i) => {
-    const v = d.report ? scenarioVerdict(s.name, d.report) : null;
-    return `<div class="scenario"><span class="num">${i + 1}</span><span class="name">${esc(s.name)}</span><span>${v ? badge(v) : ''}</span>
-      <div class="line"><b>Steps</b> ${esc(s.steps)}</div><div class="line"><b>Expected</b> ${esc(s.expected)}</div></div>`;
-  }).join('') : `<div class="empty">No scenarios were given; Toad derived them from the goal. See the report.</div>`;
+  const byFolder = groups(d.files);
+  const folders = byFolder.map(([name]) => name).filter(Boolean);
+  const fileLinks = files => files.map(f => `<a href="${href.run(r.pid, r.rid, 'receipts')}&file=${enc(f.path)}" title="${esc(f.path)}">${esc(f.name)}</a>`).join('');
+  const setupFiles = byFolder.find(([name]) => name === 'setup')?.[1] ?? [];
+  if (r.tab === 'scenarios') body = (setupFiles.length ? `<div class="scenario"><span class="num">·</span><span class="name">Setup</span><span></span>
+      <div class="line">${esc((d.handoff?.target?.setup || []).join(' · '))}</div><div class="files">${fileLinks(setupFiles)}</div></div>` : '')
+    + (scenarios.length ? scenarios.map((s, i) => {
+    const v = resultOf(d, s.name);
+    const folder = scenarioFolder(s.name, i, folders.filter(f => f !== 'setup'));
+    const own = folder ? byFolder.find(([name]) => name === folder)[1] : [];
+    return `<div class="scenario${v ? ` r-${v}` : ''}"><span class="num">${i + 1}</span><span class="name">${esc(s.name)}</span><span>${v ? badge(v) : live(d) ? badge('RUNNING') : ''}</span>
+      <div class="line"><b>Steps</b> ${esc(s.steps)}</div><div class="line"><b>Expected</b> ${esc(s.expected)}</div>
+      ${own.length ? `<div class="files">${fileLinks(own)}</div>` : ''}</div>`;
+  }).join('') : `<div class="empty">No scenarios were given; Toad derived them from the goal. See the report.</div>`);
   if (r.tab === 'receipts') body = d.files.length ? groups(d.files).map(([name, files]) => {
     const images = files.filter(f => isImage(f.path)), others = files.filter(f => !isImage(f.path));
     return `<div class="group"><h3>${name ? `<b>${esc(name)}</b>` : '<b>Run</b>'}<span>${files.length} file${files.length === 1 ? '' : 's'}</span></h3>
@@ -652,17 +690,24 @@ function runPage(r) {
   }).join('') : `<div class="empty">${live(d) ? 'No receipts yet; they appear here as the run records them.' : 'No receipts.'}</div>`;
   if (r.tab === 'handoff') body = `<pre class="json">${jsonHtml(d.handoff)}</pre>`;
   const banner = live(d) ? `<div class="banner"><span class="spinner"></span><span>${d.state === 'waiting' ? 'Waiting for a free test slot' : 'Running'} for <b data-live="${d.started}">${dur(elapsed(d))}</b>. ${d.files.length} receipt${d.files.length === 1 ? '' : 's'} so far; this page updates on its own.</span></div>`
-    : d.state === 'interrupted' ? `<div class="banner warn">This run stopped without a report: its server exited or was killed.</div>`
+    : d.state === 'failed' ? `<div class="banner warn">This run could not start: ${esc(d.error || 'unknown error')}</div>`
+    : d.state === 'interrupted' ? `<div class="banner warn">This run stopped without a report: its server exited or was killed, or it never started.</div>`
     : d.status && d.status !== 'ok' ? `<div class="banner warn">The run itself ended with status <b>${esc(d.status)}</b>, so the verdict may be incomplete.</div>` : '';
   return topbar([...crumbsBase, { label: stamp(d.started) }], nav) + `<div class="page">
-    <div class="run-head"><h1>${esc(d.goal || 'Run')}</h1></div>
+    <div class="run-head"><h1>${esc(d.title || d.goal || 'Run')}</h1></div>
+    ${d.goal && d.goal !== d.title ? `<p class="goal-text">${esc(d.goal)}</p>` : ''}
     <div class="meta">${badge(d.verdict)}
       <span class="item">${d.kind === 'web' ? ICON.web : ICON.cli}<span class="tag">${esc(d.kind)}</span></span>
       ${d.target ? `<span class="item"><span class="mono">${esc(d.target)}</span></span>` : ''}
       <span class="item" title="${esc(stamp(d.started))}">Started ${esc(ago(d.started))}</span>
       <span class="item">Took <span data-live="${live(d) ? d.started : ''}">${dur(elapsed(d))}</span></span>
       ${shots.length ? `<span class="item">${shots.length} screenshot${shots.length === 1 ? '' : 's'}</span>` : ''}
+      ${tally}
     </div>${banner}
+    <div class="actions">
+      <button class="btn" data-act="copy" data-toast="Handoff copied: paste it to your coding agent" data-text="${esc(rerunText(d))}" title="Copy this run's handoff for your coding agent">${ICON.copy} Copy handoff to rerun</button>
+      ${redo.length && redo.length < scenarios.length ? `<button class="btn" data-act="copy" data-toast="Handoff copied with ${redo.length} scenario${redo.length === 1 ? '' : 's'}" data-text="${esc(rerunText(d, redo))}" title="Copy a handoff with only the scenarios that failed or errored">${ICON.copy} Copy failed scenarios (${redo.length})</button>` : ''}
+    </div>
     <nav class="tabs">${tabs.map(([key, label, n], i) => `<a class="tab${r.tab === key ? ' on' : ''}" href="${href.run(r.pid, r.rid, key)}" title="${label} (${i + 1})">${label}${n !== '' ? `<span class="n">${n}</span>` : ''}</a>`).join('')}</nav>
     ${body}</div>`;
 }
@@ -781,7 +826,7 @@ $('#main').addEventListener('click', e => {
   const act = t.dataset.act;
   if (act === 'go' && t.dataset.href) location.hash = t.dataset.href;
   if (act === 'menu') $('#app').classList.toggle('nav-open');
-  if (act === 'copy') navigator.clipboard?.writeText(t.dataset.text).then(() => toast('Path copied'), () => toast(t.dataset.text));
+  if (act === 'copy') navigator.clipboard?.writeText(t.dataset.text).then(() => toast(t.dataset.toast || 'Path copied'), () => toast('Could not copy: the browser blocked the clipboard'));
   if (act === 'chip') { ui[t.dataset.group] = t.dataset.value; ui.sel = 0; render(); }
   if (act === 'shot') openShot(t.dataset.path);
 });
