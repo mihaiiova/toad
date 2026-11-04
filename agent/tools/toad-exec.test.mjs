@@ -22,8 +22,8 @@ let backend;
 function setup(t, secrets = '') {
   const root = mkdtempSync(join(tmpdir(), 'toad-exec-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  mkdirSync(join(root, '.forge'));
-  writeFileSync(join(root, '.forge/test-secrets.env'), secrets);
+  mkdirSync(join(root, '.faur'));
+  writeFileSync(join(root, '.faur/test-secrets.env'), secrets);
   const target = join(root, 'target'); mkdirSync(target);
   writeFileSync(join(target, 'hello.txt'), 'hello from project\n');
   // Scenario workspaces live in the per-user cache; keep each test's apart.
@@ -85,7 +85,7 @@ for (const name of BACKENDS) describe(`with ${name}`, () => {
     mkdirSync(join(target, '.ssh')); writeFileSync(join(target, '.ssh', 'id_rsa'), 'private');
     writeFileSync(join(target, 'server.key'), 'private');
     mkdirSync(join(target, 'receipts')); writeFileSync(join(target, 'receipts', 'secret'), 'private');
-    symlinkSync(join(root, '.forge'), join(target, 'external'));
+    symlinkSync(join(root, '.faur'), join(target, 'external'));
     const project = join(root, 'cache/scenarios', prepare(), 'project');
     for (const name of ['.env', '.env.local', '.toad', '.ssh', 'server.key', 'receipts', 'external']) assert.equal(existsSync(join(project, name)), false, name);
     assert.equal(existsSync(join(project, '.env.example')), true);
@@ -118,7 +118,7 @@ for (const name of BACKENDS) describe(`with ${name}`, () => {
     assert.equal(exec().status, 2);
     writeFileSync(file, 'not-json'); assert.equal(exec().status, 2);
     writeFileSync(file, '{"NODE_OPTIONS":"bad"}'); assert.match(exec().stderr, /reserved/);
-    rmSync(file); symlinkSync(join(root, '.forge/test-secrets.env'), file); assert.equal(exec().status, 2);
+    rmSync(file); symlinkSync(join(root, '.faur/test-secrets.env'), file); assert.equal(exec().status, 2);
     assert.equal(existsSync(join(root, 'data/receipts/r2/invalid.txt')), false);
   });
 
@@ -168,7 +168,7 @@ for (const name of BACKENDS) describe(`with ${name}`, () => {
     const { root, prepare } = setup(t);
     const id = prepare();
     assert.ok(existsSync(join(root, 'cache/scenarios', id, 'project/hello.txt')));
-    assert.equal(existsSync(join(root, '.forge/scenarios')), false);
+    assert.equal(existsSync(join(root, '.faur/scenarios')), false);
   });
 
   test('receipts go to the folder the wrapper names, and nowhere else', t => {

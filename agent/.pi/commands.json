@@ -1,0 +1,60 @@
+{
+  "commands": [
+    {
+      "name": "prepare-scenario",
+      "description": "Copy the project into a persistent isolated scenario workspace and preflight the sandbox",
+      "command": "node",
+      "args": [
+        "tools/toad-exec.mjs",
+        "prepare",
+        "{workdir}"
+      ],
+      "approve": false,
+      "lead": false
+    },
+    {
+      "name": "prepare-network-scenario",
+      "description": "Prepare a scenario and preflight connectivity to the specified HTTP(S) endpoint",
+      "command": "node",
+      "args": [
+        "tools/toad-exec.mjs",
+        "prepare",
+        "{workdir}",
+        "{url}"
+      ],
+      "approve": false,
+      "lead": false
+    },
+    {
+      "name": "run-command",
+      "description": "Run one shell command in a prepared scenario sandbox and record a receipt",
+      "command": "node",
+      "args": [
+        "tools/toad-exec.mjs",
+        "run",
+        "{receipts}",
+        "{name}",
+        "{scenario}",
+        "{command}"
+      ],
+      "approve": false,
+      "lead": false
+    },
+    {
+      "name": "run-command-with-input",
+      "description": "Run one shell command in a prepared scenario sandbox with the given text as input, and record a receipt",
+      "command": "node",
+      "args": [
+        "tools/toad-exec.mjs",
+        "run",
+        "{receipts}",
+        "{name}",
+        "{scenario}",
+        "{command}",
+        "{input:file}"
+      ],
+      "approve": false,
+      "lead": false
+    }
+  ]
+}

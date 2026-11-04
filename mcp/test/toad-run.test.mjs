@@ -10,7 +10,8 @@ import { sessionCost } from '../run.mjs';
 
 const tmpdir = () => realpathSync(osTmpdir());
 const CLI = resolve(import.meta.dirname, '../cli.mjs');
-const RUNNER = '.pi/git/github.com/mihaiiova/pi-forge/skills/forge/workflow-runner.mjs';
+// The pinned pi-commands package: an agent that has it counts as set up.
+const COMMANDS = '.pi/git/github.com/mihaiiova/pi-commands/package.json';
 
 function temp(t, prefix) {
   const dir = mkdtempSync(join(tmpdir(), prefix));
@@ -19,22 +20,24 @@ function temp(t, prefix) {
 }
 
 /**
- * A stand-in agent whose workflow answers each requested scenario from
- * behaviour.json: { results: { name: [first, second, …] }, cost, delay }.
- * It records every request, and writes a Pi session with the given cost.
+ * A stand-in agent: a fake `pi` (TOAD_PI) whose test skill answers each
+ * requested scenario from behaviour.json: { results: { name: [first,
+ * second, …] }, cost, delay }, as Pi's JSON mode would. It records every
+ * request, and writes a Pi session with the given cost.
  */
 function agent(t, behaviour) {
   const dir = temp(t, 'toad-agent-');
   writeFileSync(join(dir, 'behaviour.json'), JSON.stringify(behaviour));
   mkdirSync(join(dir, '.pi'), { recursive: true });
   writeFileSync(join(dir, '.pi', 'system.yaml'), 'orchestrator:\n  name: lead\n  model: deepseek/deepseek-flash\nagents:\n  - name: cli-tester\n    model: deepseek/deepseek-flash\n');
-  mkdirSync(join(dir, dirname(RUNNER)), { recursive: true });
-  writeFileSync(join(dir, RUNNER), `import fs from 'node:fs'; import path from 'node:path';
-const all = process.argv.slice(2);
-const sep = all.indexOf('--');
-const pre = all.slice(0, sep), args = all.slice(sep + 1);
+  mkdirSync(join(dir, dirname(COMMANDS)), { recursive: true });
+  writeFileSync(join(dir, COMMANDS), '{}');
+  writeFileSync(join(dir, 'fake-pi.mjs'), `#!/usr/bin/env node
+import fs from 'node:fs'; import path from 'node:path';
+const pre = process.argv.slice(2);
+const prompt = pre[pre.indexOf('-p') + 1];
 const b = JSON.parse(fs.readFileSync('behaviour.json', 'utf8'));
-const request = args.find(a => a.startsWith('request=')).slice('request='.length);
+const request = prompt.slice(prompt.indexOf('\\n\\n') + 2);
 fs.appendFileSync('requests', JSON.stringify({ request, pre, sandbox: process.env.TOAD_CLI_SANDBOX ?? null, secrets: process.env.TOAD_CLI_SECRETS_FILE ? JSON.parse(fs.readFileSync(process.env.TOAD_CLI_SECRETS_FILE, 'utf8')) : null }) + '\\n');
 const sessions = pre[pre.indexOf('--session-dir') + 1];
 if (b.cost && sessions) fs.writeFileSync(path.join(sessions, 'lead.jsonl'), JSON.stringify({ type: 'message', message: { role: 'assistant', usage: { cost: { total: b.cost } } } }) + '\\n');
@@ -43,12 +46,14 @@ const names = [...request.matchAll(/^\\d+\\. "(.+?)":/gm)].map(m => m[1]);
 const lines = names.map(name => { const i = counts[name] = (counts[name] ?? -1) + 1; const list = b.results?.[name] ?? ['PASS']; return '- ' + list[Math.min(i, list.length - 1)] + ' | ' + name; });
 fs.writeFileSync('counts.json', JSON.stringify(counts));
 const verdict = lines.some(l => l.includes('FAIL')) ? 'FAIL' : lines.some(l => l.includes('ERROR')) ? 'ERROR' : 'PASS';
-const done = () => { console.log(JSON.stringify({ workflow: 'test', runId: 'r', status: b.status ?? 'ok', answer: ['Verdict: ' + verdict, 'Results:', ...lines].join('\\n') })); process.exit(0); };
-process.on('SIGTERM', () => { console.log(JSON.stringify({ workflow: 'test', runId: 'r', status: 'cancelled', answer: '' })); process.exit(1); });
+const done = () => {
+  if (b.status === 'error') { console.error('pi failed'); process.exit(1); }
+  console.log(JSON.stringify({ type: 'agent_end', messages: [{ role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: ['Verdict: ' + verdict, 'Results:', ...lines].join('\\n') }] }] }));
+  process.exit(0);
+};
+process.on('SIGTERM', () => process.exit(143));
 setTimeout(done, b.delay ?? 0);
-`);
-  const manifest = Buffer.from(JSON.stringify([{ name: 'test', entry: 'lead', lead: 'lead' }])).toString('base64');
-  writeFileSync(join(dir, 'run'), `exec node "$ROOT/${RUNNER}" '${manifest}' "\${prompts[@]}" -- "$@"\n`);
+`, { mode: 0o755 });
   return dir;
 }
 
@@ -65,7 +70,7 @@ function toad(t, args, { cwd, agentDir, env = {} }) {
   const home = temp(t, 'toad-home-');
   const result = spawnSync(process.execPath, [CLI, 'run', ...args], {
     cwd, encoding: 'utf8', timeout: 60000,
-    env: { ...process.env, TOAD_AGENT_DIR: agentDir, TOAD_CONFIG_DIR: join(home, 'config'), TOAD_CACHE_DIR: join(home, 'cache'), TOAD_RUNTIME_DIR: join(home, 'runtime'), DEEPSEEK_API_KEY: 'test-key', ...env },
+    env: { ...process.env, TOAD_AGENT_DIR: agentDir, TOAD_PI: join(agentDir, 'fake-pi.mjs'), TOAD_CONFIG_DIR: join(home, 'config'), TOAD_CACHE_DIR: join(home, 'cache'), TOAD_RUNTIME_DIR: join(home, 'runtime'), DEEPSEEK_API_KEY: 'test-key', ...env },
   });
   return { code: result.status, out: result.stdout, err: result.stderr };
 }
@@ -247,7 +252,7 @@ test('toad run exits 3 for missing keys, write suites, bad suites and missing cr
   assert.match(broken.err, /broken\.yaml/);
 });
 
-test('models from flags or toad.yaml run on a copy of the agent, never the shared one', { skip: !existsSync(resolve(import.meta.dirname, '../../agent', RUNNER)) && 'the checkout agent is not set up' }, async t => {
+test('models from flags or toad.yaml run on a copy of the agent, never the shared one', { skip: !existsSync(resolve(import.meta.dirname, '../../agent', COMMANDS)) && 'the checkout agent is not set up (cd agent && ./run)' }, async t => {
   const { agentFor, agentModels, resolveAgent, resolveModels } = await import('../agent.mjs');
   const data = temp(t, 'toad-data-');
   process.env.TOAD_DATA_DIR = data;

@@ -210,7 +210,7 @@ export function prepare(root, sourcePath, networkUrl) {
       if (!rel) return true;
       const segments = rel.split(sep), name = segments.at(-1);
       if (lstatSync(path).isSymbolicLink()) return false;
-      if (['.forge', '.toad', '.git', '.ssh', '.aws', '.gnupg', '.kube', '.npmrc', '.pypirc', 'receipts', 'scenario-workspaces'].includes(name)) return false;
+      if (['.faur', '.forge', '.toad', '.git', '.ssh', '.aws', '.gnupg', '.kube', '.npmrc', '.pypirc', 'receipts', 'scenario-workspaces'].includes(name)) return false;
       if (name === '.env' || (name.startsWith('.env.') && name !== '.env.example') || /\.(pem|key|p12|pfx)$/i.test(name)) return false;
       if (rel === join('.config', 'gcloud')) return false;
       if (resolve(path) === resolve(root, 'data/receipts')) return false;

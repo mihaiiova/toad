@@ -2,7 +2,7 @@
 /**
  * Starts the Playwright MCP server for the web-tester.
  *
- * Forge runs this integration in a trusted process environment. A wrapper run
+ * Pi runs this integration in a trusted process environment. A wrapper run
  * names a per-run secrets file and receipts folder (inside the project's
  * .toad/runs/<id>/); direct and legacy runs keep the agent's own defaults.
  * The server starts inside the receipts folder, so a screenshot saved under a
@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const out = resolve(process.env.TOAD_RECEIPTS_DIR || join(root, 'data', 'receipts'));
-const secrets = process.env.TOAD_PLAYWRIGHT_SECRETS_FILE || join(root, '.forge', 'test-secrets.env');
+const secrets = process.env.TOAD_PLAYWRIGHT_SECRETS_FILE || join(root, '.faur', 'test-secrets.env');
 mkdirSync(out, { recursive: true });
 const args = [...process.argv.slice(2), '--output-dir', out, ...(existsSync(secrets) ? ['--secrets', secrets] : [])];
 // npx is a .cmd script on Windows; the arguments here are fixed, not user input.

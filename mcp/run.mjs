@@ -2,12 +2,12 @@
  * Running a test: the one path the MCP tools and `toad run` share.
  *
  * A run builds the bot's request, waits for a machine-wide slot, runs any
- * setup commands, runs the bot's declared workflow (`<agent>/run --workflow
- * test`) and maps its JSON result onto a result: the verdict, each
+ * setup commands, runs the bot's test workflow (`pi -p "/skill:test …"` in
+ * JSON mode) and maps the run onto a result: the verdict, each
  * scenario's result, the report and the receipts. Project runs keep
  * everything under .toad/runs/<id>/, where `toad ui` shows them.
  */
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { readdirSync, readFileSync, statSync, lstatSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -34,27 +34,94 @@ export function request(target, { what, scenarios = [], secrets = [] }) {
   ].join('\n');
 }
 
-/** Run the workflow; resolves with its JSON result, or a synthesized one if it printed none. */
-function runWorkflow(agent, args, signal, onTick, env, piArgs) {
+/** The last assistant message of a JSON-mode run, from its agent_end events. */
+export function finalMessage(lines) {
+  let last = null;
+  for (const line of lines) {
+    let event; try { event = JSON.parse(line); } catch { continue; }
+    if (event?.type === 'agent_end') last = (event.messages ?? []).filter(m => m?.role === 'assistant').at(-1) ?? last;
+  }
+  return last;
+}
+
+/**
+ * Every process below `pid`, with its process group, as `ps` lists them
+ * (Linux and macOS). pi-subagents starts background testers detached, in
+ * their own process groups, so signalling Pi's group alone would leave them
+ * and their browsers running.
+ */
+export function processTree(pid) {
+  const listing = spawnSync('ps', ['-A', '-o', 'pid=,ppid=,pgid='], { encoding: 'utf8' });
+  if (listing.status !== 0) return [];
+  const children = new Map();
+  for (const line of listing.stdout.trim().split('\n')) {
+    const [child, parent, pgid] = line.trim().split(/\s+/).map(Number);
+    if (!children.has(parent)) children.set(parent, []);
+    children.get(parent).push({ pid: child, pgid });
+  }
+  const tree = [];
+  for (const queue = [pid]; queue.length;) for (const child of children.get(queue.shift()) ?? []) { tree.push(child); queue.push(child.pid); }
+  return tree;
+}
+
+const alive = pid => { try { process.kill(pid, 0); return true; } catch (error) { return error.code === 'EPERM'; } };
+
+/**
+ * Run the test workflow in Pi; resolves with { status, answer, message?, cleanup? }.
+ * Pi starts in its own process group. A timeout or cancellation records the
+ * processes below it, signals every process group among them (SIGTERM, then
+ * SIGKILL after 5 s) and reports cleanup as incomplete when one survives; a
+ * process that left the tree before the stop is not seen. Pi's exit code
+ * reports the run, not the test: the verdict is in the answer.
+ */
+function runWorkflow(agent, run, signal, onTick, env, piArgs) {
   return new Promise(done => {
-    if (signal.aborted) return done({ status: 'cancelled', answer: '', cleanup: 'incomplete', message: 'Cancelled before launch' });
-    const launch = workflowCommand(agent, args, piArgs);
+    if (signal.aborted) return done({ status: 'cancelled', answer: '', cleanup: 'complete', message: 'Cancelled before launch' });
+    const launch = workflowCommand(agent, run, piArgs, env);
     if (launch.error) return done({ status: 'configuration_error', answer: '', message: launch.error });
-    const child = spawn(launch.command, launch.args, { cwd: agent, env: workflowEnv(agent, env), stdio: ['ignore', 'pipe', 'pipe'] });
-    let out = '', err = '';
+    const posix = process.platform !== 'win32';
+    const child = spawn(launch.command, launch.args, { cwd: agent, env: workflowEnv(agent, env), stdio: ['ignore', 'pipe', 'pipe'], detached: posix });
+    let out = '', err = '', stopped = null, tree = [];
     child.stdout.setEncoding('utf8').on('data', d => { out += d; });
     child.stderr.setEncoding('utf8').on('data', d => { err = (err + d).slice(-4000); });
-    // The runner turns SIGTERM into a cancelled run and stops the browser work.
-    const cancel = () => child.kill('SIGTERM');
+    const signalAll = sig => {
+      if (!posix) { try { child.kill(sig); } catch {} return; }
+      for (const group of new Set([child.pid, ...tree.map(p => p.pgid)])) { try { process.kill(-group, sig); } catch {} }
+      for (const { pid } of tree) { try { process.kill(pid, sig); } catch {} }
+    };
+    // Pi itself is reaped once it closes; what can survive is below it.
+    const survivors = () => tree.map(p => p.pid).filter(alive);
+    const stop = reason => {
+      if (stopped) return;
+      stopped = reason;
+      if (posix && child.pid) tree = processTree(child.pid);
+      signalAll('SIGTERM');
+      setTimeout(() => signalAll('SIGKILL'), 5000).unref();
+    };
+    const cancel = () => stop('cancelled');
     signal.addEventListener('abort', cancel, { once: true });
+    const minutes = run.timeoutMinutes ?? 15;
+    // TOAD_TEST_TIMEOUT_MS shortens the limit for Toad's own tests only.
+    const timer = setTimeout(() => stop('timeout'), Number(env.TOAD_TEST_TIMEOUT_MS) || minutes * 60000);
     const ticker = setInterval(onTick, 15000);
     child.on('error', error => { err += error.message; });
-    child.on('close', code => {
-      clearInterval(ticker);
+    child.on('close', async code => {
+      clearTimeout(timer); clearInterval(ticker);
       signal.removeEventListener('abort', cancel);
-      const last = out.trim().split('\n').at(-1) ?? '';
-      try { done(JSON.parse(last)); }
-      catch { done({ status: 'error', answer: '', cleanup: 'incomplete', message: `The workflow printed no result (exit ${code}). ${err.trim().split('\n').slice(-5).join('\n')}` }); }
+      const message = finalMessage(out.split('\n'));
+      const answer = (message?.content ?? []).filter(c => c?.type === 'text').map(c => c.text).join('');
+      const tail = err.trim().split('\n').slice(-5).join('\n');
+      if (stopped) {
+        // Wait for the SIGKILL before deciding whether anything survived.
+        for (let i = 0; i < 60 && survivors().length; i++) await new Promise(r => setTimeout(r, 100));
+        const cleanup = survivors().length ? 'incomplete' : 'complete';
+        if (stopped === 'timeout') return done({ status: 'timeout', answer, cleanup, message: `No result within ${minutes} minutes` });
+        return done({ status: 'cancelled', answer, cleanup });
+      }
+      if (code !== 0) return done({ status: 'error', answer, message: `Pi exited with ${code}. ${tail}`.trim() });
+      if (message?.stopReason === 'error' || message?.stopReason === 'aborted') return done({ status: 'error', answer, message: message.errorMessage ?? `The run ended: ${message.stopReason}` });
+      if (!answer) return done({ status: 'error', answer, message: `The run returned no answer. ${tail}`.trim() });
+      done({ status: 'ok', answer });
     });
   });
 }
@@ -111,7 +178,7 @@ export async function runTest(text, input, ctx, { attachImages, projectRun, secr
   // Project runs write receipts straight into .toad/runs/<id>/receipts; the
   // legacy tools, which have no project, keep the agent's own data/receipts.
   const folder = projectRun ? join(projectRun, 'receipts') : join(agent, 'data', 'receipts', randomUUID());
-  const args = ['--workflow', 'test', '--timeout', `${input.timeout_minutes ?? 15}m`, '--allow-concurrent', '--input', `request=${text}`, '--input', `receipts=${folder}`];
+  const run = { request: text, receipts: folder, timeoutMinutes: input.timeout_minutes ?? 15 };
   const started = Date.now();
   let message = 'Waiting for a free test slot…';
   // Progress keeps clients' request timeouts from expiring during long tests.
@@ -120,7 +187,7 @@ export async function runTest(text, input, ctx, { attachImages, projectRun, secr
   let lastTick = 0;
   if (projectRun) writeState(projectRun, { state: 'waiting' });
   const release = await acquireSlot({ signal: ctx.signal, onWait: () => { if (Date.now() - lastTick >= 15000) { lastTick = Date.now(); tick(); } } });
-  if (projectRun) writeState(projectRun, { state: 'running' });
+  if (projectRun) writeState(projectRun, { state: 'running', timeoutMinutes: run.timeoutMinutes });
   if (!release) return finish(input, { status: 'cancelled', answer: '', message: 'Cancelled while waiting for a free test slot' }, folder, { attachImages, projectRun });
   message = 'Testing…';
   try { return await launch(); } finally { release(); }
@@ -164,7 +231,7 @@ export async function runTest(text, input, ctx, { attachImages, projectRun, secr
         else env.TOAD_BASE_SCENARIO = prepared.id;
         message = 'Testing…';
       }
-      result ??= await runWorkflow(agent, args, budget.signal, tick, env, sessions ? ['--session-dir', sessions] : []);
+      result ??= await runWorkflow(agent, run, budget.signal, tick, env, sessions ? ['--session-dir', sessions] : []);
     } finally {
       if (meter) clearInterval(meter);
       ctx.signal.removeEventListener('abort', stop);

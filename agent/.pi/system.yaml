@@ -1,7 +1,7 @@
 # Toad: tests web apps in a real browser, and command-line programs and HTTP
 # APIs in a sandboxed shell, and returns the results with receipts
 # (screenshots, recorded commands and requests). Called directly with
-# ./run --workflow test, or by other agents through ../mcp.
+# ./run --approve -p "/skill:test <request>", or by other agents through ../mcp.
 schema: 1
 name: toad
 description: Tests web apps, command-line programs and HTTP APIs end to end and
@@ -273,7 +273,7 @@ integrations:
         args:
           - tools/playwright-mcp.mjs
           - -y
-          - "@playwright/mcp@0.0.83"
+          - "@playwright/mcp@0.0.84"
           - --headless
           - --browser
           - chromium

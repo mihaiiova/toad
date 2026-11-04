@@ -32,4 +32,4 @@ screenshot, a page dump or a file's text.
 Return your report in the web-tester-report format declared in your
 instructions.
 
-<!-- forge:generated v1 sha256=a0b5bde53df6d4846e5a69fd543ed6c99a509584c473bac0ff09c26d6b70d8fa -->
+<!-- faur:generated v1 sha256=a0b5bde53df6d4846e5a69fd543ed6c99a509584c473bac0ff09c26d6b70d8fa -->

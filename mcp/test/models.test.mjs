@@ -132,16 +132,16 @@ test('a one-shot call succeeds only when the model answered', () => {
   assert.deepEqual(callOutcome('', 'Warning: noise\nNo API key found for openai.\n  /path/to/docs/models.md\n'), { ok: false, error: 'No API key found for openai.', rejected: true });
 });
 
-// The real Forge from a set-up checkout: assign the models, and check every derived file follows.
+// The checkout's agent: assign the models, and check every file that carries one follows.
 const checkoutAgent = resolve(import.meta.dirname, '../../agent');
-const forge = join(checkoutAgent, '.pi/git/github.com/mihaiiova/pi-forge/skills/forge/forge.mjs');
-test('applyModels points the lead and the testers at the chosen models through Forge', { skip: !existsSync(forge) && 'the checkout agent is not set up (cd agent && ./run)' }, async t => {
+test('applyModels points the lead and the testers at the chosen models in the native files', async t => {
   const config = mkdtempSync(join(tmpdir(), 'toad-config-'));
   const dir = join(mkdtempSync(join(tmpdir(), 'toad-agent-')), 'agent');
   t.after(() => { rmSync(config, { recursive: true, force: true }); rmSync(dirname(dir), { recursive: true, force: true }); });
-  cpSync(checkoutAgent, dir, { recursive: true, filter: p => !p.includes(`${join('.forge', 'pi-home')}`) });
+  cpSync(checkoutAgent, dir, { recursive: true, filter: p => !p.includes('.faur') && !p.includes(join('.pi', 'git')) && !p.includes(join('.pi', 'npm')) });
   process.env.TOAD_CONFIG_DIR = config;
   const { agentModels, applyModels, readModels, saveModels } = await import('../agent.mjs');
+  const yamlBefore = readFileSync(join(dir, '.pi/system.yaml'), 'utf8');
 
   const models = { lead: 'anthropic/claude-sonnet-5-5', tester: 'openrouter/moonshotai/kimi-k3' };
   assert.equal(applyModels(dir, models), true);
@@ -151,7 +151,13 @@ test('applyModels points the lead and the testers at the chosen models through F
   for (const name of after.testers.map(a => a.name)) assert.match(readFileSync(join(dir, '.pi/agents', `${name}.md`), 'utf8'), /^model: openrouter\/moonshotai\/kimi-k3$/m);
   const settings = JSON.parse(readFileSync(join(dir, '.pi/settings.json'), 'utf8'));
   assert.deepEqual([settings.defaultProvider, settings.defaultModel], ['anthropic', 'claude-sonnet-5-5']);
+  // Only the model values change: comments and formatting are the developer's.
+  const changed = (a, b) => a.split('\n').filter((line, i) => line !== b.split('\n')[i]);
+  const yamlAfter = readFileSync(join(dir, '.pi/system.yaml'), 'utf8');
+  assert.equal(yamlAfter.split('\n').length, yamlBefore.split('\n').length);
+  assert.ok(changed(yamlAfter, yamlBefore).every(line => /^\s*model: (anthropic\/claude-sonnet-5-5|openrouter\/moonshotai\/kimi-k3)$/.test(line)));
   assert.equal(applyModels(dir, models), false, 'nothing to change the second time');
+  assert.throws(() => applyModels(dir, { lead: 'no-provider', tester: models.tester }), /provider\/id/);
 
   assert.equal(readModels(), null);
   saveModels(models);
