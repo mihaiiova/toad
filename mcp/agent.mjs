@@ -10,6 +10,7 @@
  * with ./run is used in place, for development.
  */
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, renameSync, closeSync, constants, fstatSync, openSync } from 'node:fs';
 import { delimiter, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -102,16 +103,73 @@ export function prepareAgent({ log = () => {}, force = false } = {}) {
   writeFileSync(join(staging, READY), JSON.stringify({ version: VERSION, prepared: new Date().toISOString() }) + '\n');
   rmSync(target, { recursive: true, force: true });
   renameSync(staging, target);
+  // Other versions, and model variants of this one, which are rebuilt from it on demand.
   for (const entry of readdirSync(base)) if (entry !== VERSION) rmSync(join(base, entry), { recursive: true, force: true });
+  rmSync(join(toadDirs().data, 'agent-variants'), { recursive: true, force: true });
   return target;
 }
+
+/**
+ * The models a run uses, by precedence: `flags`, then the project's
+ * toad.yaml, then what the agent runs on, which is the choice `toad setup`
+ * applied to it (or the agent's defaults before any choice).
+ */
+export function resolveModels(agentDir, { flags = {}, project = {} } = {}) {
+  const own = agentModels(agentDir);
+  return {
+    lead: flags.lead ?? project.lead ?? own.lead.model,
+    tester: flags.tester ?? project.tester ?? own.testers[0]?.model ?? own.lead.model,
+  };
+}
+
+/** Whether the agent already runs on `models`. */
+export function runsOn(agentDir, models) {
+  const { lead, testers } = agentModels(agentDir);
+  return lead.model === models.lead && testers.every(t => t.model === models.tester);
+}
+
+/**
+ * The agent to run on `models`: `agentDir` itself when it already uses them,
+ * else a copy of it with the models applied, kept under
+ * <data>/agent-variants/ and reused by later runs. The shared agent is never
+ * changed, so a run with other models cannot affect runs in progress.
+ */
+export function agentFor(agentDir, models, { log = () => {} } = {}) {
+  if (runsOn(agentDir, models)) return agentDir;
+  let stamp = '';
+  try { stamp = readFileSync(join(agentDir, READY), 'utf8'); } catch {}
+  const key = createHash('sha256').update(JSON.stringify([agentDir, stamp, VERSION, models.lead, models.tester])).digest('hex').slice(0, 16);
+  const base = privateDir(join(toadDirs().data, 'agent-variants'));
+  const target = join(base, key);
+  if (existsSync(join(target, READY)) && existsSync(join(target, RUNNER))) return target;
+  log(`Preparing a copy of the agent for ${describeModels(models)}`);
+  const staging = join(base, `.staging-${key}-${process.pid}`);
+  rmSync(staging, { recursive: true, force: true });
+  // Runtime state stays behind: sessions, locks and receipts belong to the original.
+  const skip = [join('.pi', 'sessions'), join('.forge', 'workflow-locks'), join('.forge', 'pi-home', 'sessions'), join('data', 'receipts')];
+  try {
+    cpSync(agentDir, staging, { recursive: true, dereference: false, verbatimSymlinks: true, filter: path => !skip.includes(relative(agentDir, path)) });
+    applyModels(staging, models);
+    writeFileSync(join(staging, READY), JSON.stringify({ version: VERSION, from: agentDir, models, prepared: new Date().toISOString() }) + '\n');
+  } catch (error) { rmSync(staging, { recursive: true, force: true }); throw error; }
+  try { renameSync(staging, target); }
+  catch (error) {
+    // Another run prepared the same variant first; use that one.
+    rmSync(staging, { recursive: true, force: true });
+    if (!existsSync(join(target, READY))) throw error;
+  }
+  return target;
+}
+
+/** The providers `models` use. */
+export const providersOf = models => [...new Set([models.lead, models.tester].map(ref => String(ref).split('/')[0]))];
 
 /**
  * The command that runs a workflow, equivalent to `./run --workflow …`: the
  * pinned Forge runner, the workflow manifest Forge generated into ./run, and
  * the orchestrator's appended prompts.
  */
-export function workflowCommand(agentDir, args) {
+export function workflowCommand(agentDir, args, piArgs = []) {
   const runner = join(agentDir, RUNNER);
   if (!existsSync(runner)) return { error: 'The agent is not set up. Run `toad setup`.' };
   let launcher = '';
@@ -119,7 +177,8 @@ export function workflowCommand(agentDir, args) {
   const manifest = /workflow-runner\.mjs" '([A-Za-z0-9+/=]+)'/.exec(launcher)?.[1];
   if (!manifest) return { error: `No workflow manifest in ${join(agentDir, 'run')}` };
   const prompts = ['APPEND_SYSTEM.md', 'CAPABILITIES.md'].filter(f => existsSync(join(agentDir, '.pi', f))).flatMap(f => ['--append-system-prompt', join('.pi', f)]);
-  return { command: process.execPath, args: [runner, manifest, ...prompts, '--', ...args] };
+  // Arguments before `--` reach Pi itself, after the appended prompts.
+  return { command: process.execPath, args: [runner, manifest, ...prompts, ...piArgs, '--', ...args] };
 }
 
 /** Environment for a workflow: its own Pi home, the packaged `pi`, the stored model key. */

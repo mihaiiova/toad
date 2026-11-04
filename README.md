@@ -203,6 +203,9 @@ cli:
 api:
   url: http://localhost:8080/api
   spec: openapi.yaml          # relative to workdir, which defaults to the project
+models:                       # optional: this project's models, over `toad setup`'s
+  lead: anthropic/claude-sonnet-5-5
+  tester: anthropic/claude-haiku-5-5
 timeout_minutes: 15
 ```
 
@@ -252,11 +255,15 @@ out of git.
 ├── .env             secret values (ignored by git)
 ├── .env.example     the names, for your team (commit it)
 ├── .gitignore
+├── suites/          saved suites for `toad run` (commit them)
+│   └── example.yaml     a commented template
 └── runs/            one folder per run (ignored by git)
     └── 2026-11-02T15-04-17-657Z-<id>/
         ├── handoff.yaml     what was asked, with defaults filled in
+        ├── state.json       progress, verdict, each scenario's result, cost
         ├── reports/report.md
-        └── receipts/        screenshots, page snapshots, command records
+        ├── receipts/        screenshots, page snapshots, command records
+        └── sessions/        the lead's and testers' Pi sessions (transcripts)
 ```
 
 ## See results in the browser
@@ -277,6 +284,154 @@ toad projects forget /path/to/x   # drop one from the list (its files stay)
 
 A project joins the list when it is set up or runs a test.
 
+## Run tests on every deploy
+
+A handoff your agent sends once can be saved as a **suite** and run again
+with `toad run`, without a coding agent: on your machine, or in CI after
+every deploy.
+
+### Suites
+
+A suite is `.toad/suites/<name>.yaml`: a handoff, plus tags and whether it
+may change data. Commit it; like `toad.yaml` it holds no secrets.
+
+```yaml
+kind: web                      # web, cli or api
+title: Checkout smoke
+target:                        # omitted fields come from toad.yaml
+  url: https://staging.example.com
+goal: Check that a signed-in customer can buy one item.
+tags: [smoke]
+writes: true                   # it places orders; toad run needs --allow-writes
+credentials:
+  email: { env: TOAD_TEST_EMAIL }
+  password: { env: TOAD_TEST_PASSWORD }
+scenarios:
+  - name: Adds to the cart
+    steps: Sign in, open the first product, add it to the cart.
+    expected: The cart badge shows 1.
+  - name: Pays with the test card
+    steps: Check out with card 4242 4242 4242 4242.
+    expected: An order confirmation with an order number.
+    tags: [payments]
+limitations:
+  - Use only the test card.
+timeout_minutes: 10
+```
+
+Scenario names must be distinct: results come back by name. Every scenario
+needs steps and an expected result. A suite without `writes: true` is told
+it is read-only, and `toad run` refuses a suite with `writes: true` unless
+you pass `--allow-writes`. (The read-only instruction is advisory: the agent
+is asked not to change data, and nothing stops it from doing so.) Ask your
+coding agent to save a suite after a handoff works, or start from
+`suites/example.yaml`.
+
+### toad run
+
+```sh
+toad run                                   # every suite
+toad run --suite checkout --suite search   # these suites, in this order
+toad run --tag smoke --max-scenarios 10    # tagged scenarios, at most 10, in file order
+toad run --url "$PREVIEW_URL"              # test a preview deploy instead of the suite's URL
+toad run --junit toad.xml --summary toad.md --json
+```
+
+Each suite is one Toad run, recorded under `.toad/runs/` and shown in
+`toad ui` like any other. A scenario that does not pass is run once more (a
+new run with only those scenarios; `--retries 0` turns this off,
+`--retries 2` allows two more). A scenario that fails and then passes is
+**flaky**: it does not fail the build, but the output, JUnit and summary all
+say so.
+
+| Exit code | Meaning |
+|---|---|
+| `0` | Every scenario passed (flaky ones included) |
+| `1` | A scenario failed |
+| `2` | A run errored, timed out, hit the spending limit or was interrupted, so a scenario's result is unknown |
+| `3` | Toad could not start: no model key, invalid suites or options, a write suite without `--allow-writes`, a missing credential |
+
+`--junit` writes one test case per scenario, with its attempts, report and
+receipts folder; `--summary` writes markdown for a pull request comment or a
+job summary; `--json` prints the whole result on stdout. `toad run --help`
+lists every option.
+
+### In CI
+
+`toad run` needs nothing but a model key in the environment. On first use it
+prepares the agent, and the browser if a web suite needs it, so there is no
+`toad setup` step.
+
+| What | How |
+|---|---|
+| **Model key** | The provider's variable, e.g. `ANTHROPIC_API_KEY`. `toad run` checks it before starting and exits 3 if it is missing. |
+| **Models** | `--lead-model`, `--tester-model` or `--model`, else `models:` in `toad.yaml`, else what `toad setup` chose, else the agent's defaults. A run on other models uses a copy of the agent, so runs in progress are unaffected. |
+| **Test credentials** | `--env TOAD_TEST_EMAIL,TOAD_TEST_PASSWORD` takes those names from the job's environment instead of `.toad/.env`. They are still referenced by name only and never written into handoffs or reports. |
+| **CLI and API sandbox** | Docker on Linux runners. On a runner without Docker, Podman or Bubblewrap (macOS, Windows), `--sandbox none` runs the commands directly on the runner, in a copy of the project, with a minimal environment. It is never chosen automatically; receipts and the run page say when it was used. |
+| **Spend** | `--max-cost 2` stops the runs once Pi has recorded $2 across them; the stopped run counts as an error (exit 2). Pi prices replies from its model catalog; a model it has no prices for counts as $0. |
+| **Results** | Upload `.toad/runs/` as an artifact: it holds every report, receipt and transcript. |
+
+A GitHub Actions job that tests each successful deployment and comments on
+its pull request:
+
+```yaml
+name: Toad
+on: deployment_status
+
+jobs:
+  toad:
+    if: github.event.deployment_status.state == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.deployment.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # Pin a release tag or commit you have reviewed.
+      - run: npm install --global github:mihaiiova/toad#v0.7.0
+      - id: toad
+        run: echo "version=$(toad --version)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/ms-playwright
+            ~/.local/share/toad/agent
+          key: toad-${{ runner.os }}-${{ steps.toad.outputs.version }}
+      - name: Test the deployment
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TOAD_TEST_EMAIL: ${{ secrets.TOAD_TEST_EMAIL }}
+          TOAD_TEST_PASSWORD: ${{ secrets.TOAD_TEST_PASSWORD }}
+          # Through the environment, never pasted into the script.
+          TARGET_URL: ${{ github.event.deployment_status.environment_url }}
+        run: >
+          toad run --tag smoke --url "$TARGET_URL"
+          --env TOAD_TEST_EMAIL,TOAD_TEST_PASSWORD --max-cost 2
+          --junit toad.xml --summary toad.md
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: toad-runs
+          path: .toad/runs/
+      - name: Post the summary
+        if: always() && hashFiles('toad.md') != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.deployment.sha }}
+        run: |
+          cat toad.md >> "$GITHUB_STEP_SUMMARY"
+          pr=$(gh pr list --state open --search "$SHA" --json number --jq '.[0].number')
+          if [ -n "$pr" ]; then gh pr comment "$pr" --body-file toad.md; fi
+```
+
+`--url` replaces the URL of every selected web and API suite; select suites
+that test the same deployment, or run `toad run` once per target.
+
 ## Reference
 
 ### Commands
@@ -286,6 +441,7 @@ A project joins the list when it is set up or runs a test.
 | `toad setup [--yes] [--no-register] [--skip-browser] [--skip-image] [--force]` | Prepare or repair everything Toad needs |
 | `toad doctor` | Check the agent, model key, browser, CLI sandbox and coding agents |
 | `toad update` | Install the latest version from GitHub and prepare it |
+| `toad run [options]` | Run the project's saved suites, e.g. in CI (see [Run tests on every deploy](#run-tests-on-every-deploy)) |
 | `toad mcp` | The MCP server; coding agents start it |
 | `toad ui [--port <port>]` | The run viewer |
 | `toad projects [forget <path>]` | The projects the viewer shows |
@@ -337,9 +493,11 @@ derives them from the goal.
 The result has the report as text and as structured content: `verdict`
 (`PASS`, `FAIL`, `ERROR`, or `UNKNOWN` when the report has none), `status`
 (how the run itself ended: `ok`, `timeout`, `blocked`, `cancelled`, `error`,
-`configuration_error`, `setup_failed`), `runId`, `scenarios` (each one's
+`configuration_error`, `setup_failed`, `cost_limit`), `runId`, `scenarios` (each one's
 `name` and `result`; a scenario the report left out is `ERROR` with
-`missing: true`), `receipts` (the folder), `files` and `screenshots`. The
+`missing: true`), `receipts` (the folder), `files`, `screenshots`, and for
+project runs `run` (the run folder) and `cost` (the US dollars Pi recorded,
+at its catalog prices). The
 verdict never contradicts a scenario: any `FAIL` makes the run `FAIL`,
 otherwise any `ERROR` makes it `ERROR`. A run that could not complete is a
 tool error; a failing test is not.
@@ -355,9 +513,10 @@ Toad is installed once; everything about a project stays in that project.
 
 | Where | What |
 |---|---|
-| `<project>/.toad/` | defaults, secret values, runs |
+| `<project>/.toad/` | defaults, suites, secret values, runs |
 | `~/.config/toad/` | `projects.json` (the viewer's list), `credentials.json` (model keys), `settings.json` (the chosen models) |
 | `~/.local/share/toad/agent/<version>/` | the prepared agent; older versions are removed on update |
+| `~/.local/share/toad/agent-variants/` | copies of the agent for runs on other models; rebuilt when the agent is |
 | `~/.cache/toad/scenarios/` | CLI workspaces, removed after 7 days unused |
 | `$XDG_RUNTIME_DIR/toad/` | run slots and per-run secret files (falls back to a private folder in the system temp directory) |
 
@@ -371,7 +530,7 @@ Environment variables, set where the MCP server is registered:
 |---|---|---|
 | The provider's key variable (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, …) | the saved key | The model key; overrides the one `toad setup` saved |
 | `TOAD_MAX_CONCURRENT_RUNS` | `2` | Runs at once across every Toad server on the machine; further calls wait |
-| `TOAD_CLI_SANDBOX` | `auto` | `container`, `bwrap`, or `auto` (a running container runtime, else Bubblewrap) |
+| `TOAD_CLI_SANDBOX` | `auto` | `container`, `bwrap`, `none` (no isolation; only when set), or `auto` (a running container runtime, else Bubblewrap) |
 | `TOAD_CONTAINER_RUNTIME` | first that answers | `docker` or `podman` |
 | `TOAD_CLI_IMAGE` | `node:22-bookworm` | Image for CLI tests when the project does not set one |
 | `TOAD_COMMAND_TIMEOUT_S` | `120` | Time limit for each CLI command |
@@ -389,10 +548,11 @@ Environment variables, set where the MCP server is registered:
   design is `agent/.pi/system.yaml`. The package ships this definition;
   `toad setup` copies it and installs its pinned Pi packages, and runs start
   Forge's workflow runner directly, without a shell script.
-- **`mcp/`**: the MCP server (`server.mjs`), the run viewer (`ui.mjs`), setup
-  (`setup.mjs`, `agent.mjs`) and the `toad` command (`cli.mjs`). The server
-  runs the agent's workflow and maps the result onto the tool result; it holds
-  no testing logic.
+- **`mcp/`**: the run engine (`run.mjs`), which runs the agent's workflow
+  and maps its result onto a verdict and per-scenario results; the MCP server
+  (`server.mjs`) and `toad run` (`toad-run.mjs`), which both use it; the run
+  viewer (`ui.mjs`); setup (`setup.mjs`, `agent.mjs`) and the `toad` command
+  (`cli.mjs`). None of them holds testing logic.
 - **`skills/toad-mcp/SKILL.md`**: the guide served to coding agents.
 
 ### How CLI and API tests run
@@ -409,7 +569,7 @@ every secret: remove other credential files from the project first.
 Preparation checks that the sandbox starts and that only the workspace and
 its home are writable; the network variant also checks a given HTTP(S)
 endpoint. A failed preparation is an infrastructure error; nothing ever runs
-on the host instead.
+on the host instead, unless you ask for that with `--sandbox none`.
 
 **In a container** (Docker or Podman, any OS), each command is a fresh
 `docker run` of the project's image with the workspace mounted at `/work`, a
@@ -423,6 +583,13 @@ through a private env file that is deleted after the command.
 **In Bubblewrap** (Linux), commands run in new user, PID, IPC and UTS
 namespaces with the host's `/usr` and some system configuration read-only,
 sharing the host network, including `localhost`.
+
+**With `--sandbox none`** (only when you pass it to `toad run`, or set
+`TOAD_CLI_SANDBOX=none`), there is no isolation: commands run on the host as
+your user, in the copied workspace, with only `PATH`, a `HOME` and `TMPDIR`
+inside the workspace, and the selected credentials in their environment.
+They can read and change anything your user can. Use it on disposable CI
+runners, for trusted suites.
 
 Either way, commands run through `/bin/sh`, with no input unless provided,
 stop after 120 seconds, and each produces a receipt. Exact secret values of at

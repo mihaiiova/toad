@@ -702,6 +702,10 @@ function runPage(r) {
       <span class="item" title="${esc(stamp(d.started))}">Started ${esc(ago(d.started))}</span>
       <span class="item">Took <span data-live="${live(d) ? d.started : ''}">${dur(elapsed(d))}</span></span>
       ${shots.length ? `<span class="item">${shots.length} screenshot${shots.length === 1 ? '' : 's'}</span>` : ''}
+      ${d.origin === 'cli' ? `<span class="item" title="Started by toad run, not a coding agent"><span class="tag">toad run</span></span>` : ''}
+      ${typeof d.cost === 'number' ? `<span class="item" title="Model spend Pi recorded, at its catalog prices">$${d.cost.toFixed(4)}</span>` : ''}
+      ${d.models ? `<span class="item mono" title="Models for this run (lead / testers)">${esc(d.models.lead === d.models.tester ? d.models.lead : `${d.models.lead} / ${d.models.tester}`)}</span>` : ''}
+      ${d.sandbox === 'none' ? `<span class="item" title="CLI and API commands ran on the host, without a sandbox"><span class="tag">no sandbox</span></span>` : ''}
       ${tally}
     </div>${banner}
     <div class="actions">
