@@ -22,6 +22,8 @@ import { privateDir, toadDirs } from './toad-dirs.mjs';
 
 export const DEFAULT_IMAGE = 'node:22-bookworm';
 export const MIN_BWRAP = [0, 8, 0];
+// Workspace-relative PATH entries; no traversal, separators or shell syntax.
+export const WORKSPACE_PATH_PATTERN = /^(?!.*(?:^|\/)\.{1,2}(?:\/|$))[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*$/;
 const idPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const PREFLIGHT = 'set -eu; printf ok > /work/.toad-preflight; test "$(cat /work/.toad-preflight)" = ok; rm /work/.toad-preflight; test -w "$HOME"; test ! -w /usr';
 

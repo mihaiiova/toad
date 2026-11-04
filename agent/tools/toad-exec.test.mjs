@@ -211,6 +211,28 @@ for (const name of BACKENDS) describe(`with ${name}`, () => {
   });
 });
 
+for (const name of [...BACKENDS, 'none']) describe(`configured PATH with ${name}`, () => {
+  beforeEach(() => { backend = name; });
+  test('setup and separate scenario commands find workspace tools, rejecting unsafe paths', t => {
+    const { target, run, prepare } = setup(t);
+    const env = { ...process.env, TOAD_CLI_PATH: JSON.stringify(['node_modules/.bin']) };
+    const base = prepare();
+    const install = run(['run', 'data/receipts/setup', 'install', base, 'mkdir -p node_modules/.bin; printf "#!/bin/sh\\necho path-ok\\n" > node_modules/.bin/example; chmod +x node_modules/.bin/example; example'], { env });
+    assert.match(install.stdout, /path-ok/);
+    const prepared = run(['prepare', target], { env: { ...env, TOAD_BASE_SCENARIO: base } });
+    assert.equal(prepared.status, 0, prepared.stderr);
+    const id = /Scenario ID: (.+)/.exec(prepared.stdout)[1];
+    for (const n of ['first', 'second']) {
+      const result = run(['run', 'data/receipts/r1', n, id, 'example'], { env });
+      assert.match(result.stdout, /path-ok/);
+      assert.match(result.stdout, /exit 0/);
+    }
+    const invalid = run(['run', 'data/receipts/r1', 'invalid', id, 'true'], { env: { ...env, TOAD_CLI_PATH: '["../bin"]' } });
+    assert.equal(invalid.status, 2);
+    assert.match(invalid.stderr, /invalid workspace PATH/);
+  });
+});
+
 describe('with --sandbox none', () => {
   beforeEach(() => { backend = 'none'; });
   test('commands run on the host in the copied workspace, with a minimal environment, and receipts say so', t => {

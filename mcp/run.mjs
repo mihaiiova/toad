@@ -17,7 +17,7 @@ import { chooseSandbox, isReservedSecretName } from '../agent/tools/toad-sandbox
 import { privateDir, toadDirs } from '../agent/tools/toad-dirs.mjs';
 import { acquireSlot } from './slots.mjs';
 import { overallVerdict, resultsOf, scenarioResults, verdictOf } from './results.mjs';
-import { checkIgnore, ensureDirectory, projectFolder, readProjectConfig, registerProject, withDefaults } from './projects.mjs';
+import { checkIgnore, ensureDirectory, pathEntries, projectFolder, readProjectConfig, registerProject, withDefaults } from './projects.mjs';
 import { agentFor, resolveAgent, resolveModels, workflowCommand, workflowEnv } from './agent.mjs';
 
 export const NOT_SET_UP = 'The Toad agent is not set up on this machine. Run `toad setup`, then retry.';
@@ -173,7 +173,7 @@ export function sessionCost(dir) {
  * as ERROR once Pi has recorded more), `sessions` (where Pi keeps this run's
  * sessions; needed for `maxCost` and the cost in the result).
  */
-export async function runTest(text, input, ctx, { attachImages, projectRun, secretValues, cliImage, setup, agent = resolveAgent(), env: baseEnv = process.env, maxCost, sessions }) {
+export async function runTest(text, input, ctx, { attachImages, projectRun, secretValues, cliImage, cliPath, setup, agent = resolveAgent(), env: baseEnv = process.env, maxCost, sessions }) {
   if (!agent) throw new Error(NOT_SET_UP);
   // Project runs write receipts straight into .toad/runs/<id>/receipts; the
   // legacy tools, which have no project, keep the agent's own data/receipts.
@@ -198,6 +198,8 @@ export async function runTest(text, input, ctx, { attachImages, projectRun, secr
     // Legacy tools must not accidentally inherit another caller's selector.
     delete env.TOAD_PLAYWRIGHT_SECRETS_FILE;
     delete env.TOAD_CLI_SECRETS_FILE;
+    delete env.TOAD_CLI_PATH;
+    if (cliPath?.length) env.TOAD_CLI_PATH = JSON.stringify(cliPath);
     // A project's image wins over one set where the server is registered.
     if (cliImage) env.TOAD_CLI_IMAGE = cliImage;
     if (secretValues) {
@@ -365,6 +367,7 @@ export const handoffSchema = z.object({
     program: z.string().optional(),
     spec: z.string().min(1).optional().describe('api: the OpenAPI description, relative to workdir'),
     image: z.string().min(1).optional(),
+    path: pathEntries.describe('cli/api: workspace-relative directories prepended to PATH for setup and scenario commands'),
     setup: z.array(z.string().min(1)).max(20).optional().describe('cli/api: shell commands Toad runs once in the sandbox before any scenario, e.g. installing a pinned tool; every scenario starts from the result'),
   }).strict().optional()
     .describe('Omitted fields come from the project\'s .toad/toad.yaml'),
@@ -433,7 +436,7 @@ export async function runProject(input, ctx, options = {}) {
   if (h.kind === 'cli' && (!h.target.workdir || !h.target.program)) throw new Error('A CLI handoff requires target.workdir and target.program, in the handoff or under cli: in .toad/toad.yaml');
   if (h.kind === 'api' && !h.target.url) throw new Error('An API handoff requires target.url, in the handoff or as api.url in .toad/toad.yaml');
   if (h.kind !== 'web' && Object.values(h.credentials ?? {}).some(ref => isReservedSecretName(ref.env))) throw new Error(`${h.kind.toUpperCase()} credentials contain a reserved environment name`);
-  if (h.kind === 'web' && (h.target.setup?.length || h.allow_installs)) throw new Error('setup and allow_installs apply to cli and api handoffs; a web test runs in a browser');
+  if (h.kind === 'web' && (h.target.setup?.length || h.target.path?.length || h.allow_installs)) throw new Error('setup, path and allow_installs apply to cli and api handoffs; a web test runs in a browser');
   const secretValues = resolveCredentials(folder, h.credentials, { fromEnv: envNames, env });
   const runEnv = sandbox ? { ...env, TOAD_CLI_SANDBOX: sandbox } : env;
   // The models: options, then toad.yaml, then the user's; another set runs on a copy of the agent.
@@ -470,6 +473,7 @@ async function projectRun(input, ctx, h, run, secretValues, { agent, env, maxCos
     ...(h.credentials ? [`Credential roles and secret names: ${JSON.stringify(h.credentials)}. ${h.kind === 'web' ? 'Use each env name as the Playwright secret name' : 'Use each env name as a shell environment variable'}; never print its value.`] : []),
     ...(unsandboxed ? ['There is no sandbox on this machine (--sandbox none): commands run directly on the host in a copy of the working folder, which is their current directory. Use relative paths, not /work, and $HOME, not /home/tester.'] : []),
     ...(h.target.setup?.length ? [`Setup already ran in the sandbox, so every prepared scenario starts with its result: ${h.target.setup.map(c => `\`${c}\``).join('; ')}.`] : []),
+    ...(h.kind !== 'web' && h.target.path?.length ? [`Each command has these workspace-relative directories prepended to PATH: ${h.target.path.join(', ')}.`] : []),
     ...(h.kind === 'web' ? [] : [h.allow_installs
       ? 'Installing prerequisites is allowed: a tester may install a missing program, package or module inside the scenario workspace or $HOME, record the install, and retry the step.'
       : 'Installing prerequisites is not allowed: report a missing program, package or module as a missing prerequisite (ERROR) instead of installing it.']),
@@ -480,7 +484,7 @@ async function projectRun(input, ctx, h, run, secretValues, { agent, env, maxCos
   ensureDirectory(sessions);
   const result = await runTest(text, input, ctx, {
     attachImages: h.kind === 'web' && input.screenshots !== 'paths', projectRun: run, secretValues,
-    cliImage: h.kind === 'web' ? undefined : h.target.image, setup, agent, env, maxCost, sessions,
+    cliImage: h.kind === 'web' ? undefined : h.target.image, cliPath: h.kind === 'web' ? undefined : h.target.path, setup, agent, env, maxCost, sessions,
   });
   result.content[0].text += `\n\nHandoff: ${join(run, 'handoff.yaml')}\nReport: ${join(run, 'reports', 'report.md')}`;
   result.structuredContent.run = run;

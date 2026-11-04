@@ -208,6 +208,8 @@ cli:
   workdir: .                  # relative to the project, or absolute
   program: node dist/cli.js
   image: node:22-bookworm     # the container image CLI commands run in
+  path:                       # prepend workspace-relative tool directories to PATH
+    - node_modules/.bin
   setup:                      # run once in the sandbox before any scenario
     - npm ci --ignore-scripts
 api:
@@ -236,6 +238,23 @@ cli:
     - npm ci --ignore-scripts
     - npm install --no-save @earendil-works/pi-coding-agent@1.5.0  # its bin is node_modules/.bin
 ```
+
+**Shell and receipt boundaries:** Setup and scenario commands each run in a
+fresh shell. Files installed in the workspace persist, but `export PATH=...`
+(or `cd`) in one command does not carry over to the next. Invoke local tools
+explicitly, for example `./node_modules/.bin/pi --version`, or set PATH in
+*each* command that needs it: `PATH="$PWD/node_modules/.bin:$PATH" pi --version`.
+Alternatively, set `cli.path: [node_modules/.bin]` (or `api.path`) in
+`.toad/toad.yaml`, or `target.path` in a handoff or suite. Toad prepends those
+workspace-relative directories to PATH for every setup and scenario command,
+in the order given. Handoff values replace project defaults; an empty list
+clears them. Absolute paths, `.` and `..` segments, and PATH separators are
+not allowed. This changes command lookup: configure only trusted directories.
+
+Receipt paths returned by Toad are host paths for the coding agent or person
+reading the results; they are not mounted into the container. Container
+commands should use files in their workspace for intermediate data, not try to
+read a host receipt path. Toad writes command receipts separately.
 
 By default a tester that finds a program, package or module missing reports
 it as a missing prerequisite (`ERROR`). A handoff with `"allow_installs": true`

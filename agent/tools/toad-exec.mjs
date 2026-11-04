@@ -3,8 +3,8 @@
 import { spawn } from 'node:child_process';
 import { constants, closeSync, existsSync, fstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { isAbsolute, join, resolve, sep } from 'node:path';
-import { containerArgs, describeSandbox, hostEnv, hostShell, isReservedSecretName, prepare, sandboxArgs, sandboxEnv, scenarioPath, scenarioSandbox } from './toad-sandbox.mjs';
+import { isAbsolute, join, posix, resolve, sep } from 'node:path';
+import { containerArgs, describeSandbox, hostEnv, hostShell, isReservedSecretName, prepare, sandboxArgs, sandboxEnv, scenarioPath, scenarioSandbox, WORKSPACE_PATH_PATTERN } from './toad-sandbox.mjs';
 import { privateDir, toadDirs } from './toad-dirs.mjs';
 
 const root = process.cwd();
@@ -68,6 +68,19 @@ const redact = text => values.reduce((result, [key, value]) => result.split(valu
 const timeoutS = Number(process.env.TOAD_COMMAND_TIMEOUT_S ?? 120);
 if (!Number.isFinite(timeoutS) || timeoutS <= 0) fail('invalid timeout');
 const sandbox = scenarioSandbox(workspace);
+// Paths are relative to each copied workspace, not the original project.
+let pathEntries = [];
+if (process.env.TOAD_CLI_PATH !== undefined) {
+  try {
+    pathEntries = JSON.parse(process.env.TOAD_CLI_PATH);
+    if (!Array.isArray(pathEntries) || pathEntries.length > 20 || pathEntries.some(p => typeof p !== 'string' || !WORKSPACE_PATH_PATTERN.test(p))) throw new Error();
+  } catch { fail('invalid workspace PATH entries'); }
+}
+const pathRoot = sandbox.sandbox === 'none' ? join(workspace, 'project') : '/work';
+// Shell-quote the computed path: the unsandboxed workspace can contain quotes.
+const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
+const prefix = pathEntries.map(p => quote(sandbox.sandbox === 'none' ? join(pathRoot, p) : posix.join(pathRoot, p))).join(':');
+const workload = prefix ? `PATH=${prefix}:"$PATH"; export PATH;\n${command}` : command;
 // Secrets reach a container through a private env file, never its command line.
 let envDir, envFile;
 if (sandbox.sandbox === 'container' && Object.keys(secret).length) {
@@ -81,10 +94,10 @@ const input = inputFile !== undefined ? openSync(inputFile, 'r') : 'ignore';
 const started = Date.now();
 // Bubblewrap writes the info pipe only after it has initialized the sandbox.
 const child = sandbox.sandbox === 'container'
-  ? spawn(sandbox.runtime, containerArgs(sandbox, workspace, { name: containerName, envFile, interactive: inputFile !== undefined }, [command]), { stdio: [input, 'pipe', 'pipe'] })
+  ? spawn(sandbox.runtime, containerArgs(sandbox, workspace, { name: containerName, envFile, interactive: inputFile !== undefined }, [workload]), { stdio: [input, 'pipe', 'pipe'] })
   : sandbox.sandbox === 'none'
-    ? spawn(hostShell(), ['-c', command], { cwd: join(workspace, 'project'), env: hostEnv(workspace, secret), stdio: [input, 'pipe', 'pipe'], detached: process.platform !== 'win32' })
-    : spawn('bwrap', ['--info-fd', '3', ...sandboxArgs(workspace, ['/bin/sh', '-c', command])], {
+    ? spawn(hostShell(), ['-c', workload], { cwd: join(workspace, 'project'), env: hostEnv(workspace, secret), stdio: [input, 'pipe', 'pipe'], detached: process.platform !== 'win32' })
+    : spawn('bwrap', ['--info-fd', '3', ...sandboxArgs(workspace, ['/bin/sh', '-c', workload])], {
     env: sandboxEnv(secret), stdio: [input, 'pipe', 'pipe', 'pipe'], detached: true,
   });
 const out = { stdout: '', stderr: '', info: '' };

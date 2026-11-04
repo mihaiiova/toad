@@ -578,14 +578,14 @@ test('setup runs once in the sandbox and every scenario starts from its result',
   standIn(dir, `import { spawnSync } from 'node:child_process';
 const prep = spawnSync(process.execPath, ['tools/toad-exec.mjs', 'prepare', ${JSON.stringify(project)}], { encoding: 'utf8' });
 const id = /Scenario ID: (.+)/.exec(prep.stdout)[1];
-const run = spawnSync(process.execPath, ['tools/toad-exec.mjs', 'run', receipts + '/uses-the-tool', '01-tool', id, 'cat installed.txt'], { encoding: 'utf8' });
+const run = spawnSync(process.execPath, ['tools/toad-exec.mjs', 'run', receipts + '/uses-the-tool', '01-tool', id, 'local-tool'], { encoding: 'utf8' });
 const ok = /installed by setup/.test(run.stdout) && /Setup already ran/.test(request) && /not allowed/.test(request);
 reply('Verdict: ' + (ok ? 'PASS' : 'FAIL') + '\\nResults:\\n- ' + (ok ? 'PASS' : 'FAIL') + ' | Uses the tool\\n');
 `);
   const env = home(t);
   const client = await connect(t, dir, env);
   await client.callTool({ name: 'setup_project', arguments: { project_path: project } });
-  const handoff = { version: 1, kind: 'cli', target: { workdir: project, program: 'test', image: process.env.TOAD_TEST_IMAGE || 'node:22-slim', setup: ['echo installed by setup > installed.txt'] },
+  const handoff = { version: 1, kind: 'cli', target: { workdir: project, program: 'test', image: process.env.TOAD_TEST_IMAGE || 'node:22-slim', path: ['node_modules/.bin'], setup: ['mkdir -p node_modules/.bin; printf "#!/bin/sh\\necho installed by setup\\n" > node_modules/.bin/local-tool; chmod +x node_modules/.bin/local-tool; local-tool'] },
     request: { goal: 'Check setup', scenarios: [{ name: 'Uses the tool', steps: 'cat installed.txt', expected: 'the text' }] } };
   const result = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff } });
   assert.equal(result.isError, false, JSON.stringify(result));

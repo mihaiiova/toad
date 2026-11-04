@@ -11,6 +11,7 @@ import { basename, isAbsolute, join, resolve } from 'node:path';
 import { parse } from 'yaml';
 import { z } from 'zod';
 import { privateDir, toadDirs } from '../agent/tools/toad-dirs.mjs';
+import { WORKSPACE_PATH_PATTERN } from '../agent/tools/toad-sandbox.mjs';
 
 const listPath = () => join(toadDirs().config, 'projects.json');
 
@@ -70,6 +71,7 @@ export const CONFIG_TEMPLATE = `# Toad settings for this project. Commit this fi
 #   workdir: .                       # relative to the project, or absolute
 #   program: node dist/cli.js        # how to invoke the program there
 #   image: node:22-bookworm          # the container CLI tests run in
+#   path: [node_modules/.bin]        # workspace-relative PATH additions
 #   setup:                           # run once in the sandbox before any scenario
 #     - npm ci --ignore-scripts
 # api:
@@ -108,11 +110,13 @@ export const SUITE_TEMPLATE = `# A saved Toad suite. \`toad run --suite example\
 `;
 
 const setup = z.array(z.string().min(1)).max(20).optional();
+// Only relative workspace paths, without traversal or PATH delimiters.
+export const pathEntries = z.array(z.string().regex(WORKSPACE_PATH_PATTERN)).max(20).optional();
 const modelRef = z.string().regex(/^[^/\s]+\/\S+$/, 'a provider/id model reference');
 const configSchema = z.object({
   web: z.object({ url: z.string().url() }).strict().optional(),
-  cli: z.object({ workdir: z.string().min(1).optional(), program: z.string().min(1).optional(), image: z.string().min(1).optional(), setup }).strict().optional(),
-  api: z.object({ url: z.string().url().optional(), spec: z.string().min(1).optional(), workdir: z.string().min(1).optional(), image: z.string().min(1).optional(), setup }).strict().optional(),
+  cli: z.object({ workdir: z.string().min(1).optional(), program: z.string().min(1).optional(), image: z.string().min(1).optional(), setup, path: pathEntries }).strict().optional(),
+  api: z.object({ url: z.string().url().optional(), spec: z.string().min(1).optional(), workdir: z.string().min(1).optional(), image: z.string().min(1).optional(), setup, path: pathEntries }).strict().optional(),
   models: z.object({ lead: modelRef.optional(), tester: modelRef.optional() }).strict().optional(),
   timeout_minutes: z.number().int().min(1).max(60).optional(),
 }).strict();
@@ -178,7 +182,7 @@ export const suiteSchema = z.object({
   title: z.string().min(1).max(120).optional(),
   target: z.object({
     url: z.string().url().optional(), workdir: z.string().min(1).optional(), program: z.string().min(1).optional(),
-    spec: z.string().min(1).optional(), image: z.string().min(1).optional(), setup,
+    spec: z.string().min(1).optional(), image: z.string().min(1).optional(), setup, path: pathEntries,
   }).strict().optional(),
   goal: z.string().min(1),
   tags,
