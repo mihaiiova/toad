@@ -1,10 +1,7 @@
-# forge:generated v1 sha256=d640d1cdc888e8ba10a7d3796105956b11eb1314fc5ff972271519fe0426227a
-data/*
-!data/knowledge/
-data/knowledge/*
-!data/knowledge/.gitkeep
+# faur:generated v1 sha256=2abe2317115bb2e05fb0ba1d8401d5c10d7389ca76c6be5c9fbd157021a0efd9
+data/
 .env
-.forge/
+.faur/
 .pi/state.json
 .pi/sessions/
 .pi/git/

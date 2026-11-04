@@ -41,4 +41,4 @@ description: "Run one CLI scenario and record its evidence"
    receipt paths, without inlining receipt contents or logs. For FAIL,
    identify the first failing step and why.
 
-<!-- forge:generated v1 sha256=5fd1d3a74c5943188d11b2ec2b7bbdfb58eb0f5e55636b54d916e635e8a0a995 -->
+<!-- faur:generated v1 sha256=5fd1d3a74c5943188d11b2ec2b7bbdfb58eb0f5e55636b54d916e635e8a0a995 -->

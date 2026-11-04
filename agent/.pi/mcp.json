@@ -5,7 +5,7 @@
       "args": [
         "tools/playwright-mcp.mjs",
         "-y",
-        "@playwright/mcp@0.0.83",
+        "@playwright/mcp@0.0.84",
         "--headless",
         "--browser",
         "chromium",

@@ -48,4 +48,4 @@ description: "Run one HTTP API scenario and record every request as evidence"
    inlining receipt contents. For FAIL, identify the first failing
    request and why.
 
-<!-- forge:generated v1 sha256=83fad25f2c4139f90418b0cc79b5f20d841bd6d0d0300b42d4acd8f71f9e9008 -->
+<!-- faur:generated v1 sha256=83fad25f2c4139f90418b0cc79b5f20d841bd6d0d0300b42d4acd8f71f9e9008 -->

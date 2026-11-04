@@ -53,4 +53,4 @@ systemPrompt: |
   - Keep every path exactly as the tool returned it.
 ---
 
-<!-- forge:generated v1 sha256=f03733466210229f7bec014237715eb88e99ea8900fa833f4aad317a8469e10e -->
+<!-- faur:generated v1 sha256=f03733466210229f7bec014237715eb88e99ea8900fa833f4aad317a8469e10e -->

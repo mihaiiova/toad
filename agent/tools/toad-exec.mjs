@@ -51,7 +51,7 @@ function secrets() {
     finally { if (fd !== undefined) closeSync(fd); }
   }
   let text = '';
-  try { text = readFileSync(join(root, '.forge/test-secrets.env'), 'utf8'); } catch { return {}; }
+  try { text = readFileSync(join(root, '.faur/test-secrets.env'), 'utf8'); } catch { return {}; }
   const out = {};
   for (const line of text.split('\n')) {
     const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);

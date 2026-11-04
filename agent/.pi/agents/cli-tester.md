@@ -59,4 +59,4 @@ systemPrompt: |
   - Keep every path exactly as the recording tool returned it.
 ---
 
-<!-- forge:generated v1 sha256=3b636d06bb64ff77996108021c4c74e5cf94a6d91694d2b188a540a8a67db9e6 -->
+<!-- faur:generated v1 sha256=3b636d06bb64ff77996108021c4c74e5cf94a6d91694d2b188a540a8a67db9e6 -->

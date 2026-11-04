@@ -9,7 +9,7 @@
     "find"
   ],
   "packages": [
-    "git:github.com/mihaiiova/pi-forge@v0.29.1",
+    "git:github.com/mihaiiova/pi-commands@v0.1.0",
     "npm:pi-subagents@0.83.1"
   ]
 }

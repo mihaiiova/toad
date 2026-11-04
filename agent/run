@@ -1,42 +1,13 @@
 #!/usr/bin/env bash
-# Runtime launcher for a generated Pi agent system.
-# Resolves the project root from this script's own location, then cd's into
-# it so project .pi/ resources are discovered regardless of the caller's
-# working directory. Gives the system its own Pi config dir (settings,
-# logins, packages, MCP servers, extensions, instructions). The caller's
-# environment, including credentials, is inherited. Not an OS sandbox.
+# Starts Pi in this project with the project's own Pi configuration
+# directory (settings, logins, packages, MCP servers, extensions,
+# instructions), so a user-level package cannot replace what the project
+# relies on. The caller's environment, including credentials, is
+# inherited, as are ~/.agents/skills and AGENTS.md files in parent folders.
+# This isolates Pi configuration only; it is not an OS sandbox.
 set -euo pipefail
-
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-if ! command -v pi >/dev/null 2>&1; then
-  echo "run: pi is not installed or not on PATH" >&2
-  exit 1
-fi
-
 cd "$ROOT"
-
-if [[ ! -f ".pi/system.yaml" ]]; then
-  if [[ "${1:-}" == "--workflow" ]]; then
-    if [[ ! -f "$ROOT/.pi/git/github.com/mihaiiova/pi-forge/skills/forge/workflow-runner.mjs" ]]; then echo '{"workflow":null,"runId":null,"status":"configuration_error","answer":"","message":"The Forge package is not installed in this project yet. Run ./run once, then retry."}'; exit 2; fi
-    exec node "$ROOT/.pi/git/github.com/mihaiiova/pi-forge/skills/forge/workflow-runner.mjs" 'W3sibmFtZSI6InRlc3QiLCJkZXNjcmlwdGlvbiI6IlJ1biBhIHdlYiwgY29tbWFuZC1saW5lIG9yIEFQSSB0ZXN0IHJlcXVlc3QgYW5kIHJldHVybiB0aGUgdmVyZGljdCwgZWFjaCBzY2VuYXJpbydzIHJlc3VsdCBhbmQgdGhlIHJlY2VpcHRzIiwiYWdlbnRzIjpbIndlYi10ZXN0ZXIiLCJjbGktdGVzdGVyIiwiYXBpLXRlc3RlciJdLCJlbnRyeSI6ImxlYWQiLCJsZWFkIjoibGVhZCJ9XQ==' -- "$@"
-  fi
-  echo "run: .pi/system.yaml not found in $ROOT" >&2
-  exit 1
-fi
-
-export PI_CODING_AGENT_DIR="$ROOT/.forge/pi-home"
+export PI_CODING_AGENT_DIR="$ROOT/.faur/pi-home"
 mkdir -p "$PI_CODING_AGENT_DIR"
-
-# The Pi config is separate; the caller's environment is still inherited.
-# Log in for this context (`./run`, then `/login`), or export a provider key.
-# The orchestrator's prompt: authored instructions, then what it can use.
-prompts=()
-for f in .pi/APPEND_SYSTEM.md .pi/CAPABILITIES.md; do
-  if [[ -f "$f" ]]; then prompts+=(--append-system-prompt "$f"); fi
-done
-if [[ "${1:-}" == "--workflow" ]]; then
-  if [[ ! -f "$ROOT/.pi/git/github.com/mihaiiova/pi-forge/skills/forge/workflow-runner.mjs" ]]; then echo '{"workflow":null,"runId":null,"status":"configuration_error","answer":"","message":"The Forge package is not installed in this project yet. Run ./run once, then retry."}'; exit 2; fi
-  exec node "$ROOT/.pi/git/github.com/mihaiiova/pi-forge/skills/forge/workflow-runner.mjs" 'W3sibmFtZSI6InRlc3QiLCJkZXNjcmlwdGlvbiI6IlJ1biBhIHdlYiwgY29tbWFuZC1saW5lIG9yIEFQSSB0ZXN0IHJlcXVlc3QgYW5kIHJldHVybiB0aGUgdmVyZGljdCwgZWFjaCBzY2VuYXJpbydzIHJlc3VsdCBhbmQgdGhlIHJlY2VpcHRzIiwiYWdlbnRzIjpbIndlYi10ZXN0ZXIiLCJjbGktdGVzdGVyIiwiYXBpLXRlc3RlciJdLCJlbnRyeSI6ImxlYWQiLCJsZWFkIjoibGVhZCJ9XQ==' "${prompts[@]}" -- "$@"
-fi
-exec pi --approve --no-context-files ${prompts[@]+"${prompts[@]}"} "$@"
+exec pi "$@"
