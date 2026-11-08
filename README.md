@@ -319,6 +319,70 @@ A handoff your agent sends once can be saved as a **suite** and run again
 with `toad run`, without a coding agent: on your machine, or in CI after
 every deploy.
 
+### Run-local recordings
+
+A passing CLI scenario can leave a **recording**: the exact program and
+arguments Toad ran, and the exit-code and stdout assertion that made it pass.
+The run viewer shows it beside the scenario's plain-language steps. Capture
+never changes the verdict and adds no model calls. Toad records CLI scenarios
+only; API and web scenarios show **Not captured**. The format defines a **Not
+recordable** status with `unsupported`, `incomplete` or `unsafe` for producers,
+but no producer emits it yet, so it does not appear today.
+
+A CLI scenario is recorded only when all of these hold:
+
+- the handoff selects no `credentials`, and sets neither `allow_installs` nor
+  `target.setup` or `target.path`;
+- the tester covers it with a single structured command, made through
+  `cli_run_structured_command`: a program with explicit arguments, an expected
+  exit code, and an expected stdout (`equals` or `contains`);
+- the tester marks that command complete for the scenario, attesting that this
+  one action and assertion cover every step and expected outcome;
+- the scenario PASSes in a run that finished successfully, and that command is
+  the scenario's only receipt.
+
+**What a recording trusts.** The attestation is the tester's word, not a
+mechanical proof, and Toad cannot recognize arbitrary secret values. Program
+names, arguments and expected stdout are therefore trusted, non-secret test
+data. Do not put a credential, token or other secret in a structured command,
+its arguments or its expected output: a recording stores them as written. This
+is not a security boundary; treat recordings and their receipts as sensitive.
+
+Replay is not implemented yet: `toad run` still uses the agent, and saving
+recordings with suites is not available. The format, identity and safety rules
+below are shared with the producers that will follow.
+
+The shared run-local status format lives at
+`.toad/runs/<id>/recording/<scenario-id>.json`, alongside the run's receipts.
+Version 1 not-recordable status files identify the kind, scenario and intent
+and contain only a fixed reason; they do not contain actions, assertions, or
+secrets. A finalized recording envelope contains `version`, `status` (`recorded`),
+`kind`, `scenarioId`, `intentHash`, `codec`, and codec-specific `payload`.
+The codec ID names a codec built into Toad; the one producer today is
+`cli-command-v1`, whose payload is a program, its arguments, and the expected
+exit code and stdout. A codec validates its own producer provenance, actions,
+assertions and credential rules, and no caller can register one at runtime.
+Scenario
+IDs are SHA-256 of UTF-8 JSON `["scenario", name.trim().toLowerCase()]`, as
+scenario results use case-insensitive trimmed names. The intent fingerprint is
+SHA-256 of UTF-8 JSON `[kind, steps, expected]`, with the original strings
+preserved exactly. A status whose intent no longer matches is ignored. Status
+publication is atomic and first-writer-wins; incomplete temporary files are not
+read. Finalization and display require a finished run whose workflow completed
+successfully, exactly one matching requested scenario with a PASS result,
+matching intent, and successful validation by a codec built into Toad. The
+scenario may be recorded even if another scenario failed. Codec validation is repeated when the
+viewer reads a recording. Future producer codecs must define executable ordered
+actions, checks, provenance and credential-reference handling, and verify that
+the full expected outcome is covered before finalizing. An agent verdict or
+receipt alone is not sufficient. Secret redaction is not proof that a recording
+is safe: future producers must fail closed when they cannot establish safety.
+
+Runs and their artifacts are gitignored, but **are not automatically pruned or
+expired**. Delete run directories deliberately when no longer needed. Treat
+all artifacts, including receipts, reports and transcripts, as potentially
+sensitive; this status format does not sanitize other artifacts.
+
 ### Suites
 
 A suite is `.toad/suites/<name>.yaml`: a handoff, plus tags and whether it

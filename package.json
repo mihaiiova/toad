@@ -19,6 +19,7 @@
     "agent/.pi/agents/",
     "agent/.pi/skills/",
     "agent/tools/*.mjs",
+    "agent/tools/*.md",
     "!agent/tools/*.test.mjs",
     "skills/",
     "LICENSE"

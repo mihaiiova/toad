@@ -55,6 +55,17 @@
       ],
       "approve": false,
       "lead": false
+    },
+    {
+      "name": "run-structured-command",
+      "description": "Run one program with explicit arguments and assert its exit code and stdout, optionally recording the scenario when this one command covers it",
+      "command": "node",
+      "args": [
+        "tools/toad-structured-cli.mjs",
+        "{request:file}"
+      ],
+      "approve": false,
+      "lead": false
     }
   ]
 }

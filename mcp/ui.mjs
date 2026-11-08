@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { listProjects } from './projects.mjs';
 import { VERSION } from './agent.mjs';
 import { resultsOf, scenarioResults } from './results.mjs';
+import { recordingStatus } from './recordings.mjs';
 
 const HOST = '127.0.0.1';
 const PAGE = join(dirname(fileURLToPath(import.meta.url)), 'ui.html');
@@ -157,9 +158,11 @@ function detail(project, id) {
   const dir = requireRun(project, id);
   const runs = runDirs(project);
   const at = runs.indexOf(id);
+  const handoff = readJson(join(dir, 'handoff.yaml')) ?? {};
+  const recordings = (handoff.request?.scenarios ?? []).map(s => recordingStatus(dir, handoff.kind, s));
   return {
     ...summary(project, id), projectPath: project.path,
-    handoff: readJson(join(dir, 'handoff.yaml')) ?? {},
+    handoff, recordings,
     report: readText(join(dir, 'reports', 'report.md')),
     files: receiptFiles(dir),
     newer: runs[at - 1] ?? null, older: runs[at + 1] ?? null,

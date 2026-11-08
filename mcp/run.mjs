@@ -18,6 +18,7 @@ import { privateDir, toadDirs } from '../agent/tools/toad-dirs.mjs';
 import { acquireSlot } from './slots.mjs';
 import { overallVerdict, resultsOf, scenarioResults, verdictOf } from './results.mjs';
 import { checkIgnore, ensureDirectory, pathEntries, projectFolder, readProjectConfig, registerProject, withDefaults } from './projects.mjs';
+import { finalizeCliCandidates } from './recordings.mjs';
 import { agentFor, resolveAgent, resolveModels, workflowCommand, workflowEnv } from './agent.mjs';
 
 export const NOT_SET_UP = 'The Toad agent is not set up on this machine. Run `toad setup`, then retry.';
@@ -173,7 +174,7 @@ export function sessionCost(dir) {
  * as ERROR once Pi has recorded more), `sessions` (where Pi keeps this run's
  * sessions; needed for `maxCost` and the cost in the result).
  */
-export async function runTest(text, input, ctx, { attachImages, projectRun, secretValues, cliImage, cliPath, setup, agent = resolveAgent(), env: baseEnv = process.env, maxCost, sessions }) {
+export async function runTest(text, input, ctx, { attachImages, projectRun, secretValues, cliImage, cliPath, cliRecording, setup, agent = resolveAgent(), env: baseEnv = process.env, maxCost, sessions }) {
   if (!agent) throw new Error(NOT_SET_UP);
   // Project runs write receipts straight into .toad/runs/<id>/receipts; the
   // legacy tools, which have no project, keep the agent's own data/receipts.
@@ -199,6 +200,9 @@ export async function runTest(text, input, ctx, { attachImages, projectRun, secr
     delete env.TOAD_PLAYWRIGHT_SECRETS_FILE;
     delete env.TOAD_CLI_SECRETS_FILE;
     delete env.TOAD_CLI_PATH;
+    delete env.TOAD_EXEC_JSON;
+    delete env.TOAD_RECORDING_ENABLED;
+    if (cliRecording) env.TOAD_RECORDING_ENABLED = 'cli-v1';
     if (cliPath?.length) env.TOAD_CLI_PATH = JSON.stringify(cliPath);
     // A project's image wins over one set where the server is registered.
     if (cliImage) env.TOAD_CLI_IMAGE = cliImage;
@@ -317,7 +321,10 @@ function finish(input, result, folder, { attachImages, projectRun }) {
   // A run stopped for its spending limit is an error whatever it reported so far.
   const verdict = result.status === 'cost_limit' ? 'ERROR' : overallVerdict(verdictOf(result.answer), scenarios);
   const cost = result.cost !== undefined ? { cost: Number(result.cost.toFixed(6)) } : {};
-  if (projectRun) writeState(projectRun, { state: 'finished', finished: new Date().toISOString(), verdict, status: result.status, scenarios, ...cost });
+  if (projectRun) {
+    writeState(projectRun, { state: 'finished', finished: new Date().toISOString(), verdict, status: result.status, ...(result.cleanup ? { cleanup: result.cleanup } : {}), scenarios, ...cost });
+    try { finalizeCliCandidates(projectRun, JSON.parse(readFileSync(join(projectRun, 'handoff.yaml'), 'utf8')), scenarios); } catch { /* Capture never changes the test result. */ }
+  }
   // Regular files only: agent-created symlinks are never followed.
   const files = filesIn(folder);
   // The agent's report normally starts with its own verdict line; when it
@@ -469,7 +476,9 @@ async function projectRun(input, ctx, h, run, secretValues, { agent, env, maxCos
   const target = h.kind === 'web' ? [`Test ${h.target.url}.`]
     : h.kind === 'api' ? apiTarget(h.target, env)
       : [`Test the command-line program in the working folder ${h.target.workdir}.`, `Invoke it as: ${h.target.program}`];
+  const cliRecording = h.kind === 'cli' && !Object.keys(h.credentials ?? {}).length && !h.allow_installs && !h.target.setup?.length && !h.target.path?.length;
   const text = [request(target, { what: h.request.goal, scenarios: h.request.scenarios }),
+    ...(cliRecording ? ['For a scenario fully testable by one structured CLI command and explicit exit-code and stdout assertion, use cli_run_structured_command with capture.scenarioName set to the exact scenario name and capture.complete true. Use it as the only command receipt in that scenario. Set complete true only if this one action and assertion cover every step and expected outcome. Only trusted, non-secret literal data is supported. Otherwise use normal tools; do not weaken the scenario to record it.'] : []),
     ...(h.credentials ? [`Credential roles and secret names: ${JSON.stringify(h.credentials)}. ${h.kind === 'web' ? 'Use each env name as the Playwright secret name' : 'Use each env name as a shell environment variable'}; never print its value.`] : []),
     ...(unsandboxed ? ['There is no sandbox on this machine (--sandbox none): commands run directly on the host in a copy of the working folder, which is their current directory. Use relative paths, not /work, and $HOME, not /home/tester.'] : []),
     ...(h.target.setup?.length ? [`Setup already ran in the sandbox, so every prepared scenario starts with its result: ${h.target.setup.map(c => `\`${c}\``).join('; ')}.`] : []),
@@ -484,7 +493,7 @@ async function projectRun(input, ctx, h, run, secretValues, { agent, env, maxCos
   ensureDirectory(sessions);
   const result = await runTest(text, input, ctx, {
     attachImages: h.kind === 'web' && input.screenshots !== 'paths', projectRun: run, secretValues,
-    cliImage: h.kind === 'web' ? undefined : h.target.image, cliPath: h.kind === 'web' ? undefined : h.target.path, setup, agent, env, maxCost, sessions,
+    cliImage: h.kind === 'web' ? undefined : h.target.image, cliPath: h.kind === 'web' ? undefined : h.target.path, cliRecording, setup, agent, env, maxCost, sessions,
   });
   result.content[0].text += `\n\nHandoff: ${join(run, 'handoff.yaml')}\nReport: ${join(run, 'reports', 'report.md')}`;
   result.structuredContent.run = run;

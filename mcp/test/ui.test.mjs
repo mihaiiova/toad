@@ -8,6 +8,7 @@ import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { forgetProject, listProjects, projectId, registerProject } from '../projects.mjs';
 import { startUi } from '../ui.mjs';
+import { finalizeRecording, markNotRecordable, scenarioId } from '../recordings.mjs';
 
 const cli = resolve(import.meta.dirname, '../cli.mjs');
 // The project list is read from TOAD_CONFIG_DIR on every call.
@@ -69,6 +70,32 @@ test('one viewer lists and serves the runs of every registered project', async t
   const listed = spawnSync(process.execPath, [cli, 'projects'], { encoding: 'utf8', env: process.env });
   assert.equal(listed.status, 0);
   assert.deepEqual(listed.stdout.trim().split('\n').sort(), [a, b].sort());
+});
+
+test('scenario recording statuses never treat receipts or malformed files as recordings', async t => {
+  const id = '2026-11-03T09-00-00-000Z-recordings';
+  const path = project(t, 'recordings', [[id, 'PASS', 'Recordings']]);
+  const run = join(path, '.toad', 'runs', id);
+  const scenarios = [
+    { name: 'No capture', steps: 'one', expected: 'one' },
+    { name: 'Unsupported', steps: 'two', expected: 'two' },
+    { name: 'Fake capture', steps: 'three', expected: 'three' },
+    { name: 'Recorded', steps: 'four', expected: 'four' },
+  ];
+  writeFileSync(join(run, 'handoff.yaml'), JSON.stringify({ version: 1, kind: 'cli', request: { goal: 'Recordings', scenarios } }));
+  writeFileSync(join(run, 'state.json'), JSON.stringify({ state: 'finished', status: 'ok', scenarios: [{ name: 'Recorded', result: 'PASS' }] }));
+  markNotRecordable(run, 'cli', scenarios[1], 'unsupported');
+  writeFileSync(join(run, 'recording', `${scenarioId(scenarios[2].name)}.json`), JSON.stringify({ version: 1, status: 'captured' }));
+  finalizeRecording(run, 'cli', scenarios[3], 'cli-command-v1', { program: './check', args: [], expect: { exitCode: 0, stdout: { equals: 'ready\n' } } });
+  const { server, url } = await startUi({ port: 0 });
+  t.after(() => server.close());
+  const result = await (await fetch(new URL(`/api/projects/${projectId(path)}/runs/${id}`, url))).json();
+  assert.deepEqual(result.recordings, [
+    { status: 'not-captured' },
+    { status: 'not-recordable', reason: 'unsupported' },
+    { status: 'not-captured' },
+    { status: 'recorded', steps: [{ action: './check', assertion: 'exit 0; stdout {"equals":"ready\\n"}' }] },
+  ]);
 });
 
 test('without an explicit port the viewer moves to the next free one', async t => {

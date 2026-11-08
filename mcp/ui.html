@@ -674,6 +674,8 @@ function runPage(r) {
     const own = folder ? byFolder.find(([name]) => name === folder)[1] : [];
     return `<div class="scenario${v ? ` r-${v}` : ''}"><span class="num">${i + 1}</span><span class="name">${esc(s.name)}</span><span>${v ? badge(v) : live(d) ? badge('RUNNING') : ''}</span>
       <div class="line"><b>Steps</b> ${esc(s.steps)}</div><div class="line"><b>Expected</b> ${esc(s.expected)}</div>
+      <div class="line"><b>Recording</b> ${d.recordings?.[i]?.status === 'recorded' ? 'Recorded' : d.recordings?.[i]?.status === 'not-recordable' ? `Not recordable (${esc(d.recordings[i].reason)})` : 'Not captured'}</div>
+      ${d.recordings?.[i]?.status === 'recorded' ? d.recordings[i].steps.map(step => `<div class="line"><b>Action</b> ${esc(step.action)} · <b>Assertion</b> ${esc(step.assertion)}</div>`).join('') : ''}
       ${own.length ? `<div class="files">${fileLinks(own)}</div>` : ''}</div>`;
   }).join('') : `<div class="empty">No scenarios were given; Toad derived them from the goal. See the report.</div>`);
   if (r.tab === 'receipts') body = d.files.length ? groups(d.files).map(([name, files]) => {

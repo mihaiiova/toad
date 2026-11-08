@@ -20,10 +20,21 @@ description: "Run one CLI scenario and record its evidence"
    Commands run with `/bin/sh`, not bash: use POSIX shell only (no
    `${PIPESTATUS[@]}`, `[[ ]]`, arrays or `source`), or run
    `bash -c '...'` when the image has bash.
-4. Compare recorded exit codes and output with the expected outcomes.
+4. When one program invocation with explicit arguments covers every step and
+   expected outcome of the scenario, use the structured command instead of a
+   shell command: it asserts the exit code and stdout itself and, when the
+   request says so, may record the scenario. Give it the scenario ID, the
+   receipt name, the program and its arguments, and the expected exit code and
+   stdout. Also pass the scenario's exact name and mark it complete only when
+   that single action and assertion really cover the whole scenario; otherwise
+   use the shell tools. It supports trusted, non-secret literal data only, so
+   never use it for a scenario that needs credentials, and never weaken a
+   scenario to make it recordable. Keep it the scenario's only receipt when
+   recording.
+5. Compare recorded exit codes and output with the expected outcomes.
    A failed expectation is FAIL; missing dependencies, sandbox errors,
    missing secrets or ambiguous steps are ERROR. Do not infer success.
-5. If a step fails because a program, package or module it needs is
+6. If a step fails because a program, package or module it needs is
    missing ("command not found", "Cannot find module", "is not
    installed"), that is a missing prerequisite, not a product failure:
    record a command that shows it is missing and name it in the report.
@@ -36,7 +47,7 @@ description: "Run one CLI scenario and record its evidence"
    example `PATH="$PWD/node_modules/.bin:$PATH" tool --version`).
    Record the install and the retried step as receipts. If installing
    is not allowed, or the install fails, the step is ERROR.
-6. Secrets are referenced by environment variable name, never value.
+7. Secrets are referenced by environment variable name, never value.
    Return a scenario report with the verdict, observed steps and absolute
    receipt paths, without inlining receipt contents or logs. For FAIL,
    identify the first failing step and why.

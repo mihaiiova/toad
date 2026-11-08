@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, symlinkSync, readdirSync, statSync, realpathSync } from 'node:fs';
+import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, symlinkSync, readdirSync, statSync, realpathSync } from 'node:fs';
 import { tmpdir as osTmpdir } from 'node:os';
 // Project paths must be canonical; on macOS the temp folder is behind a symlink.
 const tmpdir = () => realpathSync(osTmpdir());
@@ -8,6 +8,7 @@ import { dirname, join, resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { chooseSandbox } from '../../agent/tools/toad-sandbox.mjs';
+import { recordingStatus } from '../recordings.mjs';
 
 const server = resolve(import.meta.dirname, '../server.mjs');
 // A 1×1 PNG.
@@ -567,7 +568,7 @@ test('an agent that is not set up is a clear error', async t => {
 /** Give a stand-in agent the real sandbox tools, as the prepared agent has. */
 function realTools(dir) {
   mkdirSync(join(dir, 'tools'), { recursive: true });
-  for (const name of ['toad-exec.mjs', 'toad-sandbox.mjs', 'toad-dirs.mjs']) writeFileSync(join(dir, 'tools', name), readFileSync(resolve(import.meta.dirname, '../../agent/tools', name)));
+  for (const name of ['toad-exec.mjs', 'toad-sandbox.mjs', 'toad-dirs.mjs', 'toad-structured-cli.mjs', 'toad-cli-recording.mjs']) writeFileSync(join(dir, 'tools', name), readFileSync(resolve(import.meta.dirname, '../../agent/tools', name)));
 }
 
 test('setup runs once in the sandbox and every scenario starts from its result', { skip: !sandboxAvailable && 'no CLI sandbox on this machine' }, async t => {
@@ -597,12 +598,48 @@ reply('Verdict: ' + (ok ? 'PASS' : 'FAIL') + '\\nResults:\\n- ' + (ok ? 'PASS' :
   assert.equal(readdirSync(join(env.TOAD_CACHE_DIR, 'scenarios')).length, 1);
 });
 
+test('a CLI run records a scenario that one structured command covers', { skip: !sandboxAvailable && 'no CLI sandbox on this machine' }, async t => {
+  const dir = agent(t, { status: 'ok', answer: 'unused', code: 0 });
+  realTools(dir);
+  const project = mkdtempSync(join(tmpdir(), 'toad-record-'));
+  t.after(() => rmSync(project, { recursive: true, force: true }));
+  writeFileSync(join(project, 'check'), '#!/bin/sh\nprintf "ready\\n"\n');
+  chmodSync(join(project, 'check'), 0o755);
+  standIn(dir, `import { spawnSync } from 'node:child_process';
+fs.writeFileSync('recording-env', process.env.TOAD_RECORDING_ENABLED || '');
+try {
+const prep = spawnSync(process.execPath, ['tools/toad-exec.mjs', 'prepare', ${JSON.stringify(project)}], { encoding: 'utf8' });
+const id = /Scenario ID: (.+)/.exec(prep.stdout)[1];
+fs.mkdirSync(receipts + '/check-version', { recursive: true });
+const request = { scenario: id, receipts: receipts + '/check-version', name: '01-check', program: './check', args: [], expect: { exitCode: 0, stdout: { equals: 'ready\\n' } }, capture: { scenarioName: 'Check version', complete: true } };
+fs.writeFileSync('structured-request.json', JSON.stringify(request));
+const run = spawnSync(process.execPath, ['tools/toad-structured-cli.mjs', 'structured-request.json'], { encoding: 'utf8' });
+fs.writeFileSync('structured-result.json', run.stdout + run.stderr);
+const passed = /"captured":true/.test(run.stdout);
+reply('Verdict: ' + (passed ? 'PASS' : 'FAIL') + '\\nResults:\\n- ' + (passed ? 'PASS' : 'FAIL') + ' | Check version\\n');
+} catch (error) { fs.writeFileSync('structured-error.txt', error.stack + '\\n' + (error.stdout ?? '') + '\\n' + (error.stderr ?? '')); reply('Verdict: FAIL\\nResults:\\n- FAIL | Check version\\n'); }
+`);
+  const client = await connect(t, dir, home(t));
+  await client.callTool({ name: 'setup_project', arguments: { project_path: project } });
+  const handoff = { version: 1, kind: 'cli', target: { workdir: project, program: './check', image: process.env.TOAD_TEST_IMAGE || 'node:22-slim' },
+    request: { goal: 'Check the tool', scenarios: [{ name: 'Check version', steps: 'Run ./check.', expected: 'It prints ready.' }] } };
+  const result = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff } });
+  assert.equal(result.structuredContent.verdict, 'PASS', readFileSync(join(dir, 'structured-result.json'), 'utf8'));
+  assert.equal(readFileSync(join(dir, 'recording-env'), 'utf8'), 'cli-v1', 'the run tells the tool that capture is on');
+  const run = result.structuredContent.run;
+  assert.equal(JSON.parse(readFileSync(join(run, 'state.json'), 'utf8')).verdict, 'PASS');
+  assert.deepEqual(recordingStatus(run, 'cli', handoff.request.scenarios[0]), {
+    status: 'recorded',
+    steps: [{ action: './check', assertion: 'exit 0; stdout {"equals":"ready\\n"}' }],
+  });
+});
+
 test('a failed setup ends the run as ERROR before any scenario starts', { skip: !sandboxAvailable && 'no CLI sandbox on this machine' }, async t => {
   const dir = agent(t, { status: 'ok', answer: 'Verdict: PASS', code: 0 });
   realTools(dir);
   const project = mkdtempSync(join(tmpdir(), 'toad-setup-fail-'));
   t.after(() => rmSync(project, { recursive: true, force: true }));
-  const client = await connect(t, dir);
+  const client = await connect(t, dir, { ...home(t), TOAD_EXEC_JSON: '1' });
   await client.callTool({ name: 'setup_project', arguments: { project_path: project } });
   const handoff = { version: 1, kind: 'cli', target: { workdir: project, program: 'test', image: process.env.TOAD_TEST_IMAGE || 'node:22-slim', setup: ['true', 'echo no such package >&2; exit 4'] },
     request: { goal: 'Check', scenarios: [{ name: 'A', steps: 's', expected: 'e' }, { name: 'B', steps: 's', expected: 'e' }] } };

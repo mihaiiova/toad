@@ -101,10 +101,15 @@ const child = sandbox.sandbox === 'container'
     env: sandboxEnv(secret), stdio: [input, 'pipe', 'pipe', 'pipe'], detached: true,
   });
 const out = { stdout: '', stderr: '', info: '' };
+let outputTruncated = false;
 for (const [key, stream] of [['stdout', child.stdout], ['stderr', child.stderr], ['info', child.stdio[3]]]) {
   if (!stream) continue;
   stream.setEncoding('utf8');
-  stream.on('data', chunk => { if (out[key].length < 2 * 1024 * 1024) out[key] += chunk; });
+  stream.on('data', chunk => {
+    const limit = 2 * 1024 * 1024;
+    if (out[key].length + chunk.length > limit && key !== 'info') outputTruncated = true;
+    if (out[key].length < limit) out[key] += chunk.slice(0, limit - out[key].length);
+  });
 }
 let timedOut = false, interrupted = false, spawnError;
 child.on('error', error => { spawnError = error; });
@@ -135,9 +140,13 @@ child.on('close', (code, signal) => {
   const stdout = redact(out.stdout), stderr = redact(out.stderr);
   mkdirSync(receiptsDir, { recursive: true });
   const receipt = join(receiptsDir, `${name}.txt`);
-  writeFileSync(receipt, [`$ ${redact(command)}`, `scenario: ${id}`, `workspace: ${workspace}`, `sandbox: ${describeSandbox(sandbox)}`, ...(inputFile !== undefined ? [`input: ${redact(readFileSync(inputFile, 'utf8'))}`] : []), `result: ${outcome}`, `duration: ${seconds}s`, '--- stdout ---', stdout, '--- stderr ---', stderr].join('\n'));
+  writeFileSync(receipt, [`$ ${redact(command)}`, `scenario: ${id}`, `workspace: ${workspace}`, `sandbox: ${describeSandbox(sandbox)}`, ...(inputFile !== undefined ? [`input: ${redact(readFileSync(inputFile, 'utf8'))}`] : []), `result: ${outcome}`, `duration: ${seconds}s`, ...(outputTruncated ? ['output: truncated (2 MiB per stream limit)'] : []), '--- stdout ---', stdout, '--- stderr ---', stderr].join('\n'));
   const clip = (text, max) => text.length > max ? `${text.slice(0, max)}\n… ${text.length - max} more characters in the receipt` : text;
-  process.stdout.write([`${outcome} in ${seconds}s; receipt: ${receipt}`, '--- stdout ---', clip(stdout, 8000), '--- stderr ---', clip(stderr, 4000)].join('\n') + '\n');
+  if (process.env.TOAD_EXEC_JSON === '1') {
+    process.stdout.write(JSON.stringify({ infrastructureError, timedOut, interrupted, exitCode: code, signal, stdout, stderr, outputTruncated, receipt }) + '\n');
+  } else {
+    process.stdout.write([`${outcome} in ${seconds}s; receipt: ${receipt}`, '--- stdout ---', clip(stdout, 8000), '--- stderr ---', clip(stderr, 4000)].join('\n') + '\n');
+  }
   if (infrastructureError) process.exitCode = 2;
   else if (interrupted) process.exitCode = 1;
 });
