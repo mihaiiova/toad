@@ -8,6 +8,7 @@ import { constants, closeSync, fstatSync, linkSync, lstatSync, mkdirSync, openSy
 import { join } from 'node:path';
 import { cliChecks, cliCommand } from '../agent/tools/toad-cli-recording.mjs';
 import { RECORDING_CODECS } from './recording-codecs.mjs';
+import { apiCliPayload } from '../agent/tools/toad-api-recording.mjs';
 
 const REASONS = new Set(['unsupported', 'incomplete', 'unsafe']);
 const KINDS = new Set(['cli', 'api', 'web']);
@@ -122,7 +123,7 @@ export function finalizeRecording(run, kind, scenario, codec, payload) {
 
 /** Finalize only an unambiguous, single structured command for a passing scenario. */
 export function finalizeCliCandidates(run, handoff, scenarios) {
-  if (handoff?.kind !== 'cli' || Object.keys(handoff.credentials ?? {}).length || handoff.allow_installs || handoff.target?.setup?.length || handoff.target?.path?.length) return;
+  if (!['cli', 'api'].includes(handoff?.kind) || Object.keys(handoff.credentials ?? {}).length || handoff.allow_installs || handoff.target?.setup?.length || handoff.target?.path?.length) return;
   const requests = handoff.request?.scenarios ?? [];
   const slug = name => name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
   for (const scenario of requests) {
@@ -139,8 +140,9 @@ export function finalizeCliCandidates(run, handoff, scenarios) {
       const value = readJsonFile(join(dir, candidates[0]), 65536);
       if (!value || Object.keys(value).sort().join(',') !== 'payload,scenarioName,version' || value.version !== 1 || value.scenarioName !== scenario.name) continue;
       const receipt = readReceipt(join(dir, candidates[0].slice(0, -'.recording.json'.length)));
-      if (!receiptProvesPass(receipt, value.payload)) continue;
-      finalizeRecording(run, 'cli', scenario, 'cli-command-v1', value.payload);
+      const api = handoff.kind === 'api';
+      if (!receiptProvesPass(receipt, api ? apiCliPayload(value.payload) : value.payload)) continue;
+      finalizeRecording(run, handoff.kind, scenario, api ? 'api-request-v1' : 'cli-command-v1', value.payload);
     } catch { /* Recording must never alter the test verdict. */ }
   }
 }

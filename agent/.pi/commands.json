@@ -1,6 +1,14 @@
 {
   "commands": [
     {
+      "name": "run-structured-api",
+      "description": "Run a credential-free HTTP request with explicit status/body assertions",
+      "command": "node",
+      "args": ["tools/toad-structured-api.mjs", "{request:file}"],
+      "approve": false,
+      "lead": false
+    },
+    {
       "name": "prepare-scenario",
       "description": "Copy the project into a persistent isolated scenario workspace and preflight the sandbox",
       "command": "node",

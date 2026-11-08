@@ -5,6 +5,7 @@ import { tmpdir as osTmpdir } from 'node:os';
 // Project paths must be canonical; on macOS the temp folder is behind a symlink.
 const tmpdir = () => realpathSync(osTmpdir());
 import { dirname, join, resolve } from 'node:path';
+import { createServer } from 'node:http';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { chooseSandbox } from '../../agent/tools/toad-sandbox.mjs';
@@ -568,7 +569,7 @@ test('an agent that is not set up is a clear error', async t => {
 /** Give a stand-in agent the real sandbox tools, as the prepared agent has. */
 function realTools(dir) {
   mkdirSync(join(dir, 'tools'), { recursive: true });
-  for (const name of ['toad-exec.mjs', 'toad-sandbox.mjs', 'toad-dirs.mjs', 'toad-structured-cli.mjs', 'toad-cli-recording.mjs']) writeFileSync(join(dir, 'tools', name), readFileSync(resolve(import.meta.dirname, '../../agent/tools', name)));
+  for (const name of ['toad-exec.mjs', 'toad-sandbox.mjs', 'toad-dirs.mjs', 'toad-structured-cli.mjs', 'toad-cli-recording.mjs', 'toad-api-recording.mjs', 'toad-structured-api.mjs']) writeFileSync(join(dir, 'tools', name), readFileSync(resolve(import.meta.dirname, '../../agent/tools', name)));
 }
 
 test('setup runs once in the sandbox and every scenario starts from its result', { skip: !sandboxAvailable && 'no CLI sandbox on this machine' }, async t => {
@@ -632,6 +633,32 @@ reply('Verdict: ' + (passed ? 'PASS' : 'FAIL') + '\\nResults:\\n- ' + (passed ? 
     status: 'recorded',
     steps: [{ action: './check', assertion: 'exit 0; stdout {"equals":"ready\\n"}' }],
   });
+});
+
+test('an API project run enables capture and finalizes a structured response assertion', async t => {
+  const http = createServer((q, r) => r.end('healthy'));
+  await new Promise(resolve => http.listen(0, '127.0.0.1', resolve));
+  t.after(() => http.close());
+  const url = `http://127.0.0.1:${http.address().port}/`;
+  const dir = agent(t, { status: 'ok', answer: 'unused', code: 0 });
+  realTools(dir);
+  const project = mkdtempSync(join(tmpdir(), 'toad-api-project-'));
+  t.after(() => rmSync(project, { recursive: true, force: true }));
+  standIn(dir, `import { spawnSync } from 'node:child_process';
+const prep = spawnSync(process.execPath, ['tools/toad-exec.mjs', 'prepare', ${JSON.stringify(project)}], {encoding:'utf8'});
+const id = /Scenario ID: (.+)/.exec(prep.stdout)[1];
+fs.mkdirSync(receipts+'/health', {recursive:true});
+const q={scenario:id,receipts:receipts+'/health',name:'01-request',payload:{method:'GET',url:${JSON.stringify(url)},headers:{},body:'',expect:{status:200,body:{equals:'healthy'}}},capture:{scenarioName:'Health',complete:true}};
+fs.writeFileSync('api-request.json',JSON.stringify(q));
+const result=spawnSync(process.execPath,['tools/toad-structured-api.mjs','api-request.json'],{encoding:'utf8'});
+const ok=process.env.TOAD_RECORDING_ENABLED==='api-v1' && /cli_run_structured_api/.test(request) && /\"captured\":true/.test(result.stdout);
+reply('Verdict: '+(ok?'PASS':'FAIL')+'\\nResults:\\n- '+(ok?'PASS':'FAIL')+' | Health\\n');`);
+  const client = await connect(t, dir, {...home(t), TOAD_CLI_SANDBOX:'none'});
+  await client.callTool({name:'setup_project', arguments:{project_path:project}});
+  const scenario = {name:'Health',steps:'GET health',expected:'HTTP 200 healthy'};
+  const result = await client.callTool({name:'run_project_test', arguments:{project_path:project,handoff:{version:1,kind:'api',target:{url},request:{goal:'Health',scenarios:[scenario]}}}});
+  assert.equal(result.structuredContent.verdict,'PASS',JSON.stringify(result));
+  assert.equal(recordingStatus(result.structuredContent.run,'api',scenario).status,'recorded');
 });
 
 test('a failed setup ends the run as ERROR before any scenario starts', { skip: !sandboxAvailable && 'no CLI sandbox on this machine' }, async t => {

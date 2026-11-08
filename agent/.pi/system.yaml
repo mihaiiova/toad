@@ -96,7 +96,8 @@ agents:
         cli:prepare-scenario,
         cli:prepare-network-scenario,
         cli:run-command,
-        cli:run-command-with-input
+        cli:run-command-with-input,
+        cli:run-structured-api
       ]
     skills: [ api-test-scenario ]
     prompt: |
@@ -204,7 +205,13 @@ skills:
          scenario touches first (`grep`, `sed -n`, or `node -e` for JSON),
          and check status codes, content types and required fields against
          it.
-      3. Send one request per recorded command, numbered NN-what-it-does
+      3. When recording is enabled and one credential-free request plus status/body
+         assertion cover the entire scenario, use cli_run_structured_api with
+         scenario, receipts, name, payload {method,url,headers,body,expect:{status,
+         body:{equals:STRING or contains:STRING}}}, and capture {scenarioName,
+         complete:true}. Only trusted non-secret fixtures and accept/content-type
+         headers are supported; the sandbox needs Node with fetch. Never weaken
+         a scenario to record it. Otherwise send one request per recorded command, numbered NN-what-it-does
          from 01, under the receipts folder in a scenario-specific subfolder:
          `curl -sS -i --max-time 30 -X METHOD "$URL/path"`, with
          `-H 'Content-Type: application/json' --data @body.json` or the
@@ -284,6 +291,11 @@ integrations:
       command: node
       args:
         [ tools/toad-structured-cli.mjs, "{request:file}" ]
+      approve: false
+    - name: run-structured-api
+      description: Run a credential-free HTTP request with explicit status/body assertions
+      command: node
+      args: [ tools/toad-structured-api.mjs, "{request:file}" ]
       approve: false
   mcp:
     - name: playwright

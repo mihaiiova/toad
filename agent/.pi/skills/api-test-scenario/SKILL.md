@@ -16,7 +16,14 @@ description: "Run one HTTP API scenario and record every request as evidence"
    scenario touches first (`grep`, `sed -n`, or `node -e` for JSON),
    and check status codes, content types and required fields against
    it.
-3. Send one request per recorded command, numbered NN-what-it-does
+3. When the lead enables recording and one credential-free request and explicit
+   status/body assertion cover the entire scenario, use `cli_run_structured_api`
+   with `{scenario,receipts,name,payload:{method,url,headers,body,expect:{status,
+   body:{equals:STRING}}},capture:{scenarioName:EXACT_NAME,complete:true}}`.
+   Body checks may instead use `contains`. Only accept/content-type headers and
+   trusted non-secret literals are supported; the sandbox needs Node with fetch.
+   Do not attest complete for partial checks or weaken scenarios to record them.
+   Otherwise send one request per recorded command, numbered NN-what-it-does
    from 01, under the receipts folder in a scenario-specific subfolder:
    `curl -sS -i --max-time 30 -X METHOD "$URL/path"`, with
    `-H 'Content-Type: application/json' --data @body.json` or the

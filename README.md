@@ -324,8 +324,9 @@ every deploy.
 A passing CLI scenario can leave a **recording**: the exact program and
 arguments Toad ran, and the exit-code and stdout assertion that made it pass.
 The run viewer shows it beside the scenario's plain-language steps. Capture
-never changes the verdict and adds no model calls. Toad records CLI scenarios
-only; API and web scenarios show **Not captured**. The format defines a **Not
+never changes the verdict and adds no model calls. API scenarios can also
+record a single structured HTTP request with status and body assertions.
+Web scenarios show **Not captured**. The format defines a **Not
 recordable** status with `unsupported`, `incomplete` or `unsafe` for producers,
 but no producer emits it yet, so it does not appear today.
 
@@ -348,7 +349,7 @@ data. Do not put a credential, token or other secret in a structured command,
 its arguments or its expected output: a recording stores them as written. This
 is not a security boundary; treat recordings and their receipts as sensitive.
 
-Replay is not implemented yet: `toad run` still uses the agent, and saving
+Production replay is not implemented yet: `toad run` still uses the agent, and saving
 recordings with suites is not available. The format, identity and safety rules
 below are shared with the producers that will follow.
 
@@ -358,9 +359,17 @@ Version 1 not-recordable status files identify the kind, scenario and intent
 and contain only a fixed reason; they do not contain actions, assertions, or
 secrets. A finalized recording envelope contains `version`, `status` (`recorded`),
 `kind`, `scenarioId`, `intentHash`, `codec`, and codec-specific `payload`.
-The codec ID names a codec built into Toad; the one producer today is
-`cli-command-v1`, whose payload is a program, its arguments, and the expected
-exit code and stdout. A codec validates its own producer provenance, actions,
+The built-in codecs are `cli-command-v1` (program, arguments, expected exit
+and stdout) and `api-request-v1` (HTTP method, absolute URL, headers, body,
+expected status and body). API capture uses `cli_run_structured_api` and
+requires Node with fetch inside the sandbox. It supports literal body equality
+or containment, only `accept`/`content-type` headers, and no redirects or
+credential-bearing requests. Responses are bounded to 1 MiB and 30 seconds.
+The same single-receipt, complete-attestation and credential-free restrictions
+apply. URLs and request/response literals must be trusted non-secret test data;
+URL overrides at replay, multi-step flows, dynamic values and JSON-field
+assertions are not implemented. Unsupported scenarios use the normal agent.
+ A codec validates its own producer provenance, actions,
 assertions and credential rules, and no caller can register one at runtime.
 Scenario
 IDs are SHA-256 of UTF-8 JSON `["scenario", name.trim().toLowerCase()]`, as

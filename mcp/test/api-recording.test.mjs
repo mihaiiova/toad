@@ -1,0 +1,66 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { spawn, spawnSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { once } from 'node:events';
+import { validApiPayload, apiCliPayload, replayApiPayload } from '../../agent/tools/toad-api-recording.mjs';
+import { chooseSandbox } from '../../agent/tools/toad-sandbox.mjs';
+import { finalizeCliCandidates, recordingStatus } from '../recordings.mjs';
+const tool = resolve('agent/tools/toad-structured-api.mjs');
+const runner = resolve('agent/tools/toad-exec.mjs');
+
+test('API validation rejects credentials, unsafe protocols, unsupported assertions and headers', () => {
+  const p = { method: 'GET', url: 'http://localhost:1234/', headers: {}, body: '', expect: { status: 200, body: { equals: 'hello' } } };
+  assert.equal(validApiPayload(p), true);
+  for (const bad of [{...p,url:'file:///etc/passwd'}, {...p,url:'https://user:pass@example.org'}, {...p,headers:{authorization:'secret'}}, {...p,expect:{status:200,body:{contains:''}}}]) assert.equal(validApiPayload(bad), false);
+  assert.equal(apiCliPayload(p).program, 'node');
+});
+
+for (const backend of ['none', 'bwrap']) test(`API capture and assertion replay with ${backend}`, async t => {
+  try { chooseSandbox({TOAD_CLI_SANDBOX:backend}); } catch { t.skip('sandbox unavailable'); return; }
+  const root = mkdtempSync(join(tmpdir(), 'toad-api-'));
+  t.after(() => rmSync(root, {recursive:true,force:true}));
+  const server = spawn(process.execPath, ['--input-type=module','-e', `import http from 'node:http';const s=http.createServer((q,r)=>{r.statusCode=q.url==='/wrong'?201:200;r.end(q.url==='/broken'?'broken':'hello')});s.listen(0,'127.0.0.1',()=>console.log(s.address().port));`]);
+  t.after(() => server.kill());
+  const [chunk] = await once(server.stdout, 'data');
+  const url = `http://127.0.0.1:${String(chunk).trim()}/`;
+  const project = join(root,'project');mkdirSync(project);
+  const run = join(root,'run');mkdirSync(run);
+  const receipts = join(run,'receipts');mkdirSync(receipts);
+  const folder = join(receipts,'fetch');mkdirSync(folder);
+  const env = {...process.env,TOAD_CLI_SANDBOX:backend,TOAD_RECEIPTS_DIR:receipts,TOAD_CACHE_DIR:join(root,'cache'),TOAD_RUNTIME_DIR:join(root,'runtime'),TOAD_RECORDING_ENABLED:'api-v1'};
+  delete env.TOAD_CLI_SECRETS_FILE;delete env.TOAD_CLI_PATH;delete env.TOAD_BASE_SCENARIO;
+  const prepared = spawnSync(process.execPath,[runner,'prepare',project],{cwd:root,env,encoding:'utf8'});
+  assert.equal(prepared.status,0,prepared.stderr);
+  const scenario = /Scenario ID: (.+)/.exec(prepared.stdout)[1];
+  const payload = {method:'GET',url,headers:{},body:'',expect:{status:200,body:{equals:'hello'}}};
+  const request = {scenario,receipts:folder,name:'01-request',payload,capture:{scenarioName:'Fetch',complete:true}};
+  const executed = spawnSync(process.execPath,[tool],{cwd:root,env,input:JSON.stringify(request),encoding:'utf8'});
+  assert.equal(executed.status,0,executed.stdout+executed.stderr);
+  assert.equal(JSON.parse(executed.stdout).captured,true);
+  const s={name:'Fetch',steps:'GET fixture',expected:'HTTP 200 hello'};
+  const handoff={kind:'api',target:{url,workdir:project},request:{scenarios:[s]}};
+  writeFileSync(join(run,'handoff.yaml'),JSON.stringify(handoff));
+  const state = result => writeFileSync(join(run,'state.json'),JSON.stringify({state:'finished',status:'ok',scenarios:[{name:s.name,result}]}));
+  state('FAIL');finalizeCliCandidates(run,handoff,[{name:s.name,result:'FAIL'}]);
+  assert.equal(recordingStatus(run,'api',s).status,'not-captured');
+  state('PASS');finalizeCliCandidates(run,handoff,[{name:s.name,result:'PASS'}]);
+  assert.equal(recordingStatus(run,'api',s).status,'recorded');
+  const replay = p => replayApiPayload(p,{project,receipts:folder,env,name:'replay'});
+  assert.equal(replay(payload).result,'PASS');
+  assert.equal(replay({...payload,url:url+'broken'}).result,'FAIL');
+  assert.equal(replay({...payload,url:url+'wrong'}).result,'FAIL');
+  assert.equal(replay({...payload,url:url+'wrong',expect:{status:201,body:{contains:'hell'}}}).result,'PASS');
+  const unreachable={...payload,url:'http://127.0.0.1:1/'};
+  assert.throws(()=>replay(unreachable),/infrastructure/);
+  const error=spawnSync(process.execPath,[tool],{cwd:root,env,input:JSON.stringify({...request,payload:unreachable,capture:undefined}),encoding:'utf8'});
+  assert.equal(error.status,2,error.stdout);
+  const multiline={...payload,method:'POST',headers:{'content-type':'text/plain'},body:"a'b;$(echo injected)\\nnext"};
+  assert.equal(replay(multiline).result,'PASS');
+  const secret=join(root,'secrets');writeFileSync(secret,'{"TOKEN":"private"}');
+  const denied=spawnSync(process.execPath,[tool],{cwd:root,env:{...env,TOAD_CLI_SECRETS_FILE:secret},input:JSON.stringify(request),encoding:'utf8'});
+  assert.equal(denied.status,2);
+  assert.doesNotMatch(denied.stdout,/private/);
+});

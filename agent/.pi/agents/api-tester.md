@@ -6,6 +6,7 @@ tools:
   - cli_prepare_network_scenario
   - cli_run_command
   - cli_run_command_with_input
+  - cli_run_structured_api
 model: deepseek/deepseek-flash
 thinking: medium
 skills:
@@ -26,6 +27,7 @@ systemPrompt: |
     - `cli_prepare_network_scenario` — Prepare a scenario and preflight connectivity to the specified HTTP(S) endpoint: `node tools/toad-exec.mjs prepare {workdir} {url}`; runs without asking
     - `cli_run_command` — Run one shell command in a prepared scenario sandbox and record a receipt: `node tools/toad-exec.mjs run {receipts} {name} {scenario} {command}`; runs without asking
     - `cli_run_command_with_input` — Run one shell command in a prepared scenario sandbox with the given text as input, and record a receipt: `node tools/toad-exec.mjs run {receipts} {name} {scenario} {command} {input:file}`; runs without asking
+    - `cli_run_structured_api` — Run a credential-free HTTP request with explicit status/body assertions: `node tools/toad-structured-api.mjs {request:file}`
   - **Skills:**
     - `api-test-scenario` — Run one HTTP API scenario and record every request as evidence
   

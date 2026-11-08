@@ -202,7 +202,7 @@ export async function runTest(text, input, ctx, { attachImages, projectRun, secr
     delete env.TOAD_CLI_PATH;
     delete env.TOAD_EXEC_JSON;
     delete env.TOAD_RECORDING_ENABLED;
-    if (cliRecording) env.TOAD_RECORDING_ENABLED = 'cli-v1';
+    if (cliRecording) env.TOAD_RECORDING_ENABLED = input.handoff?.kind === 'api' ? 'api-v1' : 'cli-v1';
     if (cliPath?.length) env.TOAD_CLI_PATH = JSON.stringify(cliPath);
     // A project's image wins over one set where the server is registered.
     if (cliImage) env.TOAD_CLI_IMAGE = cliImage;
@@ -476,9 +476,10 @@ async function projectRun(input, ctx, h, run, secretValues, { agent, env, maxCos
   const target = h.kind === 'web' ? [`Test ${h.target.url}.`]
     : h.kind === 'api' ? apiTarget(h.target, env)
       : [`Test the command-line program in the working folder ${h.target.workdir}.`, `Invoke it as: ${h.target.program}`];
-  const cliRecording = h.kind === 'cli' && !Object.keys(h.credentials ?? {}).length && !h.allow_installs && !h.target.setup?.length && !h.target.path?.length;
+  const cliRecording = ['cli', 'api'].includes(h.kind) && !Object.keys(h.credentials ?? {}).length && !h.allow_installs && !h.target.setup?.length && !h.target.path?.length;
   const text = [request(target, { what: h.request.goal, scenarios: h.request.scenarios }),
-    ...(cliRecording ? ['For a scenario fully testable by one structured CLI command and explicit exit-code and stdout assertion, use cli_run_structured_command with capture.scenarioName set to the exact scenario name and capture.complete true. Use it as the only command receipt in that scenario. Set complete true only if this one action and assertion cover every step and expected outcome. Only trusted, non-secret literal data is supported. Otherwise use normal tools; do not weaken the scenario to record it.'] : []),
+    ...(cliRecording && h.kind === 'api' ? ['For one-request scenarios use cli_run_structured_api with payload {method,url,headers,body,expect:{status,body:{equals:STRING or contains:STRING}}}, plus scenario ID, receipts, name and capture:{scenarioName:EXACT_NAME,complete:true}. The tool requires Node with fetch in the sandbox. Headers support only accept and content-type. No credentials or sensitive literals. Attest complete only when this request and assertion cover the whole scenario; otherwise use normal tools.'] : []),
+    ...(cliRecording && h.kind === 'cli' ? ['For a scenario fully testable by one structured CLI command and explicit exit-code and stdout assertion, use cli_run_structured_command with capture.scenarioName set to the exact scenario name and capture.complete true. Use it as the only command receipt in that scenario. Set complete true only if this one action and assertion cover every step and expected outcome. Only trusted, non-secret literal data is supported. Otherwise use normal tools; do not weaken the scenario to record it.'] : []),
     ...(h.credentials ? [`Credential roles and secret names: ${JSON.stringify(h.credentials)}. ${h.kind === 'web' ? 'Use each env name as the Playwright secret name' : 'Use each env name as a shell environment variable'}; never print its value.`] : []),
     ...(unsandboxed ? ['There is no sandbox on this machine (--sandbox none): commands run directly on the host in a copy of the working folder, which is their current directory. Use relative paths, not /work, and $HOME, not /home/tester.'] : []),
     ...(h.target.setup?.length ? [`Setup already ran in the sandbox, so every prepared scenario starts with its result: ${h.target.setup.map(c => `\`${c}\``).join('; ')}.`] : []),

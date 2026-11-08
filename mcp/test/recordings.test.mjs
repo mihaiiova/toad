@@ -19,6 +19,7 @@ function copyStore(t) {
   mkdirSync(join(dir, 'agent/tools'), { recursive: true });
   mkdirSync(join(dir, 'mcp'));
   copyFileSync(resolve(import.meta.dirname, '../../agent/tools/toad-cli-recording.mjs'), join(dir, 'agent/tools/toad-cli-recording.mjs'));
+  copyFileSync(resolve(import.meta.dirname, '../../agent/tools/toad-api-recording.mjs'), join(dir, 'agent/tools/toad-api-recording.mjs'));
   copyFileSync(resolve(import.meta.dirname, '../recordings.mjs'), join(dir, 'mcp/recordings.mjs'));
   return dir;
 }
