@@ -148,6 +148,30 @@ test('project setup and handoff persist project-local evidence without overwriti
   assert.equal(existsSync(readFileSync(join(dir, 'secret-path'), 'utf8')), false);
 });
 
+test('save_suite_from_run saves a run as a suite once, with credential references and no values', async t => {
+  const dir = agent(t, { status: 'ok', answer: 'Verdict: PASS', code: 0 });
+  const project = mkdtempSync(join(tmpdir(), 'toad-save-'));
+  t.after(() => rmSync(project, { recursive: true, force: true }));
+  const client = await connect(t, dir);
+  await client.callTool({ name: 'setup_project', arguments: { project_path: project } });
+  writeFileSync(join(project, '.toad', '.env'), 'PASSWORD=s3cr3t-sentinel\n');
+  const handoff = { version: 1, kind: 'web', title: 'Home', target: { url: 'https://example.test' }, request: { goal: 'Check home', scenarios: [{ name: 'Home loads', steps: 'Open /.', expected: 'A heading.' }] }, credentials: { password: { env: 'PASSWORD' } } };
+  const result = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff, screenshots: 'paths' } });
+  assert.equal(result.isError, false);
+  const run = result.structuredContent.run.split('/').at(-1);
+  const saved = await client.callTool({ name: 'save_suite_from_run', arguments: { project_path: project, run, name: 'home', tags: ['smoke'] } });
+  assert.notEqual(saved.isError, true, JSON.stringify(saved));
+  assert.match(saved.content[0].text, /no recording: Home loads/);
+  const text = readFileSync(join(project, '.toad', 'suites', 'home.yaml'), 'utf8');
+  assert.match(text, /env: PASSWORD/);
+  assert.doesNotMatch(text, /s3cr3t-sentinel/);
+  assert.equal(existsSync(join(project, '.toad', 'suites', 'home.recordings')), false, 'web has no recordings');
+  const again = await client.callTool({ name: 'save_suite_from_run', arguments: { project_path: project, run, name: 'home' } });
+  assert.equal(again.isError, true);
+  assert.match(JSON.stringify(again), /already exists/);
+  assert.equal(readFileSync(join(project, '.toad', 'suites', 'home.yaml'), 'utf8'), text, 'never overwritten');
+});
+
 test('web handoffs reject missing credentials and unsafe project paths', async t => {
   const dir = agent(t, { status: 'ok', answer: 'Verdict: PASS', code: 0 });
   const project = mkdtempSync(join(tmpdir(), 'toad-safe-'));
@@ -363,7 +387,7 @@ test('run_web_test runs the workflow and returns the verdict, report and screens
   const dir = agent(t, { status: 'ok', answer: report('FAIL'), code: 0 });
   const client = await connect(t, dir);
   const { tools } = await client.listTools();
-  assert.deepEqual(tools.map(tool => tool.name).sort(), ['get_toad_guide', 'run_cli_test', 'run_project_test', 'run_web_test', 'setup_project']);
+  assert.deepEqual(tools.map(tool => tool.name).sort(), ['get_toad_guide', 'run_cli_test', 'run_project_test', 'run_web_test', 'save_suite_from_run', 'setup_project']);
   const result = await client.callTool({ name: 'run_web_test', arguments: {
     url: 'https://staging.example.test', what: 'The home page',
     scenarios: [{ name: 'home', steps: 'Open the page', expected: 'The heading says Welcome' }],

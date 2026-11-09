@@ -146,8 +146,8 @@ their timeout on progress wait for long runs. If yours does not, raise its MCP
 tool timeout to 15 minutes or more.
 
 Restart the coding agent, then ask it to *"list the Toad tools"*. You should
-see `get_toad_guide`, `setup_project`, `run_project_test`, `run_web_test` and
-`run_cli_test`.
+see `get_toad_guide`, `setup_project`, `run_project_test`,
+`save_suite_from_run`, `run_web_test` and `run_cli_test`.
 
 The server also gives the agent a guide (the `get_toad_guide` tool and the
 `toad://guide` resource) on how to write good tests and handle credentials.
@@ -175,8 +175,9 @@ and scenarios with expected outcomes) and calls `run_project_test`. It gets
 back the verdict, each scenario's result, the report and the receipt paths.
 
 To keep a test, ask for a suite: *"Save that as a Toad suite tagged smoke."*
-The agent writes `.toad/suites/<name>.yaml`, which you commit and run with
-`toad run` (see [Run tests on every deploy](#run-tests-on-every-deploy)).
+The agent saves the run as `.toad/suites/<name>.yaml` (with its recordings, if
+any), which you commit and run with `toad run` (see
+[Run tests on every deploy](#run-tests-on-every-deploy)).
 
 Before you ask:
 
@@ -285,7 +286,8 @@ out of git.
 ├── .env.example     the names, for your team (commit it)
 ├── .gitignore
 ├── suites/          saved suites for `toad run` (commit them)
-│   └── example.yaml     a commented template
+│   ├── example.yaml     a commented template
+│   └── <name>.recordings/   recordings saved with a suite by `toad suites save`
 └── runs/            one folder per run (ignored by git)
     └── 2026-11-02T15-04-17-657Z-<id>/
         ├── handoff.yaml     what was asked, with defaults filled in
@@ -349,9 +351,10 @@ data. Do not put a credential, token or other secret in a structured command,
 its arguments or its expected output: a recording stores them as written. This
 is not a security boundary; treat recordings and their receipts as sensitive.
 
-Production replay is not implemented yet: `toad run` still uses the agent, and saving
-recordings with suites is not available. The format, identity and safety rules
-below are shared with the producers that will follow.
+Recordings saved with a suite (see [Save a run as a suite](#save-a-run-as-a-suite))
+are replayed by `toad run` without a model (see [Replay and healing](#replay-and-healing)).
+Web scenarios are not recorded or replayed yet. The format, identity and
+safety rules below are shared with the producers that will follow.
 
 The shared run-local status format lives at
 `.toad/runs/<id>/recording/<scenario-id>.json`, alongside the run's receipts.
@@ -366,9 +369,10 @@ requires Node with fetch inside the sandbox. It supports literal body equality
 or containment, only `accept`/`content-type` headers, and no redirects or
 credential-bearing requests. Responses are bounded to 1 MiB and 30 seconds.
 The same single-receipt, complete-attestation and credential-free restrictions
-apply. URLs and request/response literals must be trusted non-secret test data;
-URL overrides at replay, multi-step flows, dynamic values and JSON-field
-assertions are not implemented. Unsupported scenarios use the normal agent.
+apply. URLs and request/response literals must be trusted non-secret test data.
+At replay, `--url` moves a recorded URL only when it is under the suite's
+URL; multi-step flows, dynamic values and JSON-field assertions are not
+implemented. Unsupported scenarios use the normal agent.
  A codec validates its own producer provenance, actions,
 assertions and credential rules, and no caller can register one at runtime.
 Scenario
@@ -429,6 +433,54 @@ is asked not to change data, and nothing stops it from doing so.) Ask your
 coding agent to save a suite after a handoff works, or start from
 `suites/example.yaml`.
 
+### Save a run as a suite
+
+```sh
+toad suites save 2026-11-02T15-04-17-657Z-<id> --name smoke --tag smoke
+toad suites save .toad/runs/<id> --name orders --writes   # a run folder works too
+```
+
+This writes `.toad/suites/<name>.yaml` from the run's handoff, and copies the
+run's recordings into `.toad/suites/<name>.recordings/<scenario-id>.json`.
+Coding agents do the same with the `save_suite_from_run` tool. It is the only
+way recordings get beside a suite: nothing is saved without you asking, it
+never overwrites a file (a name in use is refused), and it never touches git.
+Review both, then commit them yourself.
+
+- The suite gets the run's kind, title, goal, scenarios (steps and expected
+  exactly as run), credential references, `allow_installs` and limitations.
+  Target fields that `.toad/toad.yaml` already sets are left out, and a
+  working folder inside the project is saved relative to it. `writes` is
+  false unless you pass `--writes`.
+- A recording is copied only when the run's recording is valid (see
+  [Run-local recordings](#run-local-recordings)) and still valid under the
+  suite as saved. Today that means a single structured CLI command or a single
+  structured API request, in a suite with no `credentials`, `allow_installs`,
+  `target.setup` or `target.path` (its own or from `toad.yaml`). Web
+  scenarios have no recordings yet. Every other scenario is saved without one.
+- A recording is the run's envelope as it was: the program, arguments and
+  expected output, or the request and expected response. It holds no secret
+  values, because the codecs refuse credential-bearing runs, but it holds
+  what you put in the command, so keep secrets out of commands.
+
+Toad checks saved recordings whenever it reads suites, and never writes while
+it does. `toad ui` lists each project's saved suites with every scenario's
+recording, **Recorded** (with its readable action and assertion), **Stale**
+or **None**. `toad run` prints a warning for each problem, runs those scenarios with the
+agent instead of replaying them, and `--json` includes them as `warnings`.
+None of these is an error:
+
+| Warning | Means |
+|---|---|
+| stale: kind, steps or expected changed | The scenario was edited after it was recorded |
+| stale: no longer supported | The suite (or `toad.yaml`) now adds credentials, installs, setup or PATH, or the codec refuses it |
+| stale: not a valid recording | The file is unreadable, malformed, too large or a symlink |
+| orphan | A recording no scenario has (renamed or removed), or a `<name>.recordings/` with no suite |
+
+To refresh a stale recording, accept the one a passing `toad run` proposes
+(see [Replay and healing](#replay-and-healing)), or delete it and save a new
+suite from a passing run.
+
 ### toad run
 
 ```sh
@@ -453,10 +505,61 @@ say so.
 | `2` | A run errored, timed out, hit the spending limit or was interrupted, so a scenario's result is unknown |
 | `3` | Toad could not start: no model key, invalid suites or options, a write suite without `--allow-writes`, a missing credential |
 
-`--junit` writes one test case per scenario, with its attempts, report and
-receipts folder; `--summary` writes markdown for a pull request comment or a
+`--junit` writes one test case per scenario, with its attempts, mode, report
+and receipts folder; `--summary` writes markdown for a pull request comment or a
 job summary; `--json` prints the whole result on stdout. `toad run --help`
 lists every option.
+
+### Replay and healing
+
+A CLI or API scenario whose saved recording is valid under the suite as it
+runs today is **replayed**: Toad runs the recorded command or request in a
+fresh sandbox workspace and checks the recorded assertion. No model is
+called, no key is needed, and it costs nothing; a run where every selected
+scenario replays needs no model key at all. Each scenario's **mode** is in
+the output, `--json` (`mode`, and `modes` totals), JUnit (`toad.mode`), the
+summary and the run page in `toad ui`:
+
+| Mode | When |
+|---|---|
+| `replay` | The saved recording replayed; its assertion decided the result |
+| `agent` | No saved recording, a stale one, `--no-replay`, a web suite, or the replay's assertion failed and the agent did not then pass it with a new recording |
+| `healed` | The saved recording failed, and the agent passed the scenario and captured a different recording |
+
+- A replay whose assertion **fails** goes to the agent, which tests the
+  scenario from its steps. If the agent fails it too, it is a regression
+  (`FAIL`, with `replay: FAIL` in `--json`). If the agent passes it, the
+  recording is out of date, not the program.
+- A replay that **cannot run** (the sandbox did not start, the working folder
+  is missing, the HTTP request could not be made) is an `ERROR`, retried like
+  any result that did not pass. It never calls the agent.
+- A replay whose assertion fails needs the agent; without a model key that
+  scenario is an `ERROR` (exit 3), never a guess.
+- The suite's saved recording is never changed by a run. When the agent
+  passes a scenario and captures a recording that differs from the saved
+  one (or there was none), it is **proposed**: it stays in the run's
+  `recording/` folder, `--json` shows it with a step diff, and the output and
+  summary print the command to accept it:
+
+  ```sh
+  toad suites accept <run> --suite smoke   # writes the run's recordings into smoke.recordings/
+  toad run --update-recordings             # or write them as part of the run
+  ```
+
+  Both write only recordings from passing scenarios that are valid under the
+  suite, replace the scenario's old file, and leave the change for you to
+  review (`git diff`) and commit; neither runs git.
+- `--no-replay` runs everything with the agent, as before replay existed;
+  with `--update-recordings` it re-records every scenario it can.
+- Overrides still apply: `--workdir` replays in that folder, `--url` moves a
+  recorded API URL from the suite's URL to the new one (a recording outside
+  the suite's URL goes to the agent), `--sandbox` picks the replay's sandbox,
+  `--allow-writes` is still required for write suites, and `--retries`,
+  `--max-cost` (replays cost $0), `--tag` and `--max-scenarios` work as before.
+- Each suite's replays are one run under `.toad/runs/`, without a model
+  transcript; scenarios that go to the agent are a separate run, as before.
+  The replay run's own verdict is what the replays saw, so a healed scenario's
+  replay run shows `FAIL` for it.
 
 ### In CI
 
@@ -466,7 +569,7 @@ prepares the agent, and the browser if a web suite needs it, so there is no
 
 | What | How |
 |---|---|
-| **Model key** | The provider's variable, e.g. `ANTHROPIC_API_KEY`. `toad run` checks it before starting and exits 3 if it is missing. |
+| **Model key** | The provider's variable, e.g. `ANTHROPIC_API_KEY`. `toad run` checks it before starting and exits 3 if it is missing, unless every selected scenario replays a saved recording. |
 | **Models** | `--lead-model`, `--tester-model` or `--model`, else `models:` in `toad.yaml`, else what `toad setup` chose, else the agent's defaults. A run on other models uses a copy of the agent, so runs in progress are unaffected. |
 | **Test credentials** | `--env TOAD_TEST_EMAIL,TOAD_TEST_PASSWORD` takes those names from the job's environment instead of `.toad/.env`. They are still referenced by name only and never written into handoffs or reports. |
 | **CLI and API sandbox** | Docker on Linux runners. On a runner without Docker, Podman or Bubblewrap (macOS, Windows), `--sandbox none` runs the commands directly on the runner, in a copy of the project, with a minimal environment. It is never chosen automatically; receipts and the run page say when it was used. |
@@ -544,6 +647,7 @@ that test the same deployment, or run `toad run` once per target.
 | `toad doctor` | Check the agent, model key, browser, CLI sandbox and coding agents |
 | `toad update` | Install the latest version from GitHub and prepare it |
 | `toad run [options]` | Run the project's saved suites, e.g. in CI (see [Run tests on every deploy](#run-tests-on-every-deploy)) |
+| `toad suites save <run> --name <name>` | Save a finished run as a suite, with its recordings (see [Save a run as a suite](#save-a-run-as-a-suite)) |
 | `toad mcp` | The MCP server; coding agents start it |
 | `toad ui [--port <port>]` | The run viewer |
 | `toad projects [forget <path>]` | The projects the viewer shows |
@@ -555,6 +659,7 @@ that test the same deployment, or run `toad run` once per target.
 | `get_toad_guide` | Returns the guide for coding agents |
 | `setup_project` | Creates `.toad/` in a project (never overwrites files) and adds it to the viewer's list |
 | `run_project_test` | Runs a handoff in a set-up project; results go to `.toad/runs/<id>/` |
+| `save_suite_from_run` | Saves a finished run as `.toad/suites/<name>.yaml`, with its recordings beside it (never overwrites; runs and commits nothing) |
 | `run_web_test`, `run_cli_test` | Legacy: tests without a project (see [Legacy tools](#legacy-tools)) |
 
 ### Handoff

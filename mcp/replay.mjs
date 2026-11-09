@@ -1,0 +1,254 @@
+/**
+ * Replaying a suite's saved recordings, without a model.
+ *
+ * `toad run` replays each selected scenario whose saved recording is valid
+ * under the suite as it runs today. A replay that passes is the result. A
+ * replay whose recorded assertion fails, and a scenario with no usable
+ * recording, go to the agent; a replay that could not run (the sandbox or a
+ * prerequisite) is an ERROR, never a reason to spend a model call.
+ *
+ * When the agent passes a scenario and captures a recording that differs
+ * from the saved one, that recording is *proposed*: it stays in the run
+ * folder, and the saved one is untouched, until `toad suites accept` or
+ * `toad run --update-recordings` writes it beside the suite. Nothing here
+ * runs git.
+ */
+import { randomUUID } from 'node:crypto';
+import { lstatSync, mkdirSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { replayCliPayloadAsync } from '../agent/tools/toad-cli-recording.mjs';
+import { apiCliPayload, validApiPayload } from '../agent/tools/toad-api-recording.mjs';
+import { describeRecording, finalizeRecording, readRecordingFile, recordingStatus, scenarioId } from './recordings.mjs';
+import { ensureDirectory, projectFolder, readProjectConfig, readSuites, registerProject, withDefaults } from './projects.mjs';
+import { writeState } from './run.mjs';
+import { effectiveHandoff, inspectSuite, runFolder } from './suite-recordings.mjs';
+
+export const MODES = ['replay', 'agent', 'healed'];
+const STALE = { changed: 'the saved recording is stale (steps or expected changed)', unsupported: 'the saved recording is stale (no longer supported by this suite)', invalid: 'the saved recording is not a valid recording' };
+
+/** The receipts folder name the lead uses for a scenario. */
+const slug = name => name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'scenario';
+
+/**
+ * `url` with its `from` prefix replaced by `to`, or null when `url` is not
+ * under `from`. Only whole path segments match: /v1 is not under /v.
+ */
+export function rebaseUrl(url, from, to) {
+  if (typeof url !== 'string' || typeof from !== 'string' || typeof to !== 'string') return null;
+  const base = from.replace(/\/+$/, ''), next = to.replace(/\/+$/, '');
+  if (url !== base && !url.startsWith(`${base}/`) && !url.startsWith(`${base}?`)) return null;
+  try { new URL(base); new URL(next); } catch { return null; }
+  return next + url.slice(base.length);
+}
+
+/** An API envelope with its URL moved from one base to another; null if it cannot be. */
+function rebasedEnvelope(envelope, from, to) {
+  if (envelope.codec !== 'api-request-v1' || from === to) return envelope;
+  if (!from || !to) return null;
+  const url = rebaseUrl(envelope.payload?.url, from, to);
+  const payload = url && { ...envelope.payload, url };
+  return payload && validApiPayload(payload) ? { ...envelope, payload } : null;
+}
+
+/**
+ * How each scenario will run: { mode: 'replay', envelope } with the payload
+ * as it will be replayed (an API URL moved to --url), or { mode: 'agent',
+ * reason }. Every choice carries `saved`, the valid saved envelope if any,
+ * and `savedSteps`, for comparing what the agent records. Reads only.
+ */
+export function replayChoices(project, suite, config, scenarios, { replay = true, url } = {}) {
+  let inspected;
+  try { inspected = inspectSuite(project, suite, config, { envelopes: true }).recordings; }
+  catch { inspected = suite.scenarios.map(() => ({ status: 'none' })); }
+  const byName = new Map(suite.scenarios.map((s, i) => [s.name, inspected[i]]));
+  const base = effectiveHandoff(suite, config, project).target?.url;
+  return scenarios.map(scenario => {
+    const rec = byName.get(scenario.name) ?? { status: 'none' };
+    const saved = rec.status === 'recorded' ? { saved: rec.envelope, savedSteps: rec.steps } : {};
+    const stale = rec.status === 'stale' ? { stale: rec.reason } : {};
+    if (suite.kind === 'web') return { mode: 'agent', reason: 'web scenarios are not recorded', ...saved };
+    if (rec.status === 'stale') return { mode: 'agent', reason: STALE[rec.reason] ?? 'the saved recording is stale', ...stale };
+    if (rec.status !== 'recorded') return { mode: 'agent', reason: 'no saved recording' };
+    if (!replay) return { mode: 'agent', reason: 'replay is off (--no-replay)', ...saved };
+    if (suite.kind === 'api' && !rebaseUrl(rec.envelope.payload?.url, base, base)) {
+      return { mode: 'agent', reason: "the recorded URL is not under the suite's current URL", ...saved };
+    }
+    if (suite.kind === 'api' && url) {
+      const envelope = rebasedEnvelope(rec.envelope, base, url);
+      if (!envelope) return { mode: 'agent', reason: "the recorded URL is not under the suite's URL, so --url cannot move it", ...saved };
+      return { mode: 'replay', envelope, ...saved };
+    }
+    return { mode: 'replay', envelope: rec.envelope, ...saved };
+  });
+}
+
+/**
+ * Replay one envelope in a fresh workspace of `workdir`, recording its
+ * receipt under `receipts`. PASS or FAIL is the recording's own assertion;
+ * ERROR means the replay could not run, and says why.
+ */
+export async function replayScenario(envelope, { workdir, receipts, name = '01-replay', env, signal }) {
+  try {
+    if (!['api-request-v1', 'cli-command-v1'].includes(envelope.codec)) return { result: 'ERROR', message: 'The recording uses an unknown codec' };
+    const payload = envelope.codec === 'api-request-v1' ? apiCliPayload(envelope.payload) : envelope.payload;
+    const outcome = await replayCliPayloadAsync(payload, { project: workdir, receipts, name, env, signal });
+    if ([126, 127].includes(outcome.actual.exitCode) || (envelope.codec === 'api-request-v1' && outcome.actual.exitCode === 2)) throw new Error('Replay infrastructure or prerequisite error');
+    return { result: outcome.result, receipt: outcome.receipt, ...(outcome.result === 'FAIL' ? { message: 'The saved recording\'s assertion failed' } : {}) };
+  } catch (error) {
+    return { result: 'ERROR', message: `The replay could not run: ${error.message}` };
+  }
+}
+
+/** The environment a replay runs in: no secrets, the run's receipts, the chosen sandbox and image. */
+export function replayEnv(env, { receipts, sandbox, image }) {
+  const out = { ...env, TOAD_RECEIPTS_DIR: receipts };
+  for (const key of ['TOAD_PLAYWRIGHT_SECRETS_FILE', 'TOAD_CLI_SECRETS_FILE', 'TOAD_CLI_PATH', 'TOAD_EXEC_JSON', 'TOAD_RECORDING_ENABLED', 'TOAD_BASE_SCENARIO']) delete out[key];
+  if (sandbox) out.TOAD_CLI_SANDBOX = sandbox;
+  if (image) out.TOAD_CLI_IMAGE = image;
+  return out;
+}
+
+/** A run folder for replays, shown in `toad ui` like any other run. */
+export function startReplayRun(project, handoff, { sandbox } = {}) {
+  const folder = join(project, '.toad');
+  const id = `${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID()}`;
+  const run = join(folder, 'runs', id);
+  ensureDirectory(run);
+  ensureDirectory(join(run, 'receipts'));
+  ensureDirectory(join(run, 'reports'));
+  writeFileSync(join(run, 'handoff.yaml'), JSON.stringify(handoff, null, 2) + '\n', { mode: 0o600 });
+  writeState(run, { state: 'running', origin: 'cli', ...(sandbox ? { sandbox } : {}) });
+  try { registerProject(project); } catch { /* the list is a convenience */ }
+  return run;
+}
+
+/**
+ * Finish a replay run: its state, its report, and, for each replay that
+ * passed, the replayed recording in the run's own recording folder.
+ */
+export function finishReplayRun(run, handoff, results, { suite, accept } = {}) {
+  const verdict = results.some(r => r.result === 'FAIL') ? 'FAIL' : results.some(r => r.result === 'ERROR') ? 'ERROR' : 'PASS';
+  const status = results.some(r => r.result === 'ERROR') ? 'error' : 'ok';
+  const scenarios = results.map(r => ({ name: r.scenario.name, result: r.result }));
+  const modes = Object.fromEntries(results.map(r => [r.scenario.name, r.result === 'FAIL' ? 'agent' : 'replay']));
+  writeState(run, { state: 'finished', finished: new Date().toISOString(), verdict, status, scenarios, replay: { suite, modes, ...(accept ? { accept } : {}) } });
+  writeFileSync(join(run, 'reports', 'report.md'), [
+    '# Toad run', `Status: ${status}`, `Verdict: ${verdict}`,
+    'Replayed the suite\'s saved recordings, without a model.',
+    ['Results:', ...results.map(r => `- ${r.result} | ${r.scenario.name}`)].join('\n'),
+    ...results.filter(r => r.message).map(r => `${r.scenario.name}: ${r.message}${r.result === 'FAIL' ? '; the agent checks it next.' : ''}`),
+  ].join('\n\n') + '\n', { mode: 0o600 });
+  for (const r of results) {
+    if (r.result !== 'PASS') continue;
+    try { finalizeRecording(run, handoff.kind, r.scenario, r.envelope.codec, r.envelope.payload); } catch { /* display only */ }
+  }
+  return { verdict, status };
+}
+
+/** Readable lines for what changed between two recordings' steps. */
+export function stepsDiff(previous, next) {
+  const line = s => `${s.action} => ${s.assertion}`;
+  const before = (previous ?? []).map(line), after = (next ?? []).map(line);
+  return [...before.filter(l => !after.includes(l)).map(l => `- ${l}`), ...after.filter(l => !before.includes(l)).map(l => `+ ${l}`)];
+}
+
+/**
+ * The recording an agent run captured for `scenario`, as the suite would
+ * save it, when it differs from the saved one: { envelope, steps, previous,
+ * diff, file }. Null when the run captured none, or the same, or one the
+ * suite cannot hold. `url` is the --url the run used, if any.
+ */
+export function proposedRecording(run, project, suite, config, scenario, saved, { url } = {}) {
+  if (recordingStatus(run, suite.kind, scenario).status !== 'recorded') return null;
+  const file = join(run, 'recording', `${scenarioId(scenario.name)}.json`);
+  let envelope;
+  try { envelope = readRecordingFile(file); } catch { return null; }
+  const handoff = effectiveHandoff(suite, config, project);
+  if (suite.kind === 'api' && url) envelope = rebasedEnvelope(envelope, url, handoff.target?.url);
+  if (!envelope) return null;
+  let steps;
+  try { steps = describeRecording(envelope, suite.kind, scenario, { handoff, scenario }); } catch { return null; }
+  if (saved?.envelope && JSON.stringify(saved.envelope) === JSON.stringify(envelope)) return null;
+  return { envelope, steps, previous: saved?.steps ?? null, diff: stepsDiff(saved?.steps, steps), file };
+}
+
+/**
+ * Write a recording beside its suite, replacing the scenario's old one.
+ * The folder must be a plain folder; the file is replaced atomically.
+ */
+export function writeSuiteRecording(project, suiteName, envelope) {
+  const suites = join(project, '.toad', 'suites');
+  const dir = join(suites, `${suiteName}.recordings`);
+  if (!lstatSync(suites).isDirectory() || realpathSync(suites) !== suites) throw new Error('.toad/suites must be a folder, not a symlink');
+  try { mkdirSync(dir, { mode: 0o755 }); } catch (error) { if (error.code !== 'EEXIST') throw error; }
+  if (!lstatSync(dir).isDirectory() || realpathSync(dir) !== dir) throw new Error(`.toad/suites/${suiteName}.recordings must be a folder, not a symlink`);
+  const target = join(dir, `${envelope.scenarioId}.json`);
+  const temp = join(dir, `.tmp-${randomUUID()}`);
+  try {
+    writeFileSync(temp, JSON.stringify(envelope) + '\n', { flag: 'wx', mode: 0o644 });
+    renameSync(temp, target);
+  } finally {
+    try { unlinkSync(temp); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
+  return target;
+}
+
+/** The effective handoff a suite runs with under the command line's overrides. */
+export function runHandoff(handoff, config, project) { return withDefaults(handoff, config, project); }
+
+export const ACCEPT_USAGE = `Usage: toad suites accept <run> --suite <name> [--project <dir>]
+  Writes the recordings a finished run captured into
+  .toad/suites/<name>.recordings/, replacing the saved ones they differ from.
+  Only scenarios that passed, and recordings valid under the suite as it is
+  now, are written. Review the change (git diff) and commit it.
+
+  <run>               the run id, or its folder, as toad run and toad ui show it
+  --suite <name>      the suite the recordings belong to
+  --project <dir>     the project (default: the nearest folder with .toad/)`;
+
+export class AcceptUsageError extends Error {}
+
+export function parseAcceptArgs(argv) {
+  const out = {};
+  const positional = [];
+  for (let i = 0; i < argv.length; i++) {
+    const [raw, inline] = argv[i].split(/=(.*)/s);
+    if (!raw.startsWith('--')) { positional.push(argv[i]); continue; }
+    const name = raw.slice(2);
+    if (!['suite', 'project'].includes(name)) throw new AcceptUsageError(`Unknown option: ${raw}`);
+    const value = inline ?? argv[++i];
+    if (value === undefined || value === '') throw new AcceptUsageError(`${raw} needs a value`);
+    if (out[name] !== undefined) throw new AcceptUsageError(`${raw} is given twice`);
+    out[name] = value;
+  }
+  if (positional.length !== 1) throw new AcceptUsageError('Give exactly one run');
+  if (!out.suite) throw new AcceptUsageError('--suite is required');
+  return { ...out, run: positional[0] };
+}
+
+/**
+ * Accept a run's captured recordings into a suite. Each suite scenario is
+ * `accepted` (written), `unchanged` (the saved one is the same) or `none`.
+ */
+export function acceptRecordings(project, run, suiteName, { cwd = process.cwd() } = {}) {
+  const folder = projectFolder(project);
+  const config = readProjectConfig(folder);
+  const suite = readSuites(folder).find(s => s.name === suiteName);
+  if (!suite) throw new Error(`No suite named ${suiteName} in .toad/suites/`);
+  const dir = runFolder(folder, run, cwd);
+  let handoff;
+  try { handoff = readRecordingFile(join(dir, 'handoff.yaml'), 1024 * 1024); } catch { throw new Error('The run has no readable handoff'); }
+  if (handoff?.kind !== suite.kind) throw new Error(`The run is not a ${suite.kind} run, as ${suiteName} is`);
+  const base = effectiveHandoff(suite, config, project).target?.url;
+  const url = suite.kind === 'api' && handoff.target?.url && handoff.target.url !== base ? handoff.target.url : undefined;
+  const { recordings } = inspectSuite(project, suite, config, { envelopes: true });
+  return suite.scenarios.map((scenario, i) => {
+    const saved = recordings[i].status === 'recorded' ? recordings[i] : null;
+    const proposal = proposedRecording(dir, project, suite, config, scenario, saved, { url });
+    if (!proposal) return { name: scenario.name, status: saved && recordingStatus(dir, suite.kind, scenario).status === 'recorded' ? 'unchanged' : 'none' };
+    writeSuiteRecording(project, suite.name, proposal.envelope);
+    return { name: scenario.name, status: 'accepted', diff: proposal.diff };
+  });
+}
+
+export { slug as scenarioFolder };

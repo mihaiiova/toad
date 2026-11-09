@@ -16,6 +16,7 @@ import { listProjects } from './projects.mjs';
 import { VERSION } from './agent.mjs';
 import { resultsOf, scenarioResults } from './results.mjs';
 import { recordingStatus } from './recordings.mjs';
+import { suiteOverview } from './suite-recordings.mjs';
 
 const HOST = '127.0.0.1';
 const PAGE = join(dirname(fileURLToPath(import.meta.url)), 'ui.html');
@@ -88,6 +89,26 @@ export function titleOf(handoff) {
 }
 
 /**
+ * What `toad run` recorded about how each scenario ran (replay, agent or
+ * healed) and the recordings it proposed, in a fixed shape; anything else is dropped.
+ */
+function replayOf(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const str = (v, max = 4096) => typeof v === 'string' && v.length <= max ? v : null;
+  const steps = list => Array.isArray(list) ? list.slice(0, 100).filter(s => str(s?.action) && str(s?.assertion)).map(s => ({ action: s.action, assertion: s.assertion })) : null;
+  const modes = {};
+  for (const [name, mode] of Object.entries(value.modes ?? {})) if (['replay', 'agent', 'healed'].includes(mode)) modes[name] = mode;
+  const proposed = {};
+  for (const [name, p] of Object.entries(value.proposed ?? {})) {
+    if (!p || typeof p !== 'object') continue;
+    proposed[name] = { steps: steps(p.steps) ?? [], previous: steps(p.previous), diff: Array.isArray(p.diff) ? p.diff.filter(l => str(l, 9000)).slice(0, 200) : [], updated: p.updated === true };
+  }
+  const accept = str(value.accept, 300);
+  const prior = str(value.priorRun, 200);
+  return { suite: str(value.suite, 200), modes, proposed, ...(prior && /^[A-Za-z0-9_.-]+$/.test(prior) ? { priorRun: prior } : {}), ...(accept && /^toad suites accept [A-Za-z0-9_.-]+ --suite [A-Za-z0-9_.-]+$/.test(accept) ? { accept } : {}) };
+}
+
+/**
  * One run's summary. `state` is starting, waiting, running, finished, failed
  * (it could not start; `error` says why) or interrupted (no report, and the
  * server that started it is gone, or it never recorded a state). Runs from
@@ -120,6 +141,7 @@ function summary(project, id) {
     ...(typeof saved?.cost === 'number' ? { cost: saved.cost } : {}),
     ...(saved?.models ? { models: saved.models } : {}),
     ...(saved?.sandbox ? { sandbox: saved.sandbox } : {}),
+    ...(replayOf(saved?.replay) ? { replay: replayOf(saved.replay) } : {}),
     verdict, status: /^Status:\s*(\S+)/m.exec(report)?.[1] ?? (state === 'finished' ? 'unknown' : state), state,
   };
 }
@@ -210,6 +232,8 @@ function handler(req, res) {
     }
     let m;
     if ((m = /^\/api\/projects\/([0-9a-f]{12})\/runs$/.exec(path))) return sendJson(res, listRuns(requireProject(m[1])));
+    // Saved suites and each scenario's recording: recorded, stale or none. Read-only.
+    if ((m = /^\/api\/projects\/([0-9a-f]{12})\/suites$/.exec(path))) return sendJson(res, suiteOverview(requireProject(m[1]).path));
     if ((m = /^\/api\/projects\/([0-9a-f]{12})\/runs\/([^/]+)$/.exec(path))) return sendJson(res, detail(requireProject(m[1]), m[2]));
     if ((m = /^\/api\/projects\/([0-9a-f]{12})\/runs\/([^/]+)\/file\/(.+)$/.exec(path))) return serveFile(res, requireProject(m[1]), m[2], m[3]);
     return sendJson(res, { error: 'Not found' }, 404);

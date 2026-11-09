@@ -361,7 +361,7 @@ const elapsed = r => live(r) ? Date.now() - r.started : r.duration;
 const badge = v => `<span class="badge ${esc(v)}"><span class="dot"></span>${esc(v === 'WAITING' ? 'QUEUED' : v)}</span>`;
 
 // ---------- data ----------
-const data = { projects: [], runs: new Map(), details: new Map(), texts: new Map(), loaded: false, offline: false };
+const data = { projects: [], runs: new Map(), suites: new Map(), details: new Map(), texts: new Map(), loaded: false, offline: false };
 async function getJson(url) {
   const res = await fetch(url, { cache: 'no-store' });
   if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
@@ -371,7 +371,10 @@ async function refresh(force) {
   try {
     data.projects = await getJson('/api/projects');
     const r = route();
-    if (r.view === 'project') data.runs.set(r.pid, await getJson(`/api/projects/${enc(r.pid)}/runs`));
+    if (r.view === 'project') {
+      data.runs.set(r.pid, await getJson(`/api/projects/${enc(r.pid)}/runs`));
+      data.suites.set(r.pid, await getJson(`/api/projects/${enc(r.pid)}/suites`));
+    }
     if (r.view === 'recent') data.runs.set('*', await getJson('/api/runs'));
     if (r.view === 'run') {
       const key = `${r.pid}/${r.rid}`, had = data.details.get(key);
@@ -401,7 +404,7 @@ const href = { project: pid => `#/p/${enc(pid)}`, run: (pid, rid, tab) => `#/p/$
 window.addEventListener('hashchange', () => { ui.sel = 0; $('#app').classList.remove('nav-open'); render(); refresh(); $('#main').scrollTop = 0; });
 
 // ---------- view state ----------
-const ui = { sel: 0, filter: '', kind: 'all', verdict: 'all', open: new Set(), lightbox: { list: [], i: 0 } };
+const ui = { sel: 0, filter: '', kind: 'all', verdict: 'all', recordings: 'all', open: new Set(), lightbox: { list: [], i: 0 } };
 let lastMain = '';
 
 // ---------- sidebar ----------
@@ -465,6 +468,7 @@ function filtered(runs) {
   const words = ui.filter.toLowerCase().split(/\s+/).filter(Boolean);
   return runs.filter(r => (ui.kind === 'all' || r.kind === ui.kind)
     && (ui.verdict === 'all' || (ui.verdict === 'RUNNING' ? live(r) : r.verdict === ui.verdict))
+    && (ui.recordings === 'all' || Object.values(r.replay?.proposed || {}).some(p => !p.updated))
     && words.every(w => `${r.title} ${r.goal} ${r.target} ${r.projectName} ${r.verdict}`.toLowerCase().includes(w)));
 }
 function runList(runs, showProject) {
@@ -473,7 +477,7 @@ function runList(runs, showProject) {
   return `<div class="runs" role="list"><div class="list-head"><span>Verdict</span><span>Run</span><span>Kind</span><span>Started</span><span>Took</span></div>${runs.map((r, i) => `
     <a class="run-row${i === ui.sel ? ' sel' : ''}" role="listitem" data-i="${i}" href="${href.run(r.project, r.id)}">
       <span>${badge(r.verdict)}</span>
-      <span style="min-width:0"><div class="goal">${showProject ? `<span class="proj">${esc(r.projectName)}</span>` : ''}${esc(r.title || r.goal || '(no goal)')}</div><div class="target">${esc(r.target)}</div></span>
+      <span style="min-width:0"><div class="goal">${showProject ? `<span class="proj">${esc(r.projectName)}</span>` : ''}${esc(r.title || r.goal || '(no goal)')}${Object.values(r.replay?.proposed || {}).some(p => !p.updated) ? ' <span class="tag">recordings proposed</span>' : ''}</div><div class="target">${esc(r.target)}</div></span>
       <span class="kind"><span class="tag">${esc(r.kind)}</span></span>
       <span class="when" title="${esc(stamp(r.started))}">${esc(ago(r.started))}</span>
       <span class="dur" data-live="${live(r) ? r.started : ''}">${dur(elapsed(r))}</span>
@@ -485,6 +489,7 @@ function toolbar() {
     <label class="filter-input">${ICON.search}<input id="run-filter" placeholder="Filter runs by goal or target" value="${esc(ui.filter)}"></label>
     <div class="chips">${chip('kind', 'all', 'All')}${chip('kind', 'web', 'Web')}${chip('kind', 'cli', 'CLI')}</div>
     <div class="chips">${chip('verdict', 'all', 'Any')}${chip('verdict', 'PASS', 'Pass')}${chip('verdict', 'FAIL', 'Fail')}${chip('verdict', 'ERROR', 'Error')}${chip('verdict', 'RUNNING', 'Running')}</div>
+    <div class="chips">${chip('recordings', 'all', 'All recordings')}${chip('recordings', 'proposed', 'Proposed')}</div>
   </div>`;
 }
 
@@ -503,7 +508,27 @@ function projectPage(pid) {
       <div class="stat"><div class="label">Last run</div><div class="value">${p.last ? esc(ago(p.last.started)) : '—'}</div></div>
       <div class="stat"><div class="label">History</div><div class="value" style="padding-top:5px">${strip(p, 30)}</div></div>
     </div>
-    ${toolbar()}${runList(runs, false)}</div>`;
+    ${suitesSection(pid)}${toolbar()}${runList(runs, false)}</div>`;
+}
+
+/** Saved suites, each scenario's recording (recorded, stale or none) and its readable steps. */
+const RECORDING = { recorded: 'Recorded', stale: 'Stale', none: 'None' };
+const STALE_WHY = { changed: 'steps or expected changed', unsupported: 'no longer supported by this suite', invalid: 'not a valid recording' };
+function suitesSection(pid) {
+  const s = data.suites.get(pid);
+  if (!s) return '';
+  if (s.error) return `<div class="banner warn" style="margin-bottom:18px">Saved suites could not be read: ${esc(s.error)}</div>`;
+  if (!s.suites.length && !s.warnings.length) return '';
+  const warnings = s.warnings.length ? `<div class="banner warn" style="margin:0 0 10px;display:block">${s.warnings.map(w => `<div>${esc(w)}</div>`).join('')}</div>` : '';
+  return `<div class="group"><h3><b>Saved suites</b><span>${s.suites.length}</span></h3>${warnings}${s.suites.map(suite => {
+    const n = k => suite.scenarios.filter(x => x.recording.status === k).length;
+    const key = `suite:${suite.name}`;
+    return `<details class="receipt-row" data-path="${esc(key)}"${ui.open.has(key) ? ' open' : ''}><summary>${ICON.chev}<span class="cmd">${esc(suite.name)}${suite.title && suite.title !== suite.name ? ` · ${esc(suite.title)}` : ''}</span><span class="tag">${esc(suite.kind)}</span><span class="file">${suite.scenarios.length} scenario${suite.scenarios.length === 1 ? '' : 's'} · ${n('recorded')} recorded${n('stale') ? ` · ${n('stale')} stale` : ''}</span></summary>
+      <div style="padding:10px 12px;border-top:1px solid var(--border)">${suite.scenarios.map((sc, i) => `<div class="scenario${sc.recording.status === 'stale' ? ' r-ERROR' : sc.recording.status === 'recorded' ? ' r-PASS' : ''}"><span class="num">${i + 1}</span><span class="name">${esc(sc.name)}</span><span class="tag" title="Saved recording">${esc(RECORDING[sc.recording.status] ?? 'None')}</span>
+        <div class="line"><b>Steps</b> ${esc(sc.steps)}</div><div class="line"><b>Expected</b> ${esc(sc.expected)}</div>
+        ${sc.recording.status === 'stale' ? `<div class="line"><b>Recording</b> Stale: ${esc(STALE_WHY[sc.recording.reason] ?? sc.recording.reason)}; ignored</div>` : ''}
+        ${sc.recording.status === 'recorded' ? sc.recording.steps.map(step => `<div class="line"><b>Action</b> <code>${esc(step.action)}</code> · <b>Assertion</b> ${esc(step.assertion)}</div>`).join('') : ''}</div>`).join('')}</div></details>`;
+  }).join('')}</div>`;
 }
 
 function recentPage() {
@@ -660,6 +685,9 @@ function runPage(r) {
   const redo = [];
   for (const s of scenarios) { const v = resultOf(d, s.name); if (v) counts[v]++; if (v === 'FAIL' || v === 'ERROR') redo.push(s.name); }
   const tally = counts.PASS + counts.FAIL + counts.ERROR ? `<span class="item tally">${['PASS', 'FAIL', 'ERROR'].filter(k => counts[k]).map(k => `<span class="${k}">${counts[k]} ${k.toLowerCase()}</span>`).join('')}</span>` : '';
+  const modes = Object.values(d.replay?.modes || {});
+  const modeCount = m => modes.filter(x => x === m).length;
+  const modeTally = modes.length ? `<span class="item" title="How toad run decided each scenario: replayed a saved recording without a model, ran the agent, or healed a failed recording">${[['replay', 'replayed'], ['agent', 'by the agent'], ['healed', 'healed']].filter(([m]) => modeCount(m)).map(([m, label]) => `${modeCount(m)} ${label}`).join(' · ')}</span>` : '';
   let body = '';
   if (r.tab === 'report') body = d.report ? `<div class="md">${markdown(reportBody(d.report), ctx)}</div>` : `<div class="empty">${live(d) ? 'The report is written when the run finishes. Receipts appear as they are recorded.' : 'This run has no report.'}</div>`;
   const byFolder = groups(d.files);
@@ -676,7 +704,10 @@ function runPage(r) {
       <div class="line"><b>Steps</b> ${esc(s.steps)}</div><div class="line"><b>Expected</b> ${esc(s.expected)}</div>
       <div class="line"><b>Recording</b> ${d.recordings?.[i]?.status === 'recorded' ? 'Recorded' : d.recordings?.[i]?.status === 'not-recordable' ? `Not recordable (${esc(d.recordings[i].reason)})` : 'Not captured'}</div>
       ${d.recordings?.[i]?.status === 'recorded' ? d.recordings[i].steps.map(step => `<div class="line"><b>Action</b> ${esc(step.action)} · <b>Assertion</b> ${esc(step.assertion)}</div>`).join('') : ''}
-      ${own.length ? `<div class="files">${fileLinks(own)}</div>` : ''}</div>`;
+      ${d.replay?.modes?.[s.name] ? `<div class="line"><b>Mode</b> ${esc({ replay: 'Replayed the saved recording, without a model', agent: 'Run by the agent', healed: 'Healed: the saved recording failed, and the agent passed it' }[d.replay.modes[s.name]])}</div>` : ''}
+      ${d.replay?.proposed?.[s.name] ? `<div class="line"><b>${d.replay.proposed[s.name].updated ? 'Updated recording' : 'Proposed recording'}</b> ${d.replay.proposed[s.name].previous ? 'replaces the saved one' : 'new; the suite had none usable'}</div>
+        <pre class="diff">${d.replay.proposed[s.name].diff.map(l => esc(l)).join('\n')}</pre>` : ''}
+      ${own.length ?`<div class="files">${fileLinks(own)}</div>` : ''}</div>`;
   }).join('') : `<div class="empty">No scenarios were given; Toad derived them from the goal. See the report.</div>`);
   if (r.tab === 'receipts') body = d.files.length ? groups(d.files).map(([name, files]) => {
     const images = files.filter(f => isImage(f.path)), others = files.filter(f => !isImage(f.path));
@@ -708,8 +739,10 @@ function runPage(r) {
       ${typeof d.cost === 'number' ? `<span class="item" title="Model spend Pi recorded, at its catalog prices">$${d.cost.toFixed(4)}</span>` : ''}
       ${d.models ? `<span class="item mono" title="Models for this run (lead / testers)">${esc(d.models.lead === d.models.tester ? d.models.lead : `${d.models.lead} / ${d.models.tester}`)}</span>` : ''}
       ${d.sandbox === 'none' ? `<span class="item" title="CLI and API commands ran on the host, without a sandbox"><span class="tag">no sandbox</span></span>` : ''}
-      ${tally}
+      ${tally}${modeTally}
     </div>${banner}
+    ${d.replay?.priorRun ? `<div class="banner">This agent run followed a saved-recording replay. <a href="${href.run(r.pid, d.replay.priorRun)}">View the replay and its receipts</a>.</div>` : ''}
+    ${d.replay?.accept && Object.values(d.replay.proposed || {}).some(p => !p.updated) ? `<div class="banner">New recordings were proposed; the suite's saved ones are unchanged. Review them under Scenarios, then accept with <code>${esc(d.replay.accept)}</code>.</div>` : ''}
     <div class="actions">
       <button class="btn" data-act="copy" data-toast="Handoff copied: paste it to your coding agent" data-text="${esc(rerunText(d))}" title="Copy this run's handoff for your coding agent">${ICON.copy} Copy handoff to rerun</button>
       ${redo.length && redo.length < scenarios.length ? `<button class="btn" data-act="copy" data-toast="Handoff copied with ${redo.length} scenario${redo.length === 1 ? '' : 's'}" data-text="${esc(rerunText(d, redo))}" title="Copy a handoff with only the scenarios that failed or errored">${ICON.copy} Copy failed scenarios (${redo.length})</button>` : ''}

@@ -193,6 +193,21 @@ test('toad run exits 0 when every scenario passes and writes JUnit, a summary an
   assert.ok(request.pre.includes('--session-dir'), 'Pi keeps the sessions with the run');
 });
 
+test('toad run warns about orphaned or stray saved recordings and still runs the suite', t => {
+  const agentDir = agent(t, {});
+  const dir = project(t, { smoke: CLI_SUITE(['One']) });
+  mkdirSync(join(dir, '.toad', 'suites', 'smoke.recordings'));
+  writeFileSync(join(dir, '.toad', 'suites', 'smoke.recordings', `${'a'.repeat(64)}.json`), '{}');
+  mkdirSync(join(dir, '.toad', 'suites', 'gone.recordings'));
+  const r = toad(t, ['--json'], { cwd: dir, agentDir });
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.err, /toad run: warning: \.toad\/suites\/smoke\.recordings\/a{64}\.json: no scenario of smoke has this id \(orphan\)/);
+  assert.match(r.err, /toad run: warning: \.toad\/suites\/gone\.recordings: no suite gone\.yaml uses it \(orphan\)/);
+  const report = JSON.parse(r.out);
+  assert.equal(report.warnings.length, 2);
+  assert.deepEqual(report.suites[0].scenarios.map(s => s.result), ['PASS']);
+});
+
 test('toad run retries what failed, reports flaky passes, and exits 1 on a real failure', t => {
   const agentDir = agent(t, { results: { Flaky: ['FAIL', 'PASS'], Broken: ['FAIL', 'FAIL'] } });
   const dir = project(t, { smoke: CLI_SUITE(['Fine', 'Flaky', 'Broken']) });

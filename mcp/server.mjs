@@ -103,6 +103,23 @@ server.registerTool('run_project_test', {
   outputSchema,
 }, (input, extra) => runProject(input, callContext(extra)));
 
+server.registerTool('save_suite_from_run', {
+  title: 'Save a run as a suite',
+  description: 'Only when the user asks to keep a test: save a finished project run as .toad/suites/<name>.yaml for toad run, copying its validated recordings into .toad/suites/<name>.recordings/. Never overwrites a file; refuses a name already in use. Writes only those files; runs nothing and commits nothing. Recordings are kept only for single-command CLI and single-request API scenarios without credentials, installs, setup or PATH.',
+  inputSchema: {
+    project_path: z.string().min(1).describe('Absolute path to the project directory'),
+    run: z.string().min(1).describe('The run id, the last part of the run folder that run_project_test returned'),
+    name: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]*$/).describe('Suite name: letters, digits, ., _ or -'),
+    tags: z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]*$/)).max(20).optional(),
+    writes: z.boolean().optional().describe('true when a scenario creates, changes or deletes data; toad run then needs --allow-writes'),
+  },
+}, async ({ project_path, run, name, tags, writes }) => {
+  const { saveSuiteFromRun } = await import('./suite-recordings.mjs');
+  const saved = saveSuiteFromRun(project_path, run, name, { tags: tags ?? [], writes: !!writes });
+  const lines = saved.scenarios.map(s => `- ${s.recording === 'recorded' ? 'recorded' : 'no recording'}: ${s.name}`);
+  return { content: [{ type: 'text', text: [`Saved ${saved.suite}${saved.recordings ? ` and ${saved.recordings}/` : ''}.`, ...lines, `Ask the user to review and commit it; run it with: toad run --suite ${name}`].join('\n') }] };
+});
+
 server.registerTool('run_web_test', {
   title: 'Run a web test',
   description: 'Call get_toad_guide before testing; this legacy tool uses the shared agent secret store. Tests a web application end to end in a real headless browser and returns the verdict (PASS, FAIL or ERROR), a report per scenario, and screenshots as receipts. Give the URL and what to test; add scenarios with steps and expected outcomes for precise checks. Takes from tens of seconds to several minutes. Use test or staging environments: the bot clicks, types and submits forms.',

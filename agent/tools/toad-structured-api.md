@@ -30,6 +30,8 @@ has been finalized. Finalization requires the scenario to PASS, the matching
 receipt to be its only command receipt, and no credentials, setup, PATH
 additions or runtime installs. Unsupported scenarios use the normal tools.
 
-This is run-local recording only; suite saving and production replay are
-separate work. The deterministic replay helper is for proof/testing and uses
-the recorded absolute URL as-is. Never replay write requests against production.
+This tool only records run-locally. Saving suites and replaying them happen
+outside the agent: `toad run` replays a suite's saved recording with the
+deterministic replay helper, moving the URL only when `--url` overrides the
+suite's URL and the recorded URL is under it. Never replay write requests
+against production.

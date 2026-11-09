@@ -1,5 +1,5 @@
 /** Narrow, explicit single-command CLI recording payload. Literal data must be trusted and non-secret. */
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -77,4 +77,40 @@ export function replayCliPayload(payload, { project, receipts, name = '01-replay
     const checks = cliChecks(payload, run.exitCode, run.stdout);
     return { result: checks.exitCode && checks.stdout ? 'PASS' : 'FAIL', checks, actual: { exitCode: run.exitCode, stdout: run.stdout }, receipt: run.receipt };
   } finally { if (dir) rmSync(dir, { recursive: true, force: true }); }
+}
+
+/** Asynchronous production replay; cancellation reaches the scenario runner. */
+export async function replayCliPayloadAsync(payload, { project, receipts, name = '01-replay', env = process.env, signal }) {
+  if (!validCliPayload(payload)) throw new Error('Invalid CLI recording payload');
+  if (!project || !receipts) throw new Error('Replay needs a project and receipts');
+  const replayEnv = { ...env };
+  for (const key of ['TOAD_BASE_SCENARIO', 'TOAD_CLI_PATH', 'TOAD_CLI_SECRETS_FILE', 'TOAD_EXEC_JSON', 'TOAD_RECORDING_ENABLED']) delete replayEnv[key];
+  const execute = (args, childEnv) => new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new Error('Replay cancelled or timed out'));
+    const child = spawn(process.execPath, [runner, ...args], { env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '', stderr = '', overflow = false;
+    const stop = () => { child.kill('SIGTERM'); };
+    signal?.addEventListener('abort', stop, { once: true });
+    child.stdout.on('data', data => { if (stdout.length + data.length > 8 * 1024 * 1024) { overflow = true; stop(); } else stdout += data; });
+    child.stderr.on('data', data => { if (stderr.length < 65536) stderr += data; });
+    child.on('error', error => { signal?.removeEventListener('abort', stop); reject(error); });
+    child.on('close', code => {
+      signal?.removeEventListener('abort', stop);
+      if (signal?.aborted || overflow) reject(new Error('Replay cancelled, timed out or output too large'));
+      else resolve({ status: code, stdout, stderr });
+    });
+  });
+  const prepared = await execute(['prepare', project], replayEnv);
+  const scenario = /Scenario ID: (.+)/.exec(prepared.stdout)?.[1];
+  if (prepared.status !== 0 || !scenario) throw new Error('Replay could not prepare a workspace');
+  const dir = mkdtempSync(join(tmpdir(), 'toad-replay-'));
+  try {
+    const secrets = join(dir, 'empty.json');
+    writeFileSync(secrets, '{}', { mode: 0o600 });
+    const result = await execute(['run', receipts, name, scenario, cliCommand(payload)], { ...replayEnv, TOAD_CLI_SECRETS_FILE: secrets, TOAD_EXEC_JSON: '1' });
+    const run = JSON.parse(result.stdout);
+    if (result.status !== 0 || run.infrastructureError || run.timedOut || run.interrupted || run.outputTruncated || !Number.isInteger(run.exitCode) || typeof run.stdout !== 'string') throw new Error('The replay did not run cleanly');
+    const checks = cliChecks(payload, run.exitCode, run.stdout);
+    return { result: checks.exitCode && checks.stdout ? 'PASS' : 'FAIL', checks, actual: { exitCode: run.exitCode, stdout: run.stdout }, receipt: run.receipt };
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 }

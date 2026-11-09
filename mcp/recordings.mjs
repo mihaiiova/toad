@@ -100,14 +100,25 @@ function completedScenario(run, kind, scenario) {
   return { handoff, scenario: requested[0] };
 }
 
-function checkedRecording(run, kind, scenario, value) {
-  const context = completedScenario(run, kind, scenario);
+/**
+ * Check a recording envelope for `scenario` under the handoff in `context`
+ * ({ handoff, scenario }) and return its readable steps. The run-local store
+ * and saved suites share it; neither trusts a file without it.
+ */
+export function describeRecording(value, kind, scenario, context) {
   if (!value || Object.keys(value).sort().join(',') !== 'codec,intentHash,kind,payload,scenarioId,status,version' || value.version !== 1 || value.status !== 'recorded' || value.kind !== kind || value.scenarioId !== scenarioId(scenario.name) || value.intentHash !== intentHash(kind, scenario)) throw new Error('Invalid recording envelope');
   const codec = typeof value.codec === 'string' && Object.hasOwn(RECORDING_CODECS, value.codec) && RECORDING_CODECS[value.codec];
   if (!codec || codec.validate(value.payload, context) !== true) throw new Error('Unsupported or unsafe recording');
   const steps = codec.describe(value.payload, context);
   if (!Array.isArray(steps) || !steps.length || steps.length > 100 || steps.some(s => !s || Object.keys(s).sort().join(',') !== 'action,assertion' || typeof s.action !== 'string' || typeof s.assertion !== 'string' || !s.action || !s.assertion || s.action.length > 4096 || s.assertion.length > 4096)) throw new Error('Invalid recording description');
   return steps;
+}
+
+/** A recording, status or run metadata file: a small regular file, never through a symlink. */
+export function readRecordingFile(path, limit = 65536) { return readJsonFile(path, limit); }
+
+function checkedRecording(run, kind, scenario, value) {
+  return describeRecording(value, kind, scenario, completedScenario(run, kind, scenario));
 }
 
 /** Finalize only codecs compiled into Toad, after the persisted scenario passed. */
