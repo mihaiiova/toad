@@ -1,6 +1,6 @@
 # Local tester-quality evaluation
 
-**No paid baseline has been recorded for this implementation. It is pending separate budget authorization.** Fake Pi and browser-driver results are harness-only, never evidence of actual agent quality. Ordinary `npm test` covers offline fixture/scorer/harness behavior without provider keys, browser download, Docker or Bubblewrap. During the stacked implementation batch these tests were added but **NOT RUN**; execute them only in the final validation stage.
+**A paid baseline was attempted on 2026-11-09; it is incomplete and exposed runtime/evidence and synthetic-secret leakage problems.** See [measured baseline](evaluation-baseline-2026-11-09.md). A successful acceptance baseline remains pending fixes and separately authorized rerun. Fake Pi and browser-driver results are harness-only, never evidence of actual agent quality. Ordinary `npm test` covers offline fixture/scorer/harness behavior without provider keys, browser download, Docker or Bubblewrap; the final stacked implementation validation passed 276 tests before that paid run.
 
 ## Explicit, bounded real-tester command
 
@@ -68,4 +68,4 @@ The sentinel scanner checks bounded regular output files without following symli
 
 The authored offline tests are `mcp/test/evaluation-fixtures.test.mjs`, `mcp/test/evaluation-score.test.mjs` and `mcp/test/evaluation.test.mjs`, already included by the existing `npm test` glob. They cover actual local fixture behavior, scoring and budget/manifest orchestration, plus the existing public `runProject` seam with fake Pi, actual CLI/API reference replay and the existing fake browser driver. Those integration observations are permanently labeled **harness-only**. No new project settings or parallel test engine are needed.
 
-All runtime verification and independent review remain pending until the final batch validation stage. An initial real web/API/CLI baseline is **pending explicit budget authorization**; no quality numbers have been fabricated and no paid call is authorized by these instructions or the example above.
+Deterministic batch validation has passed; independent/formal review remains pending. The [first real web/API/CLI evaluation](evaluation-baseline-2026-11-09.md) attempted all 21 cases for $0.259236 recorded cost, but 14 API/CLI cases lacked required execution evidence and one web case leaked a synthetic sentinel. It is not a passing baseline. No additional paid call is authorized by these instructions, the example above or the remaining allowance from that completed run.
