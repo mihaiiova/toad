@@ -5,6 +5,12 @@ description: "How to run one web test scenario with the Playwright MCP and recor
 
 # Running a web test scenario
 
+The handoff's target URL is authoritative. Resolve root-relative paths against
+that URL, never an older URL. For structured execution prefer `goto` paths
+such as `/pricing`; the tool binds them to the effective run target and refuses
+off-target navigation. Use target-relative paths when describing reusable
+scenarios. Do not rewrite expected text to make an assertion pass.
+
 1. Open the URL. If it fails to load, stop: the scenario is ERROR, with
    the error and a screenshot if a page rendered.
 2. Before each action, take an accessibility snapshot and act on the
@@ -24,6 +30,16 @@ description: "How to run one web test scenario with the Playwright MCP and recor
    unreachable site, a missing secret, an ambiguous step) is ERROR.
    Note console errors that appear during the scenario.
 7. Close the browser when done.
+8. When the request says recording is on and the whole scenario is an
+   ordered sequence of opening pages, clicking, filling and explicit
+   checks, run it once with cli_run_structured_web as the request
+   describes: stable role, label or text locators, trusted non-secret
+   literals, a check at the end, and capture with the exact scenario
+   name and complete true only when those steps and checks cover every
+   step and expected outcome. It runs in a fresh browser and records
+   its own receipt; cite that path. Never use it for sign-in, password,
+   token or other credential fields, and never weaken a scenario to
+   record it; otherwise use the browser tools.
 
 Evidence is kept apart from the report. The report cites each
 screenshot and console record by its absolute path and never inlines a

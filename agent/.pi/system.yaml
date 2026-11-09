@@ -62,7 +62,7 @@ agents:
       pass or fail with screenshots
     model: deepseek/deepseek-flash
     thinking: medium
-    tools: [ mcp:playwright ]
+    tools: [ mcp:playwright, cli:run-structured-web ]
     skills: [ web-test-scenario ]
     prompt: |
       You test one scenario of a web application in a real browser, exactly
@@ -111,6 +111,12 @@ skills:
     body: |
       # Running a web test scenario
 
+      The handoff target URL is authoritative. Resolve root-relative paths
+      against it, never an older URL. Prefer root-relative goto paths such as
+      /pricing in the structured tool; it binds and enforces the effective
+      target. Describe reusable scenarios with target-relative paths, without
+      changing their expected text.
+
       1. Open the URL. If it fails to load, stop: the scenario is ERROR, with
          the error and a screenshot if a page rendered.
       2. Before each action, take an accessibility snapshot and act on the
@@ -130,6 +136,16 @@ skills:
          unreachable site, a missing secret, an ambiguous step) is ERROR.
          Note console errors that appear during the scenario.
       7. Close the browser when done.
+      8. When the request says recording is on and the whole scenario is an
+         ordered sequence of opening pages, clicking, filling and explicit
+         checks, run it once with cli_run_structured_web as the request
+         describes: stable role, label or text locators, trusted non-secret
+         literals, a check at the end, and capture with the exact scenario
+         name and complete true only when those steps and checks cover every
+         step and expected outcome. It runs in a fresh browser and records
+         its own receipt; cite that path. Never use it for sign-in, password,
+         token or other credential fields, and never weaken a scenario to
+         record it; otherwise use the browser tools.
 
       Evidence is kept apart from the report. The report cites each
       screenshot and console record by its absolute path and never inlines a
@@ -296,6 +312,13 @@ integrations:
       description: Run a credential-free HTTP request with explicit status/body assertions
       command: node
       args: [ tools/toad-structured-api.mjs, "{request:file}" ]
+      approve: false
+    - name: run-structured-web
+      description: Run a bounded, credential-free web scenario (goto, click, fill and
+        explicit checks with role, label or text locators) in a fresh browser,
+        optionally recording it
+      command: node
+      args: [ tools/toad-structured-web.mjs, "{request:file}" ]
       approve: false
   mcp:
     - name: playwright

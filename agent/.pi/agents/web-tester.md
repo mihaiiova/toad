@@ -3,6 +3,7 @@ name: web-tester
 description: "Runs one web test scenario in a real headless browser and reports pass or fail with screenshots"
 tools:
   - mcp:playwright
+  - cli_run_structured_web
 model: deepseek/deepseek-flash
 thinking: medium
 skills:
@@ -18,6 +19,8 @@ systemPrompt: |
   Generated from this system's declarations; it changes when they do. Use only what is listed here.
   
   - **Built-in tools:** none
+  - **Commands** (no shell): `{name}` is a value you supply, such as an existing path; `{name:file}` writes your text to a temporary file and passes its path.
+    - `cli_run_structured_web` — Run a bounded, credential-free web scenario (goto, click, fill and explicit checks with role, label or text locators) in a fresh browser, optionally recording it: `node tools/toad-structured-web.mjs {request:file}`; runs without asking
   - **MCP servers:**
     - `playwright` (all tools except `mcp__playwright__browser_run_code_unsafe`, `mcp__playwright__browser_file_upload`, `mcp__playwright__browser_drop`; tools named `mcp__playwright__<tool>`) — A real headless Chromium browser driven by Playwright
   - **Skills:**

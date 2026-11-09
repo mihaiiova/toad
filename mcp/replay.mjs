@@ -18,6 +18,7 @@ import { lstatSync, mkdirSync, realpathSync, renameSync, unlinkSync, writeFileSy
 import { join } from 'node:path';
 import { replayCliPayloadAsync } from '../agent/tools/toad-cli-recording.mjs';
 import { apiCliPayload, validApiPayload } from '../agent/tools/toad-api-recording.mjs';
+import { WEB_CODEC, replayWebPayload, webPayloadUnder } from '../agent/tools/toad-web-recording.mjs';
 import { describeRecording, finalizeRecording, readRecordingFile, recordingStatus, scenarioId } from './recordings.mjs';
 import { ensureDirectory, projectFolder, readProjectConfig, readSuites, registerProject, withDefaults } from './projects.mjs';
 import { writeState } from './run.mjs';
@@ -41,14 +42,25 @@ export function rebaseUrl(url, from, to) {
   return next + url.slice(base.length);
 }
 
-/** An API envelope with its URL moved from one base to another; null if it cannot be. */
+/** An API or web envelope with its URLs moved from one base to another; null if it cannot be. */
 function rebasedEnvelope(envelope, from, to) {
-  if (envelope.codec !== 'api-request-v1' || from === to) return envelope;
+  if (!['api-request-v1', WEB_CODEC].includes(envelope.codec) || from === to) return envelope;
   if (!from || !to) return null;
+  if (envelope.codec === WEB_CODEC) {
+    if (!Array.isArray(envelope.payload?.steps)) return null;
+    const steps = envelope.payload.steps.map(s => s?.action === 'goto' ? { ...s, url: rebaseUrl(s.url, from, to) } : s);
+    const payload = { ...envelope.payload, steps };
+    return steps.every(s => s?.action !== 'goto' || s.url) && webPayloadUnder(payload, to) ? { ...envelope, payload } : null;
+  }
   const url = rebaseUrl(envelope.payload?.url, from, to);
   const payload = url && { ...envelope.payload, url };
   return payload && validApiPayload(payload) ? { ...envelope, payload } : null;
 }
+
+/** Whether every URL a recording visits is under `base`. */
+const recordedUnder = (envelope, base) => envelope.codec === WEB_CODEC
+  ? webPayloadUnder(envelope.payload, base)
+  : !!rebaseUrl(envelope.payload?.url, base, base);
 
 /**
  * How each scenario will run: { mode: 'replay', envelope } with the payload
@@ -66,14 +78,14 @@ export function replayChoices(project, suite, config, scenarios, { replay = true
     const rec = byName.get(scenario.name) ?? { status: 'none' };
     const saved = rec.status === 'recorded' ? { saved: rec.envelope, savedSteps: rec.steps } : {};
     const stale = rec.status === 'stale' ? { stale: rec.reason } : {};
-    if (suite.kind === 'web') return { mode: 'agent', reason: 'web scenarios are not recorded', ...saved };
     if (rec.status === 'stale') return { mode: 'agent', reason: STALE[rec.reason] ?? 'the saved recording is stale', ...stale };
     if (rec.status !== 'recorded') return { mode: 'agent', reason: 'no saved recording' };
     if (!replay) return { mode: 'agent', reason: 'replay is off (--no-replay)', ...saved };
-    if (suite.kind === 'api' && !rebaseUrl(rec.envelope.payload?.url, base, base)) {
+    const located = suite.kind === 'api' || suite.kind === 'web';
+    if (located && !recordedUnder(rec.envelope, base)) {
       return { mode: 'agent', reason: "the recorded URL is not under the suite's current URL", ...saved };
     }
-    if (suite.kind === 'api' && url) {
+    if (located && url) {
       const envelope = rebasedEnvelope(rec.envelope, base, url);
       if (!envelope) return { mode: 'agent', reason: "the recorded URL is not under the suite's URL, so --url cannot move it", ...saved };
       return { mode: 'replay', envelope, ...saved };
@@ -87,8 +99,14 @@ export function replayChoices(project, suite, config, scenarios, { replay = true
  * receipt under `receipts`. PASS or FAIL is the recording's own assertion;
  * ERROR means the replay could not run, and says why.
  */
-export async function replayScenario(envelope, { workdir, receipts, name = '01-replay', env, signal }) {
+export async function replayScenario(envelope, { workdir, receipts, name = '01-replay', env, signal, targetUrl }) {
   try {
+    if (envelope.codec === WEB_CODEC) {
+      // A fresh, isolated browser with no secrets; the recording is the assertion.
+      const outcome = await replayWebPayload(envelope.payload, { receipts, name, env, signal, targetUrl });
+      if (outcome.result === 'ERROR') return { result: 'ERROR', receipt: outcome.receipt, message: `The replay could not run: ${outcome.message ?? 'unknown error'}` };
+      return { result: outcome.result, receipt: outcome.receipt, ...(outcome.result === 'FAIL' ? { message: 'The saved recording\'s assertion failed' } : {}) };
+    }
     if (!['api-request-v1', 'cli-command-v1'].includes(envelope.codec)) return { result: 'ERROR', message: 'The recording uses an unknown codec' };
     const payload = envelope.codec === 'api-request-v1' ? apiCliPayload(envelope.payload) : envelope.payload;
     const outcome = await replayCliPayloadAsync(payload, { project: workdir, receipts, name, env, signal });
@@ -164,7 +182,7 @@ export function proposedRecording(run, project, suite, config, scenario, saved, 
   let envelope;
   try { envelope = readRecordingFile(file); } catch { return null; }
   const handoff = effectiveHandoff(suite, config, project);
-  if (suite.kind === 'api' && url) envelope = rebasedEnvelope(envelope, url, handoff.target?.url);
+  if ((suite.kind === 'api' || suite.kind === 'web') && url) envelope = rebasedEnvelope(envelope, url, handoff.target?.url);
   if (!envelope) return null;
   let steps;
   try { steps = describeRecording(envelope, suite.kind, scenario, { handoff, scenario }); } catch { return null; }
@@ -240,7 +258,7 @@ export function acceptRecordings(project, run, suiteName, { cwd = process.cwd() 
   try { handoff = readRecordingFile(join(dir, 'handoff.yaml'), 1024 * 1024); } catch { throw new Error('The run has no readable handoff'); }
   if (handoff?.kind !== suite.kind) throw new Error(`The run is not a ${suite.kind} run, as ${suiteName} is`);
   const base = effectiveHandoff(suite, config, project).target?.url;
-  const url = suite.kind === 'api' && handoff.target?.url && handoff.target.url !== base ? handoff.target.url : undefined;
+  const url = (suite.kind === 'api' || suite.kind === 'web') && handoff.target?.url && handoff.target.url !== base ? handoff.target.url : undefined;
   const { recordings } = inspectSuite(project, suite, config, { envelopes: true });
   return suite.scenarios.map((scenario, i) => {
     const saved = recordings[i].status === 'recorded' ? recordings[i] : null;

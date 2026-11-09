@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { cliChecks, cliCommand } from '../agent/tools/toad-cli-recording.mjs';
 import { RECORDING_CODECS } from './recording-codecs.mjs';
 import { apiCliPayload } from '../agent/tools/toad-api-recording.mjs';
+import { WEB_CODEC, validWebPayload, webReceipt } from '../agent/tools/toad-web-recording.mjs';
 
 const REASONS = new Set(['unsupported', 'incomplete', 'unsafe']);
 const KINDS = new Set(['cli', 'api', 'web']);
@@ -154,6 +155,37 @@ export function finalizeCliCandidates(run, handoff, scenarios) {
       const api = handoff.kind === 'api';
       if (!receiptProvesPass(receipt, api ? apiCliPayload(value.payload) : value.payload)) continue;
       finalizeRecording(run, handoff.kind, scenario, api ? 'api-request-v1' : 'cli-command-v1', value.payload);
+    } catch { /* Recording must never alter the test verdict. */ }
+  }
+}
+
+/**
+ * Finalize a passing web scenario covered by one structured web run. Its
+ * folder holds that run's receipt and candidate, and otherwise screenshots
+ * only: a second structured run, passing or not, makes it ambiguous. The
+ * receipt must be exactly the one a PASS of this payload writes.
+ */
+export function finalizeWebCandidates(run, handoff, scenarios) {
+  if (handoff?.kind !== 'web' || Object.keys(handoff.credentials ?? {}).length || typeof handoff.target?.url !== 'string') return;
+  const requests = handoff.request?.scenarios ?? [];
+  const slug = name => name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  for (const scenario of requests) {
+    try {
+      if (scenarios.filter(s => scenarioId(s.name) === scenarioId(scenario.name) && s.result === 'PASS').length !== 1) continue;
+      const folder = slug(scenario.name);
+      if (!folder || requests.filter(s => slug(s.name) === folder).length !== 1) continue;
+      const dir = join(run, 'receipts', folder);
+      if (!lstatSync(dir).isDirectory() || realpathSync(dir) !== dir) continue;
+      const files = readdirSync(dir);
+      const candidates = files.filter(f => /^[a-z0-9][a-z0-9-]*\.txt\.recording\.json$/.test(f));
+      if (candidates.length !== 1) continue;
+      const receiptName = candidates[0].slice(0, -'.recording.json'.length);
+      if (files.some(f => f !== candidates[0] && f !== receiptName && !/\.(png|jpe?g)$/i.test(f))) continue;
+      if (!files.includes(receiptName)) continue;
+      const value = readJsonFile(join(dir, candidates[0]), 65536);
+      if (!value || Object.keys(value).sort().join(',') !== 'payload,scenarioName,version' || value.version !== 1 || value.scenarioName !== scenario.name) continue;
+      if (!validWebPayload(value.payload) || readReceipt(join(dir, receiptName)) !== webReceipt(value.payload, { result: 'PASS' })) continue;
+      finalizeRecording(run, 'web', scenario, WEB_CODEC, value.payload);
     } catch { /* Recording must never alter the test verdict. */ }
   }
 }

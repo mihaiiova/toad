@@ -105,7 +105,7 @@ server.registerTool('run_project_test', {
 
 server.registerTool('save_suite_from_run', {
   title: 'Save a run as a suite',
-  description: 'Only when the user asks to keep a test: save a finished project run as .toad/suites/<name>.yaml for toad run, copying its validated recordings into .toad/suites/<name>.recordings/. Never overwrites a file; refuses a name already in use. Writes only those files; runs nothing and commits nothing. Recordings are kept only for single-command CLI and single-request API scenarios without credentials, installs, setup or PATH.',
+  description: 'Only when the user asks to keep a test: save a finished project run as .toad/suites/<name>.yaml for toad run, copying its validated recordings into .toad/suites/<name>.recordings/. Never overwrites a file; refuses a name already in use. Writes only those files; runs nothing and commits nothing. Recordings are kept only for single-command CLI, single-request API and structured web (navigate/click/fill/assert) scenarios without credentials, installs, setup or PATH.',
   inputSchema: {
     project_path: z.string().min(1).describe('Absolute path to the project directory'),
     run: z.string().min(1).describe('The run id, the last part of the run folder that run_project_test returned'),

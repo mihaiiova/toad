@@ -6,8 +6,8 @@
  * more, and one that passes on the retry is reported as flaky. The result is
  * an exit code, and optionally JUnit XML, a markdown summary and JSON.
  *
- * A CLI or API scenario with a valid saved recording is replayed first,
- * without a model (mode `replay`). One with none, or a stale one, or whose
+ * A CLI, API or web scenario with a valid saved recording is replayed first,
+ * without a model (mode `replay`); a web replay drives a fresh browser. One with none, or a stale one, or whose
  * replay assertion failed, goes to the agent (mode `agent`); when the agent
  * then passes it and captures a different recording, the scenario is
  * `healed` and the new recording is proposed, never written to the suite
@@ -128,6 +128,34 @@ export function suiteRunHandoff(suite, scenarios, { url, workdir } = {}) {
   if (url && suite.kind !== 'cli') target.url = url;
   if (workdir && suite.kind !== 'web') target.workdir = resolve(workdir);
   return { ...handoff, ...(Object.keys(target).length ? { target } : {}) };
+}
+
+/** Reject contradictory absolute target URLs before asking an agent to choose. */
+export function conflictingOverride(suite, scenario, config, project, override) {
+  if (!override || !['web', 'api'].includes(suite.kind)) return false;
+  let original, replacement;
+  try {
+    original = new URL(replayTarget(suite, config, project));
+    replacement = new URL(override);
+  } catch { return true; }
+  if (original.href.replace(/\/$/, '') === replacement.href.replace(/\/$/, '')) return false;
+  const under = (url, base) => {
+    const prefix = base.pathname.replace(/\/+$/, '') || '/';
+    return url.origin === base.origin && (prefix === '/' || url.pathname === prefix || url.pathname.startsWith(`${prefix}/`));
+  };
+  return [suite.goal, scenario.steps, scenario.expected, ...(suite.limitations ?? [])].some(text => {
+    if (typeof text !== 'string') return false;
+    return [...text.matchAll(/https?:\/\/[^\s<>"'“”‘’]+/gi)].some(match => {
+      try {
+        const referenced = new URL(match[0].replace(/[),.;!?]+$/, ''));
+        return under(referenced, original) && !under(referenced, replacement);
+      } catch { return true; }
+    });
+  });
+}
+function replayTarget(suite, config, project) {
+  const defaults = config[suite.kind] ?? {};
+  return suite.target?.url ?? defaults.url;
 }
 
 /** Why a scenario has no result, by how its run ended. */
@@ -324,7 +352,20 @@ export async function toadRun(options, { cwd = process.cwd(), env = process.env,
       const timeoutMs = Number(env.TOAD_TEST_TIMEOUT_MS) || (options.timeout ?? suite.timeout_minutes ?? config.timeout_minutes ?? 15) * 60000;
       const replaySignal = AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]);
       const t0 = Date.now();
-      try {
+      // A web replay needs the browser, though not the agent or a model.
+      let browserError;
+      if (suite.kind === 'web' && !env.TOAD_WEB_DRIVER) {
+        const { browserInstalled, installBrowser } = await import('./setup.mjs');
+        if (!browserInstalled(env)) {
+          say('Installing the browser for web tests (first run on this machine)…');
+          const result = await installBrowser(join(import.meta.dirname, '..', 'agent'));
+          if (result.status !== 0) browserError = `could not install the browser: ${result.output.trim().split('\n').slice(-3).join(' ')}`;
+        }
+      }
+      if (browserError) {
+        say(`  ${browserError}`);
+        for (const s of replays) { at(s.name).attempts.push('ERROR'); at(s.name).message = `The replay could not start: ${browserError}`; }
+      } else try {
         replayRun = replay.startReplayRun(project, handoff, { sandbox: options.sandbox });
         say(`  run: ${rel(replayRun)}`);
       } catch (error) {
@@ -341,7 +382,7 @@ export async function toadRun(options, { cwd = process.cwd(), env = process.env,
           // Retries cover a replay that could not run; a failed assertion goes to the agent instead.
           for (let attempt = 0; attempt <= options.retries; attempt++) {
             if (replaySignal.aborted) { outcome = { result: 'ERROR', message: signal.aborted ? 'Not run: toad run was interrupted' : 'The replay run timed out' }; s.attempts.push('ERROR'); break; }
-            outcome = await replay.replayScenario(envelope, { workdir: handoff.target?.workdir, receipts, name: `${String(attempt + 1).padStart(2, '0')}-replay`, env: replay.replayEnv(env, { receipts: receiptsRoot, sandbox: options.sandbox, image: handoff.target?.image }), signal: replaySignal });
+            outcome = await replay.replayScenario(envelope, { workdir: handoff.target?.workdir, targetUrl: suite.kind === 'web' ? handoff.target?.url : undefined, receipts, name: `${String(attempt + 1).padStart(2, '0')}-replay`, env: replay.replayEnv(env, { receipts: receiptsRoot, sandbox: options.sandbox, image: handoff.target?.image }), signal: replaySignal });
             if (outcome.result === 'FAIL') break;
             s.attempts.push(outcome.result);
             if (outcome.result === 'PASS') break;
@@ -364,6 +405,13 @@ export async function toadRun(options, { cwd = process.cwd(), env = process.env,
 
     // The agent: scenarios without a usable recording, and replays whose assertion failed.
     let pending = scenarios.filter(s => toAgent.has(s.name));
+    for (const p of pending.filter(s => conflictingOverride(suite, s, config, project, options.url))) {
+      const s = at(p.name);
+      s.attempts.push('ERROR');
+      if (s.replay === 'FAIL') s.mode = 'replay';
+      s.message = 'The suite contains an absolute URL for the original target, which conflicts with --url. Replace it with a target-relative path before retrying; the agent was not run.';
+    }
+    pending = pending.filter(s => !conflictingOverride(suite, s, config, project, options.url));
     if (pending.length && !signal.aborted && !stopped) {
       const r = await readyAgent();
       if (r.error) {
@@ -415,7 +463,7 @@ export async function toadRun(options, { cwd = process.cwd(), env = process.env,
         if (got[i] === 'PASS' && result.run) {
           const c = choice.get(p.name);
           try {
-            const proposal = replay.proposedRecording(result.run, project, suite, config, p, c.saved ? { envelope: c.saved, steps: c.savedSteps } : null, { url: suite.kind === 'api' ? options.url : undefined });
+            const proposal = replay.proposedRecording(result.run, project, suite, config, p, c.saved ? { envelope: c.saved, steps: c.savedSteps } : null, { url: suite.kind === 'api' || suite.kind === 'web' ? options.url : undefined });
             if (proposal) proposals.set(p.name, { ...proposal, run: result.run });
           } catch { /* a proposal never changes the result */ }
         }

@@ -8,7 +8,7 @@ import { dirname, join, resolve } from 'node:path';
 import { intentHash, scenarioId } from '../recordings.mjs';
 import { readProjectConfig, readSuites } from '../projects.mjs';
 import { parseAcceptArgs, rebaseUrl, replayChoices, stepsDiff } from '../replay.mjs';
-import { parseRunArgs } from '../toad-run.mjs';
+import { conflictingOverride, parseRunArgs } from '../toad-run.mjs';
 
 const tmpdir = () => realpathSync(osTmpdir());
 const CLI = resolve(import.meta.dirname, '../cli.mjs');
@@ -391,6 +391,16 @@ test('API recordings replay against --url when they are under the suite URL, els
   assert.equal(changed.code, 0, changed.err);
   assert.equal(changed.report.suites[0].scenarios[0].mode, 'agent');
   assert.deepEqual(seen, [], 'the old API endpoint is never replayed after a target edit');
+});
+
+test('fallback detects original absolute URLs when the target changes', () => {
+  const scenario = {steps:'Open http://app.test/pricing.',expected:'A page'};
+  const suite = {kind:'web',goal:'Check',target:{url:'http://app.test/'}};
+  assert.equal(conflictingOverride(suite,scenario,{},'/project','http://other.test/'),true);
+  assert.equal(conflictingOverride(suite,scenario,{},'/project','http://app.test/staging'),true);
+  assert.equal(conflictingOverride(suite,scenario,{},'/project','http://app.test/'),false);
+  assert.equal(conflictingOverride(suite,{...scenario,steps:'Open /pricing.'},{},'/project','http://other.test/'),false);
+  assert.equal(conflictingOverride({...suite,kind:'api'},scenario,{},'/project','http://other.test/'),true);
 });
 
 test('a missing replay program is an ERROR rather than a regression or agent fallback', t => {

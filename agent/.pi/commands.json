@@ -1,6 +1,14 @@
 {
   "commands": [
     {
+      "name": "run-structured-web",
+      "description": "Run a bounded, credential-free web scenario (goto, click, fill and explicit checks with role, label or text locators) in a fresh browser, optionally recording it",
+      "command": "node",
+      "args": ["tools/toad-structured-web.mjs", "{request:file}"],
+      "approve": false,
+      "lead": false
+    },
+    {
       "name": "run-structured-api",
       "description": "Run a credential-free HTTP request with explicit status/body assertions",
       "command": "node",

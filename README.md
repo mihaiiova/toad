@@ -327,8 +327,9 @@ A passing CLI scenario can leave a **recording**: the exact program and
 arguments Toad ran, and the exit-code and stdout assertion that made it pass.
 The run viewer shows it beside the scenario's plain-language steps. Capture
 never changes the verdict and adds no model calls. API scenarios can also
-record a single structured HTTP request with status and body assertions.
-Web scenarios show **Not captured**. The format defines a **Not
+record a single structured HTTP request with status and body assertions, and
+web scenarios a bounded structured browser sequence (see
+[Web recordings](#web-recordings)). Other scenarios show **Not captured**. The format defines a **Not
 recordable** status with `unsupported`, `incomplete` or `unsafe` for producers,
 but no producer emits it yet, so it does not appear today.
 
@@ -353,8 +354,50 @@ is not a security boundary; treat recordings and their receipts as sensitive.
 
 Recordings saved with a suite (see [Save a run as a suite](#save-a-run-as-a-suite))
 are replayed by `toad run` without a model (see [Replay and healing](#replay-and-healing)).
-Web scenarios are not recorded or replayed yet. The format, identity and
-safety rules below are shared with the producers that will follow.
+
+#### Web recordings
+
+A passing web scenario can leave a recording when the web-tester covers the
+whole scenario with one `cli_run_structured_web` run: a bounded, ordered list
+of 2 to 30 steps, no video and no selectors or code.
+
+- Actions: `{action: "goto", url}`, `{action: "click", target}`,
+  `{action: "fill", target, value}`.
+- Checks: `{action: "expectVisible", target}`,
+  `{action: "expectText", target, contains}` and
+  `{action: "expectUrl", path}` (the path and query, e.g. `/done?x=1`).
+- A `target` is a stable locator matched exactly: `{role, name}` (an ARIA
+  role such as `button`, `link`, `textbox` or `heading`, and its accessible
+  name), `{label}` or `{text}`. It must match exactly one element.
+- The first step is a `goto` under the suite's URL and the last is a check;
+  every `goto` must stay under the URL (same origin, whole path segments).
+
+Credential-bearing flows are refused, never recorded: the handoff must have
+no `credentials`, the per-run secrets store must be empty, locators, values
+and URL query names that look like sign-in, password, token, session or card
+fields are rejected, and a fill into a password, hidden or one-time-code input
+stops the run. Like CLI and API data, URLs, fill values and expected text are
+trusted, non-secret fixtures stored as written.
+
+The tool drives the same pinned Playwright MCP server the web-tester uses, in
+a fresh isolated browser with no secrets, with one fixed script and the steps
+as data, so it makes no model call. Its receipt lists every step and the
+result. The scenario is recorded (`web-scenario-v1`) only if it PASSes in a
+finished run, its folder holds that one structured receipt and its candidate
+(screenshots aside; a second structured run makes it ambiguous), and the
+receipt is exactly the one a PASS of those steps writes. A failed, errored or
+refused run leaves no recording.
+
+`toad run` replays a saved web recording in a fresh browser, installing it
+first if needed; `--url` moves every `goto` that is under the suite's URL.
+A failed check goes to the agent and can heal, as for CLI and API; a page that
+cannot load, or a driver that cannot start, is an ERROR. Not supported: file
+uploads, drag and drop, keyboard shortcuts, iframes, new tabs, dynamic values
+and anything needing a sign-in. The driver runs the steps with the Playwright
+MCP's scripted-run tool (`browser_run_code_unsafe`, or `browser_run_code` in
+older versions); the web-tester itself never gets that tool.
+
+The format, identity and safety rules below are shared by every producer.
 
 The shared run-local status format lives at
 `.toad/runs/<id>/recording/<scenario-id>.json`, alongside the run's receipts.
@@ -363,8 +406,9 @@ and contain only a fixed reason; they do not contain actions, assertions, or
 secrets. A finalized recording envelope contains `version`, `status` (`recorded`),
 `kind`, `scenarioId`, `intentHash`, `codec`, and codec-specific `payload`.
 The built-in codecs are `cli-command-v1` (program, arguments, expected exit
-and stdout) and `api-request-v1` (HTTP method, absolute URL, headers, body,
-expected status and body). API capture uses `cli_run_structured_api` and
+and stdout), `api-request-v1` (HTTP method, absolute URL, headers, body,
+expected status and body) and `web-scenario-v1` (ordered browser steps and
+checks, above). API capture uses `cli_run_structured_api` and
 requires Node with fetch inside the sandbox. It supports literal body equality
 or containment, only `accept`/`content-type` headers, and no redirects or
 credential-bearing requests. Responses are bounded to 1 MiB and 30 seconds.
@@ -512,9 +556,10 @@ lists every option.
 
 ### Replay and healing
 
-A CLI or API scenario whose saved recording is valid under the suite as it
-runs today is **replayed**: Toad runs the recorded command or request in a
-fresh sandbox workspace and checks the recorded assertion. No model is
+A CLI, API or web scenario whose saved recording is valid under the suite as
+it runs today is **replayed**: Toad runs the recorded command or request in a
+fresh sandbox workspace, or the recorded browser steps in a fresh isolated
+browser, and checks the recorded assertion. No model is
 called, no key is needed, and it costs nothing; a run where every selected
 scenario replays needs no model key at all. Each scenario's **mode** is in
 the output, `--json` (`mode`, and `modes` totals), JUnit (`toad.mode`), the
@@ -523,7 +568,7 @@ summary and the run page in `toad ui`:
 | Mode | When |
 |---|---|
 | `replay` | The saved recording replayed; its assertion decided the result |
-| `agent` | No saved recording, a stale one, `--no-replay`, a web suite, or the replay's assertion failed and the agent did not then pass it with a new recording |
+| `agent` | No saved recording, a stale one, `--no-replay`, a recorded URL not under the suite's URL, or the replay's assertion failed and the agent did not then pass it with a new recording |
 | `healed` | The saved recording failed, and the agent passed the scenario and captured a different recording |
 
 - A replay whose assertion **fails** goes to the agent, which tests the
@@ -531,7 +576,8 @@ summary and the run page in `toad ui`:
   (`FAIL`, with `replay: FAIL` in `--json`). If the agent passes it, the
   recording is out of date, not the program.
 - A replay that **cannot run** (the sandbox did not start, the working folder
-  is missing, the HTTP request could not be made) is an `ERROR`, retried like
+  is missing, the HTTP request could not be made, the page could not load or
+  the browser could not start) is an `ERROR`, retried like
   any result that did not pass. It never calls the agent.
 - A replay whose assertion fails needs the agent; without a model key that
   scenario is an `ERROR` (exit 3), never a guess.
@@ -553,7 +599,18 @@ summary and the run page in `toad ui`:
   with `--update-recordings` it re-records every scenario it can.
 - Overrides still apply: `--workdir` replays in that folder, `--url` moves a
   recorded API URL from the suite's URL to the new one (a recording outside
-  the suite's URL goes to the agent), `--sandbox` picks the replay's sandbox,
+  the suite's URL goes to the agent), and `--sandbox` picks the replay's sandbox.
+  If an agent fallback is needed and the suite's goal, scenario steps,
+  expected result or limitations contain an absolute URL for the original
+  target that conflicts with `--url`, Toad reports `ERROR` rather than ask
+  the agent to choose between targets. Use target-relative paths in those
+  instructions, then retry. This is a guard against conflicting instructions,
+  not a network isolation boundary. New reusable web scenarios should say
+  “Open `/`, then `/pricing`” instead of embedding a local hostname. Saved
+  steps and expected text are preserved; Toad does not silently rewrite prose.
+  The structured browser tool resolves relative `goto` paths against the
+  effective target and blocks navigation outside its origin/path prefix,
+  including clicks and redirects (not subresource requests).
   `--allow-writes` is still required for write suites, and `--retries`,
   `--max-cost` (replays cost $0), `--tag` and `--max-scenarios` work as before.
 - Each suite's replays are one run under `.toad/runs/`, without a model
