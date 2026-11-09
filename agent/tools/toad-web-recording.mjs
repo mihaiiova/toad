@@ -54,28 +54,47 @@ export function validWebUrl(url) {
   } catch { return false; }
 }
 
-function validStep(s) {
-  if (!s || typeof s !== 'object' || !ACTIONS.has(s.action) && !ASSERTIONS.has(s.action)) return false;
-  switch (s.action) {
-    case 'goto': return keys(s, ['action', 'url']) && validWebUrl(s.url);
-    case 'click': return keys(s, ['action', 'target']) && validLocator(s.target);
-    case 'fill': return keys(s, ['action', 'target', 'value']) && validLocator(s.target) && literal(s.value, 1024) && !SENSITIVE.test(s.value);
-    case 'expectVisible': return keys(s, ['action', 'target']) && validLocator(s.target);
-    case 'expectText': return keys(s, ['action', 'target', 'contains']) && validLocator(s.target) && name(s.contains) && s.contains.length <= 1024;
-    case 'expectUrl': return keys(s, ['action', 'path']) && literal(s.path, 2048) && s.path.startsWith('/') && !s.path.startsWith('//') && !s.path.includes('#');
+function locatorIssue(target) {
+  if (validLocator(target)) return null;
+  if (keys(target, ['role', 'name'])) return [ROLES.has(target.role) ? 'name' : 'role'];
+  if (keys(target, ['label'])) return ['label'];
+  if (keys(target, ['text'])) return ['text'];
+  return [];
+}
+
+function stepIssue(s) {
+  if (!s || typeof s !== 'object' || !ACTIONS.has(s.action) && !ASSERTIONS.has(s.action)) return ['action'];
+  const shape = { goto: ['action', 'url'], click: ['action', 'target'], fill: ['action', 'target', 'value'], expectVisible: ['action', 'target'], expectText: ['action', 'target', 'contains'], expectUrl: ['action', 'path'] }[s.action];
+  if (!keys(s, shape)) return [];
+  if (shape.includes('target')) {
+    const path = locatorIssue(s.target);
+    if (path) return ['target', ...path];
   }
-  return false;
+  switch (s.action) {
+    case 'goto': return validWebUrl(s.url) ? null : ['url'];
+    case 'click': case 'expectVisible': return null;
+    case 'fill': return literal(s.value, 1024) && !SENSITIVE.test(s.value) ? null : ['value'];
+    case 'expectText': return name(s.contains) && s.contains.length <= 1024 ? null : ['contains'];
+    case 'expectUrl': return literal(s.path, 2048) && s.path.startsWith('/') && !s.path.startsWith('//') && !s.path.includes('#') ? null : ['path'];
+  }
 }
 
 /**
  * { steps: [...] }: 2 to 30 ordered steps, starting with a goto and ending
  * with an assertion, so every recording checks something it observed.
  */
-export function validWebPayload(p) {
-  if (!keys(p, ['steps']) || !Array.isArray(p.steps) || p.steps.length < 2 || p.steps.length > MAX_WEB_STEPS) return false;
-  if (!p.steps.every(validStep)) return false;
-  return p.steps[0].action === 'goto' && ASSERTIONS.has(p.steps.at(-1).action);
+export function webPayloadIssue(p) {
+  if (!keys(p, ['steps'])) return [];
+  if (!Array.isArray(p.steps) || p.steps.length < 2 || p.steps.length > MAX_WEB_STEPS) return ['steps'];
+  for (let i = 0; i < p.steps.length; i++) {
+    const path = stepIssue(p.steps[i]);
+    if (path) return ['steps', i, ...path];
+  }
+  if (p.steps[0].action !== 'goto') return ['steps', 0, 'action'];
+  if (!ASSERTIONS.has(p.steps.at(-1).action)) return ['steps', p.steps.length - 1, 'action'];
+  return null;
 }
+export function validWebPayload(p) { return webPayloadIssue(p) === null; }
 
 /** Whether `url` is the base or under it, by whole path segment, on the same origin. */
 export function underBase(url, base) {

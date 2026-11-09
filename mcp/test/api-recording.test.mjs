@@ -49,13 +49,14 @@ for (const backend of ['none', 'bwrap']) test(`API capture and assertion replay 
   assert.equal(recordingStatus(run,'api',s).status,'not-captured');
   state('PASS');finalizeCliCandidates(run,handoff,[{name:s.name,result:'PASS'}]);
   assert.equal(recordingStatus(run,'api',s).status,'recorded');
-  const replay = p => replayApiPayload(p,{project,receipts:folder,env,name:'replay'});
+  let replayNumber = 0;
+  const replay = p => replayApiPayload(p,{project,receipts:folder,env,name:`replay-${++replayNumber}`});
   assert.equal(replay(payload).result,'PASS');
   assert.equal(replay({...payload,url:url+'broken'}).result,'FAIL');
   assert.equal(replay({...payload,url:url+'wrong'}).result,'FAIL');
   assert.equal(replay({...payload,url:url+'wrong',expect:{status:201,body:{contains:'hell'}}}).result,'PASS');
   const unreachable={...payload,url:'http://127.0.0.1:1/'};
-  assert.throws(()=>replay(unreachable),/infrastructure/);
+  assert.throws(()=>replay(unreachable),/did not run cleanly/);
   const error=spawnSync(process.execPath,[tool],{cwd:root,env,input:JSON.stringify({...request,payload:unreachable,capture:undefined}),encoding:'utf8'});
   assert.equal(error.status,2,error.stdout);
   const multiline={...payload,method:'POST',headers:{'content-type':'text/plain'},body:"a'b;$(echo injected)\\nnext"};

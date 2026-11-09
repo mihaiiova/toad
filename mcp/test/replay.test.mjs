@@ -1,13 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir as osTmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { intentHash, scenarioId } from '../recordings.mjs';
 import { readProjectConfig, readSuites } from '../projects.mjs';
 import { parseAcceptArgs, rebaseUrl, replayChoices, stepsDiff } from '../replay.mjs';
+import { writeRecordingContext } from '../recording-context.mjs';
 import { conflictingOverride, parseRunArgs } from '../toad-run.mjs';
 
 const tmpdir = () => realpathSync(osTmpdir());
@@ -48,6 +49,7 @@ function agent(t, behaviour) {
   writeFileSync(join(dir, COMMANDS), '{}');
   writeFileSync(join(dir, 'fake-pi.mjs'), `#!/usr/bin/env node
 import fs from 'node:fs'; import path from 'node:path';
+import { fakeExecutionEvidence } from ${JSON.stringify(new URL('./fake-web-evidence.mjs', import.meta.url).href)};
 const pre = process.argv.slice(2);
 const prompt = pre[pre.indexOf('-p') + 1];
 const b = JSON.parse(fs.readFileSync('behaviour.json', 'utf8'));
@@ -70,6 +72,7 @@ const lines = names.map(name => {
   return '- ' + result + ' | ' + name;
 });
 fs.writeFileSync('counts.json', JSON.stringify(counts));
+fakeExecutionEvidence(process.env, lines.join('\\n'));
 const verdict = lines.some(l => l.includes('FAIL')) ? 'FAIL' : lines.some(l => l.includes('ERROR')) ? 'ERROR' : 'PASS';
 console.log(JSON.stringify({ type: 'agent_end', messages: [{ role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: ['Verdict: ' + verdict, 'Results:', ...lines].join('\\n') }] }] }));
 `, { mode: 0o755 });
@@ -209,16 +212,16 @@ test('a regression fails: the replay fails, the agent fails it too, and the save
   assert.equal(s.result, 'FAIL');
   assert.equal(s.replay, 'FAIL');
   assert.equal(s.mode, 'agent');
-  assert.deepEqual(s.attempts, ['FAIL', 'FAIL'], 'the agent ran, and retried, as before');
+  assert.deepEqual(s.attempts, ['FAIL', 'FAIL', 'FAIL'], 'replay and both agent failures remain visible');
   assert.equal(s.proposed, undefined);
   assert.equal(requests(agentDir).length, 2);
   assert.deepEqual(r.report.suites[0].runs.map(x => !!x.replay), [true, false, false]);
   assert.equal(readFileSync(savedFile(dir, A), 'utf8'), before);
 
-  // Without a key, a failed replay cannot be checked: an ERROR, never a silent pass or a guess.
+  // Missing investigation credentials cannot erase the deterministic FAIL.
   const noKey = toad(t, ['--json'], { cwd: dir, agentDir, extra: { DEEPSEEK_API_KEY: '' } });
-  assert.equal(noKey.code, 3, noKey.err);
-  assert.equal(noKey.report.suites[0].scenarios[0].result, 'ERROR');
+  assert.equal(noKey.code, 1, noKey.err);
+  assert.equal(noKey.report.suites[0].scenarios[0].result, 'FAIL');
   assert.match(noKey.report.suites[0].scenarios[0].message, /assertion failed, and the agent could not check.*no key for deepseek/);
 });
 
@@ -227,11 +230,14 @@ test('healing: a failed replay the agent passes proposes a new recording; accept
   const dir = project(t, { output: 'ready v2' });
   const before = readFileSync(savedFile(dir, A), 'utf8');
   const r = toad(t, ['--json', '--junit', 'junit.xml', '--summary', 'summary.md'], { cwd: dir, agentDir });
-  assert.equal(r.code, 0, r.err);
+  assert.equal(r.code, 1, r.err);
   const [s] = r.report.suites[0].scenarios;
-  assert.equal(s.result, 'PASS');
+  assert.equal(s.result, 'FAIL');
   assert.equal(s.mode, 'healed');
-  assert.deepEqual(s.attempts, ['PASS'], 'a healed pass is a pass, not flaky');
+  assert.ok(s.proposed.failure.run);
+  assert.ok(s.proposed.failure.executionIds.length);
+  assert.deepEqual(s.proposed.failure.assertions, ['exit 0; stdout {"equals":"ready\\n"}']);
+  assert.deepEqual(s.attempts, ['FAIL', 'PASS'], 'investigation does not erase deterministic failure');
   assert.deepEqual(r.report.modes, { replay: 0, agent: 0, healed: 1 });
   assert.equal(r.report.proposed, 1);
   assert.deepEqual(s.proposed.diff, ['- ./check => exit 0; stdout {"equals":"ready\\n"}', '+ ./check => exit 0; stdout {"equals":"ready v2\\n"}']);
@@ -240,13 +246,18 @@ test('healing: a failed replay the agent passes proposes a new recording; accept
   assert.match(r.report.notes.join(' '), /saved ones are unchanged.*toad suites accept/);
   assert.equal(readFileSync(savedFile(dir, A), 'utf8'), before, 'the saved recording is untouched');
   assert.match(readFileSync(join(dir, 'junit.xml'), 'utf8'), /value="healed"\/><property name="toad.proposed" value="true"\/>/);
-  assert.match(readFileSync(join(dir, 'summary.md'), 'utf8'), /1 healed · 1 proposed recording/);
+  assert.match(readFileSync(join(dir, 'summary.md'), 'utf8'), /1 investigated \(original FAIL retained\) · 1 proposed recording/);
   const agentRun = join(dir, s.proposed.run);
   const state = JSON.parse(readFileSync(join(agentRun, 'state.json'), 'utf8'));
   assert.equal(state.replay.modes[A.name], 'healed');
   assert.deepEqual(state.replay.proposed[A.name].diff, s.proposed.diff);
   assert.equal(state.replay.accept, s.proposed.accept);
 
+  const historical = readFileSync(join(agentRun, 'state.json'), 'utf8');
+  assert.equal(state.verdict, 'PASS', 'the investigation is separate from the original replay');
+  assert.equal(state.replay.results[A.name], 'FAIL', 'viewer aggregation retains the failure');
+  assert.match(readFileSync(join(dir, 'junit.xml'), 'utf8'), /<failure /);
+  assert.match(readFileSync(join(dir, 'summary.md'), 'utf8'), /## Toad: FAIL/);
   const accept = spawnSync(process.execPath, [CLI, ...s.proposed.accept.split(' ').slice(1)], { cwd: dir, encoding: 'utf8', env: env(t, agentDir) });
   assert.equal(accept.status, 0, accept.stderr);
   assert.match(accept.stdout, /Accepted 1 recording into \.toad\/suites\/smoke\.recordings/);
@@ -256,6 +267,7 @@ test('healing: a failed replay the agent passes proposes a new recording; accept
   const again = spawnSync(process.execPath, [CLI, ...s.proposed.accept.split(' ').slice(1)], { cwd: dir, encoding: 'utf8', env: env(t, agentDir) });
   assert.match(again.stdout, /Nothing to accept/);
 
+  assert.equal(readFileSync(join(agentRun, 'state.json'), 'utf8'), historical, 'acceptance does not rewrite historical outcomes');
   // The accepted recording now replays, without a model.
   const next = toad(t, ['--json'], { cwd: dir, agentDir, extra: NO_MODEL(dir) });
   assert.equal(next.code, 0, next.err);
@@ -266,7 +278,7 @@ test('--update-recordings writes the healed recording into the suite; --no-repla
   const agentDir = agent(t, { capture: { [A.name]: READY_V2 } });
   const dir = project(t, { output: 'ready v2' });
   const r = toad(t, ['--json', '--update-recordings'], { cwd: dir, agentDir });
-  assert.equal(r.code, 0, r.err);
+  assert.equal(r.code, 1, r.err);
   const [s] = r.report.suites[0].scenarios;
   assert.equal(s.mode, 'healed');
   assert.equal(s.proposed.updated, `.toad/suites/smoke.recordings/${scenarioId(A.name)}.json`);
@@ -285,7 +297,7 @@ test('--update-recordings writes the healed recording into the suite; --no-repla
   assert.ok(off.report.suites[0].runs.every(x => !x.replay));
 });
 
-test('stale, missing, malformed and symlinked recordings fall back to the agent; the valid one replays', t => {
+test('corrupt and symlinked recordings fail preflight; context-stale and missing recordings still use the agent', t => {
   const agentDir = agent(t, {});
   const dir = project(t, { scenarios: [A, B, C, D, E], recordings: { [A.name]: READY, [B.name]: READY } });
   writeFileSync(join(dir, '.toad', 'suites', 'smoke.yaml'), suiteYaml([A, { ...B, expected: 'It prints 2.0.' }, C, D, E]));
@@ -293,21 +305,23 @@ test('stale, missing, malformed and symlinked recordings fall back to the agent;
   const outside = join(temp(t, 'toad-outside-'), 'e.json');
   writeFileSync(outside, JSON.stringify(envelope('cli', E, READY)));
   symlinkSync(outside, savedFile(dir, E));
+  const refused = toad(t, [], { cwd: dir, agentDir });
+  assert.equal(refused.code, 3, refused.err);
+  assert.match(refused.err, /Malformed definition syntax/);
+  assert.match(refused.err, /without symlinks/);
+  assert.deepEqual(requests(agentDir), [], 'no model starts for static definition defects');
+  assert.equal(existsSync(join(dir, '.toad', 'runs')), false, 'even the valid scenario has not executed');
+  unlinkSync(savedFile(dir, D));
+  unlinkSync(savedFile(dir, E));
   const r = toad(t, ['--json'], { cwd: dir, agentDir });
   assert.equal(r.code, 0, r.err);
   assert.deepEqual(r.report.suites[0].scenarios.map(s => [s.name, s.mode, s.result]), [
     [A.name, 'replay', 'PASS'], [B.name, 'agent', 'PASS'], [C.name, 'agent', 'PASS'], [D.name, 'agent', 'PASS'], [E.name, 'agent', 'PASS']]);
   assert.match(r.report.suites[0].scenarios[1].reason, /stale/);
-  assert.match(r.report.suites[0].scenarios[3].reason, /not a valid recording/);
-  assert.match(r.report.suites[0].scenarios[4].reason, /not a valid recording/, 'a symlink is never followed');
-  const [request] = requests(agentDir);
   assert.equal(requests(agentDir).length, 1);
-  assert.doesNotMatch(request.request, /"Prints ready"/, 'the replayed scenario is not sent to the agent');
-  assert.match(request.request, /"Prints version"[\s\S]*"Counts items"/);
+  assert.doesNotMatch(requests(agentDir)[0].request, /"Prints ready"/);
   assert.match(r.err, /warning: smoke › Prints version: the saved recording is stale/);
-  assert.equal(r.report.warnings.length, 3);
-
-  // Anything not replayable needs the agent, so its key is checked before anything runs.
+  assert.equal(r.report.warnings.length, 1);
   const noKey = toad(t, [], { cwd: dir, agentDir, extra: { DEEPSEEK_API_KEY: '' } });
   assert.equal(noKey.code, 3);
   assert.match(noKey.err, /no key for deepseek/);
@@ -368,8 +382,10 @@ test('API recordings replay against --url when they are under the suite URL, els
   writeFileSync(join(dir, '.toad', 'suites', 'api.yaml'), `kind: api\ntarget: { url: '${base}/v1' }\ngoal: Check the API.\nscenarios:\n${[H, O].map(s => `  - name: ${s.name}\n    steps: ${s.steps}\n    expected: ${s.expected}`).join('\n')}\n`);
   const payload = url => ({ method: 'GET', url, headers: {}, body: '', expect: { status: 200, body: { contains: 'ok' } } });
   writeFileSync(savedFile(dir, H, 'api'), JSON.stringify(envelope('api', H, payload(`${base}/v1/health`))));
-  // Outside the suite's /v1 base, so --url cannot say where it should go.
+  // It was valid under /elsewhere originally; changing the suite target makes it stale.
   writeFileSync(savedFile(dir, O, 'api'), JSON.stringify(envelope('api', O, payload(`${base}/elsewhere/health`))));
+  writeRecordingContext(dir, 'api', envelope('api', H, payload(`${base}/v1/health`)), `${base}/v1`);
+  writeRecordingContext(dir, 'api', envelope('api', O, payload(`${base}/elsewhere/health`)), `${base}/elsewhere`);
 
   const plain = await toadAsync(t, ['--json', '--suite', 'api', '--max-scenarios', '1'], { cwd: dir, agentDir, extra: NO_MODEL(dir) });
   assert.equal(plain.code, 0, plain.err);
@@ -379,7 +395,7 @@ test('API recordings replay against --url when they are under the suite URL, els
   const moved = await toadAsync(t, ['--json', '--url', `${base}/v2`], { cwd: dir, agentDir });
   assert.equal(moved.code, 0, moved.err);
   assert.deepEqual(moved.report.suites[0].scenarios.map(s => [s.name, s.mode]), [[H.name, 'replay'], [O.name, 'agent']]);
-  assert.match(moved.report.suites[0].scenarios[1].reason, /not under the suite's current URL/);
+  assert.match(moved.report.suites[0].scenarios[1].reason, /suite target changed/);
   assert.deepEqual(seen, ['/v2/health'], 'the replay went to the override, never the suite URL');
   assert.equal(requests(agentDir).length, 1);
 
@@ -438,16 +454,20 @@ test('the run viewer shows modes and proposals in a fixed shape', async t => {
   mkdirSync(join(run, 'reports'), { recursive: true });
   writeFileSync(join(run, 'handoff.yaml'), JSON.stringify({ version: 1, kind: 'cli', request: { goal: 'g', scenarios: [A] } }));
   writeFileSync(join(run, 'reports', 'report.md'), '# Toad run\n\nStatus: ok\n\nVerdict: PASS\n');
+  const provenance = { version: 1, scenarioId: scenarioId(A.name), intentHash: intentHash('cli', A), contextHash: 'a'.repeat(64), savedHash: null, proposedHash: 'b'.repeat(64) };
+  const failure = { run: 'original-failed-replay', executionIds: ['12345678-1234-1234-1234-123456789abc'], assertions: ['exit 0; stdout equals ready'] };
   writeFileSync(join(run, 'state.json'), JSON.stringify({ state: 'finished', status: 'ok', verdict: 'PASS', scenarios: [{ name: A.name, result: 'PASS' }], replay: {
-    suite: 'smoke', modes: { [A.name]: 'healed', other: 'bogus' }, accept: `toad suites accept ${id} --suite smoke`,
-    proposed: { [A.name]: { steps: [{ action: 'x', assertion: 'y' }], previous: null, diff: ['+ x => y'], extra: 'dropped' } },
+    suite: 'smoke', results: { [A.name]: 'FAIL', ignored: 'bogus' }, modes: { [A.name]: 'healed', other: 'bogus' }, accept: `toad suites accept ${id} --suite smoke`,
+    proposed: { [A.name]: { steps: [{ action: 'x', assertion: 'y' }], previous: null, diff: ['+ x => y'], provenance, failure, extra: 'dropped' } },
   } }));
   registerProject(dir);
   const { server, url } = await startUi({ port: 0 });
   t.after(() => server.close());
   const detail = await (await fetch(new URL(`/api/projects/${projectId(dir)}/runs/${id}`, url))).json();
-  assert.deepEqual(detail.replay, { suite: 'smoke', modes: { [A.name]: 'healed' }, accept: `toad suites accept ${id} --suite smoke`,
-    proposed: { [A.name]: { steps: [{ action: 'x', assertion: 'y' }], previous: null, diff: ['+ x => y'], updated: false } } });
+  assert.equal(detail.verdict, 'FAIL');
+  assert.equal(detail.results[0].result, 'FAIL');
+  assert.deepEqual(detail.replay, { suite: 'smoke', results: { [A.name]: 'FAIL' }, modes: { [A.name]: 'healed' }, accept: `toad suites accept ${id} --suite smoke`,
+    proposed: { [A.name]: { steps: [{ action: 'x', assertion: 'y' }], previous: null, diff: ['+ x => y'], updated: false, provenance, failure } } });
   const state = JSON.parse(readFileSync(join(run, 'state.json'), 'utf8'));
   writeFileSync(join(run, 'state.json'), JSON.stringify({ ...state, replay: { ...state.replay, accept: 'rm -rf / ; toad suites accept x --suite y' } }));
   const tampered = await (await fetch(new URL(`/api/projects/${projectId(dir)}/runs/${id}`, url))).json();

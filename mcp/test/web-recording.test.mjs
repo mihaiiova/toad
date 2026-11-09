@@ -10,6 +10,7 @@ import {
 } from '../../agent/tools/toad-web-recording.mjs';
 import { finalizeWebCandidates, intentHash, recordingStatus, scenarioId } from '../recordings.mjs';
 import { readProjectConfig, readSuites } from '../projects.mjs';
+import { writeRecordingContext } from '../recording-context.mjs';
 import { replayChoices } from '../replay.mjs';
 import { saveSuiteFromRun } from '../suite-recordings.mjs';
 import { browserInstalled } from '../setup.mjs';
@@ -271,7 +272,7 @@ function agent(t, { result = 'PASS', capture } = {}) {
   writeFileSync(join(dir, 'fake-pi.mjs'), `#!/usr/bin/env node
 import fs from 'node:fs'; import path from 'node:path';
 import { webReceipt } from ${JSON.stringify(RECORDING)};
-import { fakeWebEvidence } from ${JSON.stringify(new URL('./fake-web-evidence.mjs', import.meta.url).href)};
+import { fakeExecutionEvidence } from ${JSON.stringify(new URL('./fake-web-evidence.mjs', import.meta.url).href)};
 const pre = process.argv.slice(2);
 const prompt = pre[pre.indexOf('-p') + 1];
 fs.appendFileSync('requests', JSON.stringify({ request: prompt, recording: process.env.TOAD_RECORDING_ENABLED ?? null }) + '\\n');
@@ -282,7 +283,7 @@ if (capture && ${JSON.stringify(result)} === 'PASS') {
   fs.writeFileSync(path.join(dir, '01-structured.txt.recording.json'), JSON.stringify({ version: 1, scenarioName: ${JSON.stringify(S.name)}, payload: capture }));
 }
 const text = ['Verdict: ${result}', 'Results:', '- ${result} | ${S.name}'].join('\\n');
-fakeWebEvidence(process.env, text);
+fakeExecutionEvidence(process.env, text);
 console.log(JSON.stringify({ type: 'agent_end', messages: [{ role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text }] }] }));
 `, { mode: 0o755 });
   return dir;
@@ -343,7 +344,9 @@ test('a changed page fails the replay, and the agent decides: a regression, or a
   const healed = { steps: PAYLOAD.steps.map((s, i) => (i === 4 ? { ...s, contains: 'Hi Ada' } : s)) };
   const healer = agent(t, { capture: healed });
   const h = toad(t, ['--json', '--retries', '0'], { cwd: dir, env: fake.env, agentDir: healer });
-  assert.equal(h.code, 0, h.err);
+  assert.equal(h.code, 1, h.err);
+  assert.equal(h.report.verdict, 'FAIL');
+  assert.equal(h.report.suites[0].scenarios[0].result, 'FAIL');
   const [s] = h.report.suites[0].scenarios;
   assert.equal(s.mode, 'healed');
   assert.deepEqual(s.proposed.diff, [
@@ -369,18 +372,21 @@ test('URL override never lets agent fallback report PASS after following an old 
   const tester = agent(t, {result:'PASS'});
   const result = toad(t, ['--json','--retries','0','--url','http://staging.test'], {cwd:dir, env:fakeEnv(t, APP('Hi')).env, agentDir:tester});
   assert.notEqual(result.code, 0, 'never report a pass against the old target');
-  assert.equal(result.report.suites[0].scenarios[0].result, 'ERROR');
+  assert.equal(result.report.suites[0].scenarios[0].result, 'FAIL', 'the observed replay failure remains primary over blocked investigation');
+  assert.deepEqual(result.report.suites[0].scenarios[0].attempts, ['FAIL', 'ERROR']);
   assert.equal(result.report.suites[0].scenarios[0].mode, 'replay');
   assert.equal(requests(tester).length, 0, 'ambiguous fallback is blocked');
 });
 
-test('web replay choices: off-target recordings and credentialed suites go to the agent; an unreachable page is an ERROR', t => {
+test('web replay choices: target-stale and credentialed suites use the agent, unproven off-target data is refused; an unreachable page is an ERROR', t => {
   const dir = project(t);
   const folder = join(dir, '.toad');
   const [suite] = readSuites(folder);
   const config = readProjectConfig(folder);
   assert.equal(replayChoices(dir, suite, config, suite.scenarios)[0].mode, 'replay');
-  assert.match(replayChoices(dir, { ...suite, target: { url: `${BASE}/admin` } }, config, suite.scenarios)[0].reason, /no longer supported|not under/);
+  assert.throws(() => replayChoices(dir, { ...suite, target: { url: `${BASE}/admin` } }, config, suite.scenarios), /no matching original-target provenance/);
+  writeRecordingContext(dir, 'web', envelope(S, PAYLOAD), BASE);
+  assert.match(replayChoices(dir, { ...suite, target: { url: `${BASE}/admin` } }, config, suite.scenarios)[0].reason, /suite target changed/);
   assert.match(replayChoices(dir, { ...suite, credentials: { password: { env: 'PASSWORD' } } }, config, suite.scenarios)[0].reason, /no longer supported/);
 
   const down = project(t, { recording: { steps: [{ action: 'goto', url: 'http://app.test:1/form' }, PAYLOAD.steps[5]] } });

@@ -79,13 +79,17 @@ agents:
         cli:prepare-network-scenario,
         cli:run-command,
         cli:run-command-with-input,
-        cli:run-structured-command
+        cli:run-structured-command,
+        cli:attest-scenario
       ]
     skills: [ cli-test-scenario ]
     prompt: |
       You test one scenario of a command-line program, exactly as given, and
       report what you observed. Follow the cli-test-scenario skill. Never
       claim a step passed without evidence from a recorded command.
+      Bind every command to the exact scenarioName. For exploratory completion,
+      use cli_attest_scenario with {scenarioName,result,executionIds} referencing
+      completed operation IDs. Tool success alone never verifies a scenario.
   - name: api-tester
     description: Runs one HTTP API test scenario and reports pass or fail with
       every request recorded as a receipt
@@ -97,13 +101,17 @@ agents:
         cli:prepare-network-scenario,
         cli:run-command,
         cli:run-command-with-input,
-        cli:run-structured-api
+        cli:run-structured-api,
+        cli:attest-scenario
       ]
     skills: [ api-test-scenario ]
     prompt: |
       You test one scenario of an HTTP API, exactly as given, and report what
       you observed. Follow the api-test-scenario skill. Never claim a step
       passed without evidence from a recorded request.
+      Bind every command to the exact scenarioName. For exploratory completion,
+      use cli_attest_scenario with {scenarioName,result,executionIds} referencing
+      completed operation IDs. Tool success alone never verifies a scenario.
 skills:
   - name: web-test-scenario
     description: How to run one web test scenario with the Playwright MCP and record
@@ -290,7 +298,9 @@ integrations:
           "{receipts}",
           "{name}",
           "{scenario}",
-          "{command}"
+          "{command}",
+          --scenario-name,
+          "{scenarioName}"
         ]
       approve: false
     - name: run-command-with-input
@@ -305,8 +315,15 @@ integrations:
           "{name}",
           "{scenario}",
           "{command}",
-          "{input:file}"
+          "{input:file}",
+          --scenario-name,
+          "{scenarioName}"
         ]
+      approve: false
+    - name: attest-scenario
+      description: Explicit CLI/API tester-attested completion linked to executionIds; not a machine assertion
+      command: node
+      args: [ tools/toad-attest.mjs, "{request:file}" ]
       approve: false
     - name: run-structured-command
       description: Run one program with explicit arguments and assert its exit code

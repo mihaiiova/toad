@@ -5,6 +5,33 @@ description: "Run one HTTP API scenario and record every request as evidence"
 
 # Running an API test scenario
 
+When the request supplies a native owned attempt ID, fixture preparation has
+already run exactly once. Use that ID for every command; preparation tools
+return the same workspace rather than cloning again. Do not run before/after
+commands yourself, change workdir, remove the workspace, or retry the scenario
+internally. Native finalization owns teardown, including after cancellation.
+Collect failure receipts and any available diagnostics BEFORE returning (cleanup
+may destroy fixtures). Hook workspaces are disposable, not retained evidence.
+Hook-bearing scenarios cannot be recorded or replayed; normal structured
+assertions/attestations still apply. Web fixture commands are native sandbox
+commands only: they grant no shell tools or browser-cookie/reset scripts to
+the web tester. No persistent daemon or remote-state isolation is promised.
+
+
+In project runs, pass `scenarioName` copied exactly from the requested scenario
+on every command (not the workspace UUID). Structured CLI/API requests also take
+`scenarioName`; `capture.scenarioName` binds it when recording. For goal-only
+runs use an explicit bounded name. Commands return an execution ID. Normal shell
+commands and HTTP requests produce operation evidence, not machine scenario
+assertions. After comparing observations with every expectation, call
+`cli_attest_scenario` with `{scenarioName:EXACT_NAME,result:"PASS"|"FAIL"|"ERROR",
+executionIds:[ID,...]}` referencing 1-9 completed operations for that scenario.
+This is labeled tester-attested, not machine verified. Missing completion is
+ERROR, never PASS. Use structured assertions whenever appropriate, regardless
+of recording eligibility; do not weaken expectations to make them pass.
+A failed saved assertion stays FAIL after investigation or replacement capture.
+Do not use an attestation or report formatting to override a machine failure.
+
 1. Prepare a scenario with the network preparation tool, passing the API
    URL to use from inside the sandbox (the request says when it differs
    from the API's own URL). Any HTTP answer means the API is reachable;

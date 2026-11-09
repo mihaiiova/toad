@@ -5,6 +5,19 @@ description: "How to run one web test scenario with the Playwright MCP and recor
 
 # Running a web test scenario
 
+When the request supplies a native owned attempt ID, fixture preparation has
+already run exactly once. Use that ID for every command; preparation tools
+return the same workspace rather than cloning again. Do not run before/after
+commands yourself, change workdir, remove the workspace, or retry the scenario
+internally. Native finalization owns teardown, including after cancellation.
+Collect failure receipts and any available diagnostics BEFORE returning (cleanup
+may destroy fixtures). Hook workspaces are disposable, not retained evidence.
+Hook-bearing scenarios cannot be recorded or replayed; normal structured
+assertions/attestations still apply. Web fixture commands are native sandbox
+commands only: they grant no shell tools or browser-cookie/reset scripts to
+the web tester. No persistent daemon or remote-state isolation is promised.
+
+
 The handoff's target URL is authoritative. Resolve root-relative paths against
 that URL, never an older URL. For structured execution prefer `goto` paths
 such as `/pricing`; the tool binds them to the effective run target and refuses

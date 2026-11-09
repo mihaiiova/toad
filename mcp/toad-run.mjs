@@ -3,7 +3,7 @@
  *
  * Suites are .toad/suites/<name>.yaml. Each selected suite is one Toad run
  * (shown in `toad ui` like any other); scenarios that do not pass are run once
- * more, and one that passes on the retry is reported as flaky. The result is
+ * more; a failure remains authoritative even when a later attempt passes. The result is
  * an exit code, and optionally JUnit XML, a markdown summary and JSON.
  *
  * A CLI, API or web scenario with a valid saved recording is replayed first,
@@ -14,12 +14,13 @@
  * unless --update-recordings or `toad suites accept` asks. A replay that
  * cannot run is an ERROR, not a reason to call the agent. Exit codes:
  *
- *   0  every scenario passed (flaky ones included)
+ *   0  every scenario passed with complete evidence
  *   1  a scenario failed
  *   2  a run errored, was stopped, or its result is unknown
  *   3  Toad is not set up, or the suites, options or credentials are invalid
  */
 import { existsSync, lstatSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
+import { overallVerdict } from './results.mjs';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { prepareAgent, providerReady, providersOf, resolveAgent, resolveModels } from './agent.mjs';
 import { checkIgnore, ensureDirectory, readProjectConfig, readSuites, suiteHandoff } from './projects.mjs';
@@ -42,7 +43,7 @@ export const RUN_USAGE = `Usage: toad run [options]
   --env <NAME[,NAME]>         take these credentials from the environment, not .toad/.env
   --sandbox <kind>            auto, container, bwrap, or none (no isolation; only when asked)
   --max-cost <usd>            stop once Pi has recorded this much spend; the run is then an error
-  --allow-writes              allow suites declared \`writes: true\`
+  --allow-writes              allow suite or effective attempt \`writes: true\`
   --no-replay                 run every scenario with the agent, ignoring saved recordings
   --update-recordings         write the recordings the agent captured beside the suites,
                               replacing saved ones that differ (review, then commit)
@@ -176,22 +177,21 @@ export const slug = name => name.toLowerCase().replace(/[^a-z0-9]+/g, '-').repla
 export function outcomes(scenarios, result) {
   const ok = result?.status === 'ok';
   const reported = new Map((result?.scenarios ?? []).map(s => [s.name.trim().toLowerCase(), s.result]));
-  const fallback = ok && result?.verdict === 'PASS' && !reported.size ? 'PASS' : 'ERROR';
+  const fallback = 'ERROR';
   return scenarios.map(s => {
     const got = reported.get(s.name.trim().toLowerCase()) ?? fallback;
     return got === 'PASS' && !ok ? 'ERROR' : got;
   });
 }
 
-/** Combine a scenario's attempts: a pass after a failure is FLAKY. */
+/** Observed failures are historical facts, never healed by a later attempt. */
 export function finalResult(attempts) {
-  const last = attempts.at(-1);
-  return last === 'PASS' && attempts.length > 1 ? 'FLAKY' : last;
+  return attempts.includes('FAIL') ? 'FAIL' : attempts.includes('ERROR') ? 'ERROR' : attempts.includes('PASS') ? 'PASS' : 'ERROR';
 }
 
 export function exitCodeOf(results) {
   if (results.includes('FAIL')) return 1;
-  if (results.some(r => r !== 'PASS' && r !== 'FLAKY')) return 2;
+  if (results.some(r => r !== 'PASS')) return 2;
   return 0;
 }
 
@@ -199,8 +199,11 @@ const xml = text => String(text ?? '').replace(/[<>&"']/g, c => ({ '<': '&lt;', 
   // XML 1.0 has no form for most control characters.
   .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '');
 
+const authoritativeScenario = s => ({ ...s, result: finalResult([...(s.attempts ?? []), s.result]) });
+
 /** JUnit XML: one test suite per Toad suite, one test case per scenario. */
 export function junit(report) {
+  report = { ...report, suites: report.suites.map(s => ({ ...s, scenarios: s.scenarios.map(authoritativeScenario) })) };
   const count = (list, r) => list.filter(s => s.result === r).length;
   const all = report.suites.flatMap(s => s.scenarios);
   const lines = ['<?xml version="1.0" encoding="UTF-8"?>',
@@ -226,17 +229,18 @@ export function junit(report) {
 }
 
 /** How many scenarios each mode decided: replayed, by the agent, healed. */
-const modeText = modes => [`${modes.replay} replayed`, `${modes.agent} by the agent`, modes.healed && `${modes.healed} healed`].filter(Boolean).join(', ');
+const modeText = modes => [`${modes.replay} replayed`, `${modes.agent} by the agent`, modes.healed && `${modes.healed} investigated (original FAIL retained)`].filter(Boolean).join(', ');
 
 const duration = seconds => (seconds >= 60 ? `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s` : `${seconds.toFixed(0)}s`);
 
 /** A markdown summary for a pull request comment or a CI job summary. */
 export function summary(report) {
+  report = { ...report, suites: report.suites.map(s => ({ ...s, scenarios: s.scenarios.map(authoritativeScenario) })) };
   const all = report.suites.flatMap(s => s.scenarios.map(x => ({ ...x, suite: s.name })));
   const n = r => all.filter(s => s.result === r).length;
   const counts = [`${n('PASS')} passed`, n('FAIL') && `${n('FAIL')} failed`, n('FLAKY') && `${n('FLAKY')} flaky`, n('ERROR') && `${n('ERROR')} errored`].filter(Boolean).join(', ');
   const cell = text => String(text).replace(/\|/g, '\\|').replace(/\n/g, ' ');
-  const lines = [`## Toad: ${report.verdict}`, '',
+  const lines = [`## Toad: ${overallVerdict(report.verdict, all)}`, '',
     `${counts} · ${duration(report.seconds)}${report.cost !== undefined ? ` · $${report.cost.toFixed(4)}` : ''}`, ''];
   if (report.modes) lines.push(`Modes: ${modeText(report.modes)}${report.proposed ? ` · ${report.proposed} proposed recording${report.proposed === 1 ? '' : 's'}` : ''}`, '');
   if (all.length) {
@@ -278,16 +282,21 @@ export async function toadRun(options, { cwd = process.cwd(), env = process.env,
   } catch (error) { return fatal(error.message); }
   if (!suites.length) return fatal('no suites in .toad/suites/. Save one as .toad/suites/<name>.yaml; see .toad/suites/example.yaml.');
   if (!plan.length) return fatal(`no scenario matches${options.tags.length ? ` the tags ${options.tags.join(', ')}` : ''}`);
-  const writers = plan.filter(p => p.suite.writes).map(p => p.suite.name);
+  const writers = plan.filter(p => p.suite.writes || (p.suite.attempt ?? config[p.suite.kind]?.attempt)?.writes).map(p => p.suite.name);
   if (writers.length && !options.allowWrites) return fatal(`${writers.join(', ')} ${writers.length === 1 ? 'is' : 'are'} declared \`writes: true\` (it may create, change or delete data). Pass --allow-writes to run ${writers.length === 1 ? 'it' : 'them'}.`);
-  // Saved recordings that no longer match are reported, never fatal: the suite runs as written.
+  // Context-stale recordings warn; intrinsic definition defects fail before any launch.
   const { recordingWarnings } = await import('./suite-recordings.mjs');
   const warnings = recordingWarnings(project, plan.map(p => p.suite), config, suites);
   for (const warning of warnings) err(`toad run: warning: ${warning}\n`);
 
   // Each scenario replays its saved recording when it has a usable one; the rest go to the agent.
   const replay = await import('./replay.mjs');
-  const choices = new Map(plan.map(p => [p.suite.name, replay.replayChoices(project, p.suite, config, p.scenarios, { replay: options.replay !== false, url: options.url })]));
+  let choices;
+  try {
+    const { validateProjectHandoff } = await import('./run.mjs');
+    for (const p of plan) validateProjectHandoff(replay.runHandoff(suiteRunHandoff(p.suite, p.scenarios, options), config, project), { suite: p.suite });
+    choices = new Map(plan.map(p => [p.suite.name, replay.replayChoices(project, p.suite, config, p.scenarios, { replay: options.replay !== false, url: options.url })]));
+  } catch (error) { return fatal(error.message); }
   const agentFirst = plan.some(p => choices.get(p.suite.name).some(c => c.mode !== 'replay'));
 
   // A CI runner has no `toad setup`: prepare the agent on first use. A run
@@ -382,9 +391,9 @@ export async function toadRun(options, { cwd = process.cwd(), env = process.env,
           // Retries cover a replay that could not run; a failed assertion goes to the agent instead.
           for (let attempt = 0; attempt <= options.retries; attempt++) {
             if (replaySignal.aborted) { outcome = { result: 'ERROR', message: signal.aborted ? 'Not run: toad run was interrupted' : 'The replay run timed out' }; s.attempts.push('ERROR'); break; }
-            outcome = await replay.replayScenario(envelope, { workdir: handoff.target?.workdir, targetUrl: suite.kind === 'web' ? handoff.target?.url : undefined, receipts, name: `${String(attempt + 1).padStart(2, '0')}-replay`, env: replay.replayEnv(env, { receipts: receiptsRoot, sandbox: options.sandbox, image: handoff.target?.image, ...(suite.kind === 'web' ? { executionRun: replayRun, scenarioName: scenario.name, scenarios: handoff.request.scenarios.map(s => s.name) } : {}) }), signal: replaySignal });
-            if (outcome.result === 'FAIL') break;
+            outcome = await replay.replayScenario(envelope, { handoff, workdir: handoff.target?.workdir, targetUrl: suite.kind === 'web' ? handoff.target?.url : undefined, receipts, name: `${String(attempt + 1).padStart(2, '0')}-replay`, env: replay.replayEnv(env, { receipts: receiptsRoot, sandbox: options.sandbox, image: handoff.target?.image, executionRun: replayRun, scenarioName: scenario.name, scenarios: handoff.request.scenarios.map(s => s.name) }), signal: replaySignal });
             s.attempts.push(outcome.result);
+            if (outcome.result === 'FAIL') break;
             if (outcome.result === 'PASS') break;
           }
           results.push({ scenario, envelope, ...outcome });
@@ -463,7 +472,7 @@ export async function toadRun(options, { cwd = process.cwd(), env = process.env,
         if (got[i] === 'PASS' && result.run) {
           const c = choice.get(p.name);
           try {
-            const proposal = replay.proposedRecording(result.run, project, suite, config, p, c.saved ? { envelope: c.saved, steps: c.savedSteps } : null, { url: suite.kind === 'api' || suite.kind === 'web' ? options.url : undefined });
+            const proposal = replay.proposedRecording(result.run, project, suite, config, p, c.saved ? { envelope: c.saved, steps: c.savedSteps } : null, { url: suite.kind === 'api' || suite.kind === 'web' ? options.url : undefined, snapshot: c.snapshot, ...(s.replay === 'FAIL' ? { failureRun: replayRun } : {}) });
             if (proposal) proposals.set(p.name, { ...proposal, run: result.run });
           } catch { /* a proposal never changes the result */ }
         }
@@ -475,12 +484,12 @@ export async function toadRun(options, { cwd = process.cwd(), env = process.env,
     for (const s of entry.scenarios) {
       s.result = finalResult(s.attempts.length ? s.attempts : ['ERROR']);
       const proposal = proposals.get(s.name);
-      if (proposal && (s.result === 'PASS' || s.result === 'FLAKY')) {
+      if (proposal) {
         const c = choice.get(s.name);
         if (s.replay === 'FAIL') s.mode = 'healed';
-        s.proposed = { recording: rel(proposal.file), run: rel(proposal.run), steps: proposal.steps, previous: proposal.previous, diff: proposal.diff };
+        s.proposed = { recording: rel(proposal.file), run: rel(proposal.run), steps: proposal.steps, previous: proposal.previous, diff: proposal.diff, provenance: proposal.provenance, ...(proposal.failure ? { failure: proposal.failure } : {}) };
         if (options.updateRecordings) {
-          try { s.proposed.updated = rel(replay.writeSuiteRecording(project, suite.name, proposal.envelope)); }
+          try { s.proposed.updated = rel(replay.writeSuiteRecording(project, suite.name, proposal.envelope, { provenance: proposal.provenance })); }
           catch (error) { s.proposed.error = error.message; notes.push(`Could not update the recording of ${suite.name} › ${s.name}: ${error.message}`); }
         }
         if (!s.proposed.updated) {
@@ -493,13 +502,13 @@ export async function toadRun(options, { cwd = process.cwd(), env = process.env,
     // What each run decided, for `toad ui`.
     const uiModes = names => Object.fromEntries(names.map(name => [name, at(name).mode]));
     const uiProposed = run => Object.fromEntries(entry.scenarios.filter(s => s.proposed && proposals.get(s.name)?.run === run)
-      .map(s => [s.name, { steps: s.proposed.steps, previous: s.proposed.previous, diff: s.proposed.diff, ...(s.proposed.updated ? { updated: true } : {}) }]));
+      .map(s => [s.name, { steps: s.proposed.steps, previous: s.proposed.previous, diff: s.proposed.diff, provenance: s.proposed.provenance, ...(s.proposed.failure ? { failure: s.proposed.failure } : {}), ...(s.proposed.updated ? { updated: true } : {}) }]));
     if (replayRun) writeState(replayRun, { replay: { suite: suite.name, modes: Object.fromEntries(replays.map(s => [s.name, 'replay'])) } });
     for (const { run, names } of agentRuns) {
       if (!run) continue;
       const proposed = uiProposed(run);
       const accept = Object.values(proposed).some(p => !p.updated) ? `toad suites accept ${basename(run)} --suite ${suite.name}` : undefined;
-      writeState(run, { replay: { suite: suite.name, modes: uiModes(names), ...(replayRun ? { priorRun: basename(replayRun) } : {}), ...(Object.keys(proposed).length ? { proposed } : {}), ...(accept ? { accept } : {}) } });
+      writeState(run, { replay: { suite: suite.name, results: Object.fromEntries(names.map(name => [name, at(name).result])), modes: uiModes(names), ...(replayRun ? { priorRun: basename(replayRun) } : {}), ...(Object.keys(proposed).length ? { proposed } : {}), ...(accept ? { accept } : {}) } });
     }
   }
 

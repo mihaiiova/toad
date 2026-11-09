@@ -6,11 +6,12 @@
  * fill in whatever a handoff leaves out.
  */
 import { createHash, randomUUID } from 'node:crypto';
-import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, isAbsolute, join, resolve } from 'node:path';
-import { parse } from 'yaml';
+import { definitionDocument, definitionError, validateDefinition } from './definition-diagnostics.mjs';
 import { z } from 'zod';
 import { privateDir, toadDirs } from '../agent/tools/toad-dirs.mjs';
+import { attemptSchema } from './attempt-schema.mjs';
 import { WORKSPACE_PATH_PATTERN } from '../agent/tools/toad-sandbox.mjs';
 
 const listPath = () => join(toadDirs().config, 'projects.json');
@@ -114,9 +115,9 @@ const setup = z.array(z.string().min(1)).max(20).optional();
 export const pathEntries = z.array(z.string().regex(WORKSPACE_PATH_PATTERN)).max(20).optional();
 const modelRef = z.string().regex(/^[^/\s]+\/\S+$/, 'a provider/id model reference');
 const configSchema = z.object({
-  web: z.object({ url: z.string().url() }).strict().optional(),
-  cli: z.object({ workdir: z.string().min(1).optional(), program: z.string().min(1).optional(), image: z.string().min(1).optional(), setup, path: pathEntries }).strict().optional(),
-  api: z.object({ url: z.string().url().optional(), spec: z.string().min(1).optional(), workdir: z.string().min(1).optional(), image: z.string().min(1).optional(), setup, path: pathEntries }).strict().optional(),
+  web: z.object({ url: z.string().url().optional(), attempt: attemptSchema.optional() }).strict().optional(),
+  cli: z.object({ workdir: z.string().min(1).optional(), program: z.string().min(1).optional(), image: z.string().min(1).optional(), setup, path: pathEntries, attempt: attemptSchema.optional() }).strict().optional(),
+  api: z.object({ url: z.string().url().optional(), spec: z.string().min(1).optional(), workdir: z.string().min(1).optional(), image: z.string().min(1).optional(), setup, path: pathEntries, attempt: attemptSchema.optional() }).strict().optional(),
   models: z.object({ lead: modelRef.optional(), tester: modelRef.optional() }).strict().optional(),
   timeout_minutes: z.number().int().min(1).max(60).optional(),
 }).strict();
@@ -130,19 +131,19 @@ export function readRegular(path) {
   } finally { closeSync(fd); }
 }
 
-const issues = error => error.issues.map(i => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
+function readYamlDefinition(path) {
+  let text;
+  try { text = readRegular(path); }
+  catch { throw definitionError(null, { code: 'read' }, { file: path, remedy: 'Restore a regular definition file without symlinks, then retry.' }); }
+  return definitionDocument(text, path);
+}
 
 /** Read .toad/toad.yaml; an absent or all-comment file means no defaults. */
 export function readProjectConfig(folder) {
   const path = join(folder, 'toad.yaml');
-  if (!existsSync(path)) return {};
-  const text = readRegular(path);
-  let data;
-  try { data = parse(text) ?? {}; }
-  catch (error) { throw new Error(`.toad/toad.yaml is not valid YAML: ${error.message.split('\n')[0]}`); }
-  const result = configSchema.safeParse(data);
-  if (!result.success) throw new Error(`.toad/toad.yaml: ${issues(result.error)}`);
-  return result.data;
+  try { lstatSync(path); } catch (error) { if (error.code === 'ENOENT') return {}; throw error; }
+  const document = readYamlDefinition(path);
+  return validateDefinition(document, configSchema, path, document.data ?? {});
 }
 
 /** The .toad folder of a project path, which must be absolute and canonical. */
@@ -175,6 +176,9 @@ export function createIfMissing(path, text, mode = 0o600) {
   catch (error) { if (error.code !== 'EEXIST') throw error; }
 }
 
+/** Canonical basename for saved suites and their sibling metadata. */
+export const SUITE_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+
 const envName = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/);
 const tags = z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]*$/, 'letters, digits, ., _ or -')).max(20).optional();
 export const suiteSchema = z.object({
@@ -184,6 +188,7 @@ export const suiteSchema = z.object({
     url: z.string().url().optional(), workdir: z.string().min(1).optional(), program: z.string().min(1).optional(),
     spec: z.string().min(1).optional(), image: z.string().min(1).optional(), setup, path: pathEntries,
   }).strict().optional(),
+  attempt: attemptSchema.optional(),
   goal: z.string().min(1),
   tags,
   writes: z.boolean().optional(),
@@ -207,18 +212,15 @@ export function readSuites(folder) {
   try { files = readdirSync(dir, { withFileTypes: true }); } catch (error) { if (error.code === 'ENOENT') return []; throw error; }
   const suites = [];
   for (const entry of files.sort((a, b) => a.name.localeCompare(b.name))) {
-    const match = /^([A-Za-z0-9][A-Za-z0-9_.-]*)\.ya?ml$/.exec(entry.name);
-    if (!match) continue;
+    const match = /^(.+)\.ya?ml$/.exec(entry.name);
+    if (!match || !SUITE_NAME.test(match[1])) continue;
     const path = join(dir, entry.name);
-    let data;
-    try { data = parse(readRegular(path)); }
-    catch (error) { throw new Error(`.toad/suites/${entry.name} is not valid YAML: ${error.message.split('\n')[0]}`); }
+    const document = readYamlDefinition(path);
     // A file of comments only, such as the example, is not a suite.
-    if (data == null) continue;
-    const result = suiteSchema.safeParse(data);
-    if (!result.success) throw new Error(`.toad/suites/${entry.name}: ${issues(result.error)}`);
+    if (document.data == null) continue;
+    const data = validateDefinition(document, suiteSchema, path);
     if (suites.some(s => s.name === match[1])) throw new Error(`Two files define the suite ${match[1]}`);
-    suites.push({ name: match[1], path, ...result.data });
+    suites.push({ name: match[1], path, ...data });
   }
   return suites;
 }
@@ -230,6 +232,7 @@ export function suiteHandoff(suite, scenarios = suite.scenarios) {
   return {
     version: 1, kind: suite.kind, title: suite.title ?? suite.name,
     ...(suite.target ? { target: suite.target } : {}),
+    ...(suite.attempt ? { attempt: suite.attempt } : {}),
     request: { goal: suite.goal, scenarios: scenarios.map(({ name, steps, expected }) => ({ name, steps, expected })) },
     ...(suite.credentials ? { credentials: suite.credentials } : {}),
     ...(limitations.length ? { limitations } : {}),
@@ -243,8 +246,14 @@ export function suiteHandoff(suite, scenarios = suite.scenarios) {
  */
 export function withDefaults(handoff, config, project) {
   const defaults = config[handoff.kind] ?? {};
-  const target = { ...defaults, ...(handoff.target ?? {}) };
+  const { attempt: defaultAttempt, ...targetDefaults } = defaults;
+  const target = { ...targetDefaults, ...(handoff.target ?? {}) };
+  let attempt = handoff.attempt ?? defaultAttempt;
+  if (attempt) {
+    attempt = { ...attempt };
+    if (attempt.workdir && !isAbsolute(attempt.workdir)) attempt.workdir = resolve(project, attempt.workdir);
+  }
   if (handoff.kind === 'api') target.workdir ??= '.';
   if (handoff.kind !== 'web' && target.workdir && !isAbsolute(target.workdir)) target.workdir = resolve(project, target.workdir);
-  return { ...handoff, target };
+  return { ...handoff, target, ...(attempt ? { attempt } : {}) };
 }

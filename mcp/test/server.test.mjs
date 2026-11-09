@@ -33,7 +33,7 @@ function standIn(dir, body) {
   writeFileSync(join(dir, COMMANDS), '{}');
   writeFileSync(join(dir, 'fake-pi.mjs'), `#!/usr/bin/env node
 import fs from 'node:fs'; import path from 'node:path';
-import { fakeWebEvidence } from ${JSON.stringify(new URL('./fake-web-evidence.mjs', import.meta.url).href)};
+import { fakeExecutionEvidence } from ${JSON.stringify(new URL('./fake-web-evidence.mjs', import.meta.url).href)};
 const all = process.argv.slice(2);
 const prompt = all[all.indexOf('-p') + 1];
 const receipts = /^\\/skill:test receipts: (.+)$/m.exec(prompt)[1];
@@ -41,7 +41,7 @@ const request = prompt.slice(prompt.indexOf('\\n\\n') + 2);
 const args = ['request=' + request, 'receipts=' + receipts];
 const reply = (text, stopReason = 'stop') => {
   const behavior = fs.existsSync('behaviour.json') ? JSON.parse(fs.readFileSync('behaviour.json', 'utf8')) : {};
-  fakeWebEvidence(process.env, text, { skip: behavior.missingWebEvidence || behavior.noWebEvidence, machineFailure: behavior.machineFailure });
+  fakeExecutionEvidence(process.env, text, { skip: behavior.missingWebEvidence || behavior.noWebEvidence, machineFailure: behavior.machineFailure });
   console.log(JSON.stringify({ type: 'agent_end', messages: [{ role: 'assistant', content: [{ type: 'text', text }], stopReason }] }));
 };
 ${body}`, { mode: 0o755 });
@@ -79,7 +79,10 @@ const finish = () => {
   fs.appendFileSync('spans', JSON.stringify({ end: Date.now() }) + '\\n');
   if (b.code) { console.error(b.error ?? 'pi failed'); process.exit(b.code); }
   console.log(JSON.stringify({ type: 'agent_start' }));
-  reply(b.answer, b.stopReason);
+  const names = JSON.parse(process.env.TOAD_EXECUTION_SCENARIOS ?? '[]');
+  const answer = !/^Results:/m.test(b.answer ?? '') && /^Verdict: PASS$/m.test(b.answer ?? '') && names.length
+    ? b.answer + '\\nResults:\\n' + names.map(name => '- PASS | ' + name).join('\\n') : b.answer;
+  reply(answer, b.stopReason);
   process.exit(0);
 };
 process.on('SIGTERM', () => { fs.writeFileSync('cancelled', 'yes'); process.exit(143); });
@@ -269,7 +272,7 @@ test('API handoffs take defaults from toad.yaml, run in the CLI sandbox and map 
 
   writeFileSync(join(project, '.toad', 'toad.yaml'), '# no defaults\n');
   const missing = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff } });
-  assert.equal(missing.isError, true); assert.match(JSON.stringify(missing), /API handoff requires target\.url/);
+  assert.equal(missing.isError, true); assert.match(JSON.stringify(missing), /handoff: target\.url: Missing effective target URL.*api\.url/);
   const reserved = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff: { ...handoff, target: { url: 'https://api.example.test' }, credentials: { bad: { env: 'NODE_OPTIONS' } } } } });
   assert.equal(reserved.isError, true); assert.match(JSON.stringify(reserved), /reserved/);
 });
@@ -277,7 +280,7 @@ test('API handoffs take defaults from toad.yaml, run in the CLI sandbox and map 
 let sandboxAvailable = true;
 try { chooseSandbox(); } catch { sandboxAvailable = false; }
 test('MCP CLI run delivers only selected variables through the actual sandboxed recorder', { skip: !sandboxAvailable && 'no CLI sandbox on this machine' }, async t => {
-  const dir = agent(t, { status: 'ok', answer: 'unused', code: 0 });
+  const dir = agent(t, { status: 'ok', answer: 'unused', code: 0, noWebEvidence: true });
   const project = mkdtempSync(join(tmpdir(), 'toad-real-cli-'));
   t.after(() => rmSync(project, { recursive: true, force: true }));
   mkdirSync(join(dir, '.faur'));
@@ -287,9 +290,12 @@ test('MCP CLI run delivers only selected variables through the actual sandboxed 
 const prep = spawnSync(process.execPath, [${JSON.stringify(recorder)}, 'prepare', ${JSON.stringify(project)}], { encoding: 'utf8' });
 if (prep.status !== 0) { console.error(prep.stderr); process.exit(1); }
 const id = /Scenario ID: (.+)/.exec(prep.stdout)[1];
-const run = spawnSync(process.execPath, [${JSON.stringify(recorder)}, 'run', receipts, 'env', id, 'printf "%s %s %s" "$API_KEY" "\u0024{SHARED-unset}" "\u0024{OTHER-unset}"'], { encoding: 'utf8' });
+const run = spawnSync(process.execPath, [${JSON.stringify(recorder)}, 'run', receipts, 'env', id, 'printf "%s %s %s" "$API_KEY" "\u0024{SHARED-unset}" "\u0024{OTHER-unset}"', '--scenario-name', 'Checks selected credentials'], { encoding: 'utf8' });
 if (run.status !== 0) { console.error(run.stderr); process.exit(1); }
-reply('Verdict: PASS\\n' + run.stdout);
+const { readExecutionRecords, attestScenario } = await import(${JSON.stringify(new URL('../../agent/tools/toad-execution.mjs', import.meta.url).href)});
+const records = readExecutionRecords(process.env.TOAD_EXECUTION_RUN_DIR).records;
+attestScenario(process.env, { scenarioName: 'Checks selected credentials', result: 'PASS', executionIds: records.map(r => r.id) });
+reply('Verdict: PASS\\nResults:\\n- PASS | Checks selected credentials\\n' + run.stdout);
 `);
   const client = await connect(t, dir);
   await client.callTool({ name: 'setup_project', arguments: { project_path: project } });
@@ -389,55 +395,31 @@ test('selected secret is redacted from text results and report but absent from h
 
 const report = verdict => `# Test report\n\n## Verdict\n\n${verdict}\n\nThe home page loads.\n\n## Scenarios\n\n**home — ${verdict}**`;
 
-test('run_web_test runs the workflow and returns the verdict, report and screenshots', async t => {
-  const dir = agent(t, { status: 'ok', answer: report('FAIL'), code: 0 });
-  const client = await connect(t, dir);
+test('MCP exposes only project testing tools; retired shared-secret calls are rejected', async t => {
+  const client = await connect(t, agent(t, { status: 'ok', answer: 'Verdict: PASS', code: 0 }));
   const { tools } = await client.listTools();
-  assert.deepEqual(tools.map(tool => tool.name).sort(), ['get_toad_guide', 'run_cli_test', 'run_project_test', 'run_web_test', 'save_suite_from_run', 'setup_project']);
-  const result = await client.callTool({ name: 'run_web_test', arguments: {
-    url: 'https://staging.example.test', what: 'The home page',
-    scenarios: [{ name: 'home', steps: 'Open the page', expected: 'The heading says Welcome' }],
-    secrets: ['TEST_USER'], timeout_minutes: 5,
-  } });
-  assert.equal(result.isError, false, 'a failing test is a successful call');
-  assert.equal(result.structuredContent.verdict, 'FAIL');
-  assert.equal(result.structuredContent.status, 'ok');
-  assert.match(result.content[0].text, /^Verdict: FAIL/);
-  assert.match(result.content[0].text, /## Scenarios/);
-  const image = result.content.find(c => c.type === 'image');
-  assert.equal(image.mimeType, 'image/png');
-  assert.equal(result.structuredContent.screenshots.length, 1);
-  assert.ok(existsSync(result.structuredContent.screenshots[0]), 'absolute paths callers can open');
-
-  const args = JSON.parse(readFileSync(join(dir, 'args.json'), 'utf8'));
-  const request = args.find(a => a.startsWith('request=')).slice('request='.length);
-  for (const part of ['https://staging.example.test', 'The home page', 'home', 'Open the page', 'The heading says Welcome', 'TEST_USER']) assert.ok(request.includes(part), part);
-  assert.equal(args.find(a => a.startsWith('receipts=')), `receipts=${result.structuredContent.receipts}`);
-  assert.match(result.structuredContent.receipts, new RegExp(`^${dir}/data/receipts/[0-9a-f-]{36}$`), 'absolute, and a folder per call, so parallel calls never mix receipts');
+  assert.deepEqual(tools.map(tool => tool.name).sort(), ['get_toad_guide', 'run_project_test', 'save_suite_from_run', 'setup_project']);
+  for (const name of ['run_web_test', 'run_cli_test']) {
+    const result = await client.callTool({ name, arguments: {} });
+    assert.equal(result.isError, true);
+  }
 });
 
-test('run_cli_test describes the program and working folder, and returns every receipt', async t => {
-  const dir = agent(t, { status: 'ok', answer: 'Verdict: PASS\n\n## Scenarios', code: 0 });
-  const client = await connect(t, dir);
-  const result = await client.callTool({ name: 'run_cli_test', arguments: {
-    workdir: '/srv/project', program: 'node apps/cli/dist/bin.js', what: 'The help output',
-    scenarios: [{ name: 'help', steps: 'Run it with --help', expected: 'Exit code 0 and the commands are listed' }],
-    secrets: ['API_KEY'],
-  } });
-  assert.equal(result.isError, false);
-  assert.equal(result.structuredContent.verdict, 'PASS');
-  assert.deepEqual(result.structuredContent.files.map(f => f.split('/').at(-1)), ['scenario-01-home.png', 'scenario-02-help.txt']);
-  assert.equal(result.content.some(c => c.type === 'image'), false, 'CLI tests attach no images');
-  const args = JSON.parse(readFileSync(join(dir, 'args.json'), 'utf8'));
-  const request = args.find(a => a.startsWith('request=')).slice('request='.length);
-  for (const part of ['/srv/project', 'node apps/cli/dist/bin.js', 'The help output', 'Run it with --help', 'API_KEY']) assert.ok(request.includes(part), part);
-  assert.match(request, /command-line program/);
-});
+/** Exercise progress, cancellation and errors through the supported project contract. */
+async function callWeb(t, client, input, ...options) {
+  const project = mkdtempSync(join(tmpdir(), 'toad-mcp-project-'));
+  t.after(() => rmSync(project, { recursive: true, force: true }));
+  await client.callTool({ name: 'setup_project', arguments: { project_path: project } });
+  return client.callTool({ name: 'run_project_test', arguments: {
+    project_path: project, handoff: { version: 1, kind: 'web', target: { url: input.url }, request: { goal: input.what, ...(input.scenarios ? { scenarios: input.scenarios } : {}) } },
+    ...(input.screenshots ? { screenshots: input.screenshots } : {}), ...(input.timeout_minutes ? { timeout_minutes: input.timeout_minutes } : {}),
+  } }, ...options);
+}
 
 test('runs that could not complete are tool errors with the runner message', async t => {
   const dir = agent(t, { status: 'ok', answer: '', code: 0, delay: 30000 });
   const client = await connect(t, dir, { ...home(t), TOAD_TEST_TIMEOUT_MS: '300' });
-  const result = await client.callTool({ name: 'run_web_test', arguments: { url: 'https://staging.example.test', what: 'Checkout' } });
+  const result = await callWeb(t, client, { url: 'https://staging.example.test', what: 'Checkout' });
   assert.equal(result.isError, true);
   assert.equal(result.structuredContent.status, 'timeout');
   assert.match(result.content[0].text, /timeout/i);
@@ -454,7 +436,7 @@ test('the verdict is read whatever the heading level, and UNKNOWN when missing',
     ['The verdict depends on the scenarios; one passed.', 'UNKNOWN'],
   ]) {
     const client = await connect(t, agent(t, { status: 'ok', answer, code: 0 }));
-    const result = await client.callTool({ name: 'run_web_test', arguments: { url: 'https://staging.example.test', what: 'Home', screenshots: 'paths' } });
+    const result = await callWeb(t, client, { url: 'https://staging.example.test', what: 'Home', screenshots: 'paths' });
     assert.equal(result.structuredContent.verdict, verdict, answer);
   }
 });
@@ -462,7 +444,7 @@ test('the verdict is read whatever the heading level, and UNKNOWN when missing',
 test('screenshots can be returned as paths only', async t => {
   const dir = agent(t, { status: 'ok', answer: report('PASS'), code: 0 });
   const client = await connect(t, dir);
-  const result = await client.callTool({ name: 'run_web_test', arguments: { url: 'https://staging.example.test', what: 'Home', screenshots: 'paths' } });
+  const result = await callWeb(t, client, { url: 'https://staging.example.test', what: 'Home', screenshots: 'paths' });
   assert.equal(result.structuredContent.verdict, 'PASS');
   assert.equal(result.content.some(c => c.type === 'image'), false);
   assert.equal(result.structuredContent.screenshots.length, 1);
@@ -472,7 +454,7 @@ test('a cancelled call stops the workflow and its background tester', async t =>
   const dir = agent(t, { status: 'ok', answer: report('PASS'), code: 0, delay: 30000, background: true });
   const client = await connect(t, dir);
   const controller = new AbortController();
-  const call = client.callTool({ name: 'run_web_test', arguments: { url: 'https://staging.example.test', what: 'Home' } }, undefined, { signal: controller.signal });
+  const call = callWeb(t, client, { url: 'https://staging.example.test', what: 'Home' }, undefined, { signal: controller.signal });
   for (let i = 0; i < 100 && !existsSync(join(dir, 'pid')); i++) await new Promise(r => setTimeout(r, 20));
   controller.abort();
   await assert.rejects(call);
@@ -523,7 +505,7 @@ test('an invalid toad.yaml is reported before anything runs', async t => {
   assert.equal(typo.isError, true); assert.match(JSON.stringify(typo), /toad\.yaml/);
   writeFileSync(join(project, '.toad', 'toad.yaml'), 'web: [\n');
   const broken = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff } });
-  assert.equal(broken.isError, true); assert.match(JSON.stringify(broken), /not valid YAML/);
+  assert.equal(broken.isError, true); assert.match(JSON.stringify(broken), /Malformed definition syntax/);
   assert.equal(existsSync(join(dir, 'pid')), false);
 });
 
@@ -531,7 +513,7 @@ test('runs from separate servers share the machine-wide slot limit', async t => 
   const dir = agent(t, { status: 'ok', answer: 'Verdict: PASS', code: 0, delay: 300 });
   const env = { ...home(t), TOAD_MAX_CONCURRENT_RUNS: '1' };
   const clients = [await connect(t, dir, env), await connect(t, dir, env)];
-  const call = client => client.callTool({ name: 'run_web_test', arguments: { url: 'https://example.test', what: 'Home', screenshots: 'paths' } });
+  const call = client => callWeb(t, client, { url: 'https://example.test', what: 'Home', screenshots: 'paths' });
   const results = await Promise.all([call(clients[0]), call(clients[1]), call(clients[0])]);
   assert.ok(results.every(r => !r.isError));
   // With one slot, every run must end before the next one starts.
@@ -547,10 +529,10 @@ test('a call cancelled while waiting for a slot never starts', async t => {
   const dir = agent(t, { status: 'ok', answer: 'Verdict: PASS', code: 0, delay: 2000 });
   const env = { ...home(t), TOAD_MAX_CONCURRENT_RUNS: '1' };
   const client = await connect(t, dir, env);
-  const first = client.callTool({ name: 'run_web_test', arguments: { url: 'https://example.test', what: 'Home', screenshots: 'paths' } });
+  const first = callWeb(t, client, { url: 'https://example.test', what: 'Home', screenshots: 'paths' });
   for (let i = 0; i < 100 && !existsSync(join(dir, 'pid')); i++) await new Promise(r => setTimeout(r, 20));
   const controller = new AbortController();
-  const second = client.callTool({ name: 'run_web_test', arguments: { url: 'https://example.test', what: 'Other', screenshots: 'paths' } }, undefined, { signal: controller.signal });
+  const second = callWeb(t, client, { url: 'https://example.test', what: 'Other', screenshots: 'paths' }, undefined, { signal: controller.signal });
   await new Promise(r => setTimeout(r, 200));
   controller.abort(); await assert.rejects(second);
   assert.equal((await first).isError, false);
@@ -561,7 +543,7 @@ test('a call cancelled while waiting for a slot never starts', async t => {
 test('the agent runs its test skill in Pi JSON mode with its own Pi home, without ./run', async t => {
   const dir = agent(t, { status: 'ok', answer: 'Verdict: PASS', code: 0 });
   const client = await connect(t, dir);
-  await client.callTool({ name: 'run_web_test', arguments: { url: 'https://example.test', what: 'Home', screenshots: 'paths' } });
+  await callWeb(t, client, { url: 'https://example.test', what: 'Home', screenshots: 'paths' });
   const launch = JSON.parse(readFileSync(join(dir, 'launch.json'), 'utf8'));
   assert.equal(launch.piHome, join(dir, '.faur', 'pi-home'));
   assert.deepEqual(launch.all.slice(0, 4), ['--approve', '--no-context-files', '--mode', 'json']);
@@ -574,7 +556,7 @@ test('the agent runs its test skill in Pi JSON mode with its own Pi home, withou
 test('a run whose last message is a provider error is a tool error', async t => {
   const dir = agent(t, { status: 'ok', answer: '', code: 0, stopReason: 'error' });
   const client = await connect(t, dir);
-  const result = await client.callTool({ name: 'run_web_test', arguments: { url: 'https://example.test', what: 'Home', screenshots: 'paths' } });
+  const result = await callWeb(t, client, { url: 'https://example.test', what: 'Home', screenshots: 'paths' });
   assert.equal(result.isError, true);
   assert.equal(result.structuredContent.status, 'error');
 });
@@ -582,7 +564,7 @@ test('a run whose last message is a provider error is a tool error', async t => 
 test('a Pi failure is a tool error with its message', async t => {
   const dir = agent(t, { status: 'ok', answer: '', code: 1, error: 'No API key for deepseek' });
   const client = await connect(t, dir);
-  const result = await client.callTool({ name: 'run_web_test', arguments: { url: 'https://example.test', what: 'Home', screenshots: 'paths' } });
+  const result = await callWeb(t, client, { url: 'https://example.test', what: 'Home', screenshots: 'paths' });
   assert.equal(result.isError, true);
   assert.match(result.content[0].text, /No API key for deepseek/);
 });
@@ -591,7 +573,7 @@ test('an agent that is not set up is a clear error', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'toad-empty-agent-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const client = await connect(t, dir);
-  const result = await client.callTool({ name: 'run_web_test', arguments: { url: 'https://example.test', what: 'Home' } });
+  const result = await callWeb(t, client, { url: 'https://example.test', what: 'Home' });
   assert.equal(result.isError, true);
   assert.match(JSON.stringify(result), /toad setup/);
 });
@@ -599,7 +581,7 @@ test('an agent that is not set up is a clear error', async t => {
 /** Give a stand-in agent the real sandbox tools, as the prepared agent has. */
 function realTools(dir) {
   mkdirSync(join(dir, 'tools'), { recursive: true });
-  for (const name of ['toad-exec.mjs', 'toad-sandbox.mjs', 'toad-dirs.mjs', 'toad-structured-cli.mjs', 'toad-cli-recording.mjs', 'toad-api-recording.mjs', 'toad-structured-api.mjs']) writeFileSync(join(dir, 'tools', name), readFileSync(resolve(import.meta.dirname, '../../agent/tools', name)));
+  for (const name of ['toad-attest.mjs', 'toad-execution.mjs', 'toad-exec.mjs', 'toad-sandbox.mjs', 'toad-dirs.mjs', 'toad-structured-cli.mjs', 'toad-cli-recording.mjs', 'toad-api-recording.mjs', 'toad-structured-api.mjs']) writeFileSync(join(dir, 'tools', name), readFileSync(resolve(import.meta.dirname, '../../agent/tools', name)));
 }
 
 test('setup runs once in the sandbox and every scenario starts from its result', { skip: !sandboxAvailable && 'no CLI sandbox on this machine' }, async t => {
@@ -610,7 +592,7 @@ test('setup runs once in the sandbox and every scenario starts from its result',
   standIn(dir, `import { spawnSync } from 'node:child_process';
 const prep = spawnSync(process.execPath, ['tools/toad-exec.mjs', 'prepare', ${JSON.stringify(project)}], { encoding: 'utf8' });
 const id = /Scenario ID: (.+)/.exec(prep.stdout)[1];
-const run = spawnSync(process.execPath, ['tools/toad-exec.mjs', 'run', receipts + '/uses-the-tool', '01-tool', id, 'local-tool'], { encoding: 'utf8' });
+const run = spawnSync(process.execPath, ['tools/toad-exec.mjs', 'run', receipts + '/uses-the-tool', '01-tool', id, 'local-tool', '--scenario-name', 'Uses the tool'], { encoding: 'utf8' });
 const ok = /installed by setup/.test(run.stdout) && /Setup already ran/.test(request) && /not allowed/.test(request);
 reply('Verdict: ' + (ok ? 'PASS' : 'FAIL') + '\\nResults:\\n- ' + (ok ? 'PASS' : 'FAIL') + ' | Uses the tool\\n');
 `);
@@ -720,10 +702,10 @@ test('scenario results come back by name, and a contradicting verdict is correct
     request: { goal: 'Check', scenarios: ['A', 'B', 'C'].map(name => ({ name, steps: 's', expected: 'e' })) } };
   const result = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff } });
   assert.equal(result.structuredContent.verdict, 'ERROR');
-  assert.deepEqual(result.structuredContent.scenarios, [{ name: 'A', result: 'PASS' }, { name: 'B', result: 'ERROR' }, { name: 'C', result: 'ERROR', missing: true }]);
+  assert.deepEqual(result.structuredContent.scenarios, [{ name: 'A', result: 'ERROR' }, { name: 'B', result: 'ERROR' }, { name: 'C', result: 'ERROR', missing: true }]);
   const runs = join(project, '.toad', 'runs');
   const run = join(runs, readdirSync(runs)[0]);
-  assert.match(readFileSync(join(run, 'reports', 'report.md'), 'utf8'), /^# Toad run\n\nStatus: ok\n\nVerdict: ERROR\n\n\(The report said PASS/);
+  assert.match(readFileSync(join(run, 'reports', 'report.md'), 'utf8'), /^# Toad run\n\nStatus: evidence_error\n\nVerdict: ERROR\n\n\(The report said PASS/);
   assert.equal(JSON.parse(readFileSync(join(run, 'state.json'), 'utf8')).scenarios.length, 3);
 });
 
@@ -757,7 +739,7 @@ test('web handoffs reject setup commands', async t => {
   const handoff = { version: 1, kind: 'web', target: { url: 'http://localhost:3000', setup: ['npm ci'] }, request: { goal: 'Home' } };
   const result = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff } });
   assert.equal(result.isError, true);
-  assert.match(JSON.stringify(result.content), /cli and api handoffs/);
+  assert.match(JSON.stringify(result.content), /apply only to CLI\/API/);
 });
 
 test('project web runs cannot accept agent PASS when mandatory operation evidence is missing', async t => {
@@ -799,4 +781,43 @@ test('project web assertion failure cannot be overwritten by agent PASS', async 
   const result = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff } });
   assert.equal(result.structuredContent.verdict, 'FAIL');
   assert.equal(result.structuredContent.scenarios[0].result, 'FAIL');
+});
+
+
+test('project CLI API completion and machine failure override optimistic reports through real runner seams', async t => {
+  const http = createServer((q, r) => r.end('actual'));
+  await new Promise(done => http.listen(0, '127.0.0.1', done)); t.after(() => http.close());
+  const url = `http://127.0.0.1:${http.address().port}/`;
+  for (const kind of ['cli', 'api']) for (const mode of ['ordinary', 'attested', 'machine-failure']) {
+    const dir = agent(t, { noWebEvidence: true });
+    realTools(dir);
+    const project = mkdtempSync(join(tmpdir(), 'toad-real-evidence-'));
+    t.after(() => rmSync(project, { recursive: true, force: true }));
+    standIn(dir, `import { spawnSync } from 'node:child_process';
+const prep = spawnSync(process.execPath, ['tools/toad-exec.mjs', 'prepare', ${JSON.stringify(project)}], { encoding: 'utf8' });
+const id = /Scenario ID: (.+)/.exec(prep.stdout)[1];
+let result;
+if (${JSON.stringify(mode)} === 'machine-failure') {
+  const request = {scenario:id,receipts:receipts+'/check',name:'01-check',scenarioName:'Check',...${JSON.stringify(kind === 'api' ? {payload:{method:'GET',url,headers:{},body:'',expect:{status:200,body:{equals:'expected'}}}} : {program:'node',args:['-e','console.log("actual")'],expect:{exitCode:0,stdout:{equals:'expected\n'}}})}};
+  result = spawnSync(process.execPath, [${JSON.stringify(kind === 'api' ? 'tools/toad-structured-api.mjs' : 'tools/toad-structured-cli.mjs')}], {input:JSON.stringify(request),encoding:'utf8'});
+} else {
+  result = spawnSync(process.execPath, ['tools/toad-exec.mjs','run',receipts+'/check','01-check',id,'echo ready','--scenario-name','Check'], {encoding:'utf8',env:{...process.env,TOAD_EXEC_JSON:'1'}});
+  if (${JSON.stringify(mode)} === 'attested') {
+    const facts = JSON.parse(result.stdout);
+    const attestation = spawnSync(process.execPath,['tools/toad-attest.mjs'],{input:JSON.stringify({scenarioName:'Check',result:'PASS',executionIds:[facts.executionId]}),encoding:'utf8'});
+    if(attestation.status !== 0) throw Error(attestation.stdout);
+  }
+}
+reply('Verdict: PASS\\nResults:\\n- PASS | Check\\n');`);
+    const client = await connect(t, dir, { ...home(t), TOAD_CLI_SANDBOX: 'none' });
+    await client.callTool({ name: 'setup_project', arguments: { project_path: project } });
+    const handoff = { version: 1, kind, target: kind === 'api' ? { url } : { workdir: project, program: 'node' }, request: { goal: 'Check', scenarios: [{ name: 'Check', steps: 'Check output', expected: 'Expected output' }] } };
+    const result = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff } });
+    const expected = mode === 'ordinary' ? 'ERROR' : mode === 'attested' ? 'PASS' : 'FAIL';
+    assert.equal(result.structuredContent.verdict, expected, JSON.stringify(result));
+    assert.equal(result.structuredContent.scenarios[0].result, expected);
+    const state = JSON.parse(readFileSync(join(result.structuredContent.run, 'state.json'), 'utf8'));
+    assert.equal(state.verdict, expected);
+    assert.match(readFileSync(join(result.structuredContent.run, 'reports/report.md'), 'utf8'), new RegExp('Verdict: ' + expected));
+  }
 });

@@ -6,13 +6,25 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { constants, closeSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { z } from 'zod';
+import { definitionDocument, definitionError, validateDefinition } from './definition-diagnostics.mjs';
 import { cliChecks, cliCommand } from '../agent/tools/toad-cli-recording.mjs';
 import { RECORDING_CODECS } from './recording-codecs.mjs';
 import { apiCliPayload } from '../agent/tools/toad-api-recording.mjs';
 import { WEB_CODEC, validWebPayload, webReceipt } from '../agent/tools/toad-web-recording.mjs';
 
-const REASONS = new Set(['unsupported', 'incomplete', 'unsafe']);
+const REASONS = new Set(['unsupported', 'incomplete', 'unsafe', 'attempt-hooks']);
 const KINDS = new Set(['cli', 'api', 'web']);
+const sources = new WeakMap();
+
+/** Stable human-editable JSON, without changing the executable envelope version. */
+export function recordingText(value) {
+  const ordered = v => Array.isArray(v) ? v.map(ordered) : v && typeof v === 'object'
+    ? Object.fromEntries(Object.keys(v).sort().map(k => [k, ordered(v[k])])) : v;
+  return JSON.stringify(ordered(value), null, 2) + '\n';
+}
+export const recordingHash = value => createHash('sha256').update(recordingText(value)).digest('hex');
+
 const hash = value => createHash('sha256').update(JSON.stringify(value), 'utf8').digest('hex');
 
 /** Canonical JSON array, UTF-8 SHA-256, preserving steps and expected exactly. */
@@ -42,7 +54,7 @@ function publish(dir, id, value) {
   const path = join(dir, `${id}.json`);
   const temp = join(dir, `.tmp-${randomUUID()}`);
   try {
-    writeFileSync(temp, JSON.stringify(value) + '\n', { flag: 'wx', mode: 0o600 });
+    writeFileSync(temp, recordingText(value), { flag: 'wx', mode: 0o600 });
     linkSync(temp, path);
   } finally {
     try { unlinkSync(temp); } catch (error) { if (error.code !== 'ENOENT') throw error; }
@@ -54,8 +66,10 @@ function readJsonFile(path, limit) {
   try {
     fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     const stat = fstatSync(fd);
-    if (!stat.isFile() || stat.size > limit) throw new Error('Invalid recording metadata');
-    return JSON.parse(readFileSync(fd, 'utf8'));
+    if (!stat.isFile() || stat.size > limit) throw definitionError(null, { code: 'read' }, { file: path, remedy: 'Use a regular file within the recording size limit; re-record if needed.' });
+    const document = definitionDocument(readFileSync(fd, 'utf8'), path, { json: true });
+    if (document.data && typeof document.data === 'object') sources.set(document.data, { document, file: path });
+    return document.data;
   } finally { if (fd !== undefined) closeSync(fd); }
 }
 
@@ -106,13 +120,43 @@ function completedScenario(run, kind, scenario) {
  * ({ handoff, scenario }) and return its readable steps. The run-local store
  * and saved suites share it; neither trusts a file without it.
  */
+const envelopeSchema = z.object({
+  version: z.literal(1), status: z.literal('recorded'), kind: z.enum(['cli', 'api', 'web']),
+  scenarioId: z.string().regex(/^[a-f0-9]{64}$/), intentHash: z.string().regex(/^[a-f0-9]{64}$/),
+  codec: z.string(), payload: z.unknown(),
+}).strict();
+
+export function recordingError(value, path, code = 'unsafe', remedy = 'Edit supported literal fields only, or re-record this scenario.') {
+  const { document, file = 'recording' } = sources.get(value) ?? {};
+  return definitionError(document, { path, code }, { file, remedy });
+}
+
+/** Reuse source ranges retained by the bounded reader for non-envelope metadata too. */
+export function validateRecordingDefinition(value, schema, file = 'recording') {
+  const source = sources.get(value);
+  return validateDefinition(source?.document ?? { data: value }, schema, source?.file ?? file, value);
+}
+
+/** Intrinsic validation always precedes stale/context checks: stale cannot hide corrupt data. */
+export function validateRecording(value) {
+  const { document, file = 'recording' } = sources.get(value) ?? {};
+  validateDefinition(document ?? { data: value }, envelopeSchema, file, value);
+  if (Buffer.byteLength(JSON.stringify(value) + '\n', 'utf8') > 65536) throw recordingError(value, [], 'unsafe', 'Reduce the payload below 64 KiB or re-record.');
+  const codec = Object.hasOwn(RECORDING_CODECS, value.codec) && RECORDING_CODECS[value.codec];
+  if (!codec) throw recordingError(value, ['codec'], 'codec');
+  if (value.codec !== { cli: 'cli-command-v1', api: 'api-request-v1', web: WEB_CODEC }[value.kind]) throw recordingError(value, ['codec']);
+  const path = codec.issue(value.payload);
+  if (path) throw recordingError(value, ['payload', ...path]);
+  const steps = codec.describe(value.payload);
+  if (!Array.isArray(steps) || !steps.length || steps.length > 100 || steps.some(s => !s || Object.keys(s).sort().join(',') !== 'action,assertion' || typeof s.action !== 'string' || typeof s.assertion !== 'string' || !s.action || !s.assertion || s.action.length > 4096 || s.assertion.length > 4096)) throw recordingError(value, ['payload']);
+  return codec;
+}
+
 export function describeRecording(value, kind, scenario, context) {
-  if (!value || Object.keys(value).sort().join(',') !== 'codec,intentHash,kind,payload,scenarioId,status,version' || value.version !== 1 || value.status !== 'recorded' || value.kind !== kind || value.scenarioId !== scenarioId(scenario.name) || value.intentHash !== intentHash(kind, scenario)) throw new Error('Invalid recording envelope');
-  const codec = typeof value.codec === 'string' && Object.hasOwn(RECORDING_CODECS, value.codec) && RECORDING_CODECS[value.codec];
-  if (!codec || codec.validate(value.payload, context) !== true) throw new Error('Unsupported or unsafe recording');
-  const steps = codec.describe(value.payload, context);
-  if (!Array.isArray(steps) || !steps.length || steps.length > 100 || steps.some(s => !s || Object.keys(s).sort().join(',') !== 'action,assertion' || typeof s.action !== 'string' || typeof s.assertion !== 'string' || !s.action || !s.assertion || s.action.length > 4096 || s.assertion.length > 4096)) throw new Error('Invalid recording description');
-  return steps;
+  const codec = validateRecording(value);
+  if (value.kind !== kind || value.scenarioId !== scenarioId(scenario.name) || value.intentHash !== intentHash(kind, scenario)) throw recordingError(value, ['intentHash'], 'context', 'Restore matching suite intent or re-record; do not edit identity hashes.');
+  if (codec.validate(value.payload, context) !== true) throw recordingError(value, ['payload'], 'context', 'Review the current target and credential/setup restrictions, then re-record.');
+  return codec.describe(value.payload, context);
 }
 
 /** A recording, status or run metadata file: a small regular file, never through a symlink. */
@@ -125,8 +169,8 @@ function checkedRecording(run, kind, scenario, value) {
 /** Finalize only codecs compiled into Toad, after the persisted scenario passed. */
 export function finalizeRecording(run, kind, scenario, codec, payload) {
   const value = { version: 1, status: 'recorded', kind, scenarioId: scenarioId(scenario.name), intentHash: intentHash(kind, scenario), codec, payload };
-  const encoded = JSON.stringify(value);
-  if (Buffer.byteLength(encoded, 'utf8') + 1 > 65536) throw new Error('Recording is too large');
+  const encoded = recordingText(value);
+  if (Buffer.byteLength(encoded, 'utf8') > 65536) throw new Error('Recording is too large');
   // Validate the exact JSON representation to be persisted, not a mutable input.
   const copy = JSON.parse(encoded);
   checkedRecording(run, kind, scenario, copy);
@@ -135,7 +179,7 @@ export function finalizeRecording(run, kind, scenario, codec, payload) {
 
 /** Finalize only an unambiguous, single structured command for a passing scenario. */
 export function finalizeCliCandidates(run, handoff, scenarios) {
-  if (!['cli', 'api'].includes(handoff?.kind) || Object.keys(handoff.credentials ?? {}).length || handoff.allow_installs || handoff.target?.setup?.length || handoff.target?.path?.length) return;
+  if (handoff?.attempt || !['cli', 'api'].includes(handoff?.kind) || Object.keys(handoff.credentials ?? {}).length || handoff.allow_installs || handoff.target?.setup?.length || handoff.target?.path?.length) return;
   const requests = handoff.request?.scenarios ?? [];
   const slug = name => name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
   for (const scenario of requests) {
@@ -166,7 +210,7 @@ export function finalizeCliCandidates(run, handoff, scenarios) {
  * receipt must be exactly the one a PASS of this payload writes.
  */
 export function finalizeWebCandidates(run, handoff, scenarios) {
-  if (handoff?.kind !== 'web' || Object.keys(handoff.credentials ?? {}).length || typeof handoff.target?.url !== 'string') return;
+  if (handoff?.attempt || handoff?.kind !== 'web' || Object.keys(handoff.credentials ?? {}).length || typeof handoff.target?.url !== 'string') return;
   const requests = handoff.request?.scenarios ?? [];
   const slug = name => name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
   for (const scenario of requests) {

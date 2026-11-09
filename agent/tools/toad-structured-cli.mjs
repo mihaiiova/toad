@@ -19,7 +19,9 @@ try {
   if (input.length > 65536) throw new Error('request too large');
   request = JSON.parse(input.toString('utf8'));
   const capture = Object.hasOwn(request, 'capture');
-  if (!exactKeys(request, capture ? ['scenario', 'receipts', 'name', 'program', 'args', 'expect', 'capture'] : ['scenario', 'receipts', 'name', 'program', 'args', 'expect']) ||
+  const extra = Object.hasOwn(request, 'scenarioName') ? ['scenarioName'] : [];
+  if (!exactKeys(request, ['scenario', 'receipts', 'name', 'program', 'args', 'expect', ...(capture ? ['capture'] : []), ...extra]) ||
+      (extra.length && (!string(request.scenarioName) || !request.scenarioName.trim() || request.scenarioName.length > 500)) ||
       (capture && (!exactKeys(request.capture, ['scenarioName', 'complete']) || !string(request.capture.scenarioName) || !request.capture.scenarioName.trim() || request.capture.complete !== true)) ||
       !string(request.scenario) || !request.scenario || !string(request.receipts) || !request.receipts ||
       !string(request.name) || !request.name || !string(request.program) || !request.program || request.program.startsWith('-') ||
@@ -60,12 +62,14 @@ if (request && !process.exitCode) {
     const command = cliCommand({ program: request.program, args: request.args });
     const result = spawnSync(process.execPath, [runner, 'run', request.receipts, request.name, request.scenario, command], {
       encoding: 'utf8', maxBuffer: 8 * 1024 * 1024,
-      env: { ...process.env, TOAD_CLI_SECRETS_FILE: secrets, TOAD_EXEC_JSON: '1' },
+      env: { ...process.env, TOAD_CLI_SECRETS_FILE: secrets, TOAD_EXEC_JSON: '1', TOAD_EXECUTION_KIND: process.env.TOAD_EXECUTION_KIND === 'api' ? 'api' : 'cli', TOAD_EXECUTION_SCENARIO_NAME: request.scenarioName ?? request.capture?.scenarioName ?? process.env.TOAD_EXECUTION_SCENARIO_NAME, TOAD_EXECUTION_EXPECT: process.env.TOAD_EXECUTION_KIND === 'api' ? process.env.TOAD_EXECUTION_EXPECT : JSON.stringify(request.expect) },
     });
     if (result.error || result.signal || ![0, 1, 2].includes(result.status)) throw new Error('scenario runner failed');
     let run;
     try { run = JSON.parse(result.stdout); } catch { throw new Error('invalid scenario runner result'); }
-    if (result.status !== 0 || run.infrastructureError || run.timedOut || run.interrupted || run.outputTruncated || !Number.isInteger(run.exitCode) || typeof run.stdout !== 'string' || typeof run.receipt !== 'string') {
+    if (run.executionOutcome === 'FAIL') {
+      reply({ status: 'fail', ...(request.capture ? { captured: false } : {}), checks: cliChecks(request, run.exitCode, run.stdout), receipt: run.receipt, executionId: run.executionId, actual: { exitCode: run.exitCode, stdout: run.stdout } }, 1);
+    } else if (result.status !== 0 || run.executionOutcome === 'ERROR' || run.evidenceError || run.infrastructureError || run.timedOut || run.interrupted || run.outputTruncated || !Number.isInteger(run.exitCode) || typeof run.stdout !== 'string' || typeof run.receipt !== 'string') {
       reply({ status: 'error', error: 'scenario runner did not complete reliably', ...(typeof run.receipt === 'string' ? { receipt: run.receipt } : {}) }, 2);
     } else {
     const { exitCode, stdout } = cliChecks(request, run.exitCode, run.stdout);
@@ -79,7 +83,7 @@ if (request && !process.exitCode) {
         captured = true;
       } catch { /* Capture is optional and must not change the test verdict. */ }
     }
-    reply({ status: exitCode && stdout ? 'pass' : 'fail', checks: { exitCode, stdout }, actual: { exitCode: run.exitCode, stdout: run.stdout }, receipt: run.receipt, ...(request.capture ? { captured } : {}) }, exitCode && stdout ? 0 : 1);
+    reply({ status: exitCode && stdout ? 'pass' : 'fail', checks: { exitCode, stdout }, actual: { exitCode: run.exitCode, stdout: run.stdout }, receipt: run.receipt, executionId: run.executionId, ...(request.capture ? { captured } : {}) }, exitCode && stdout ? 0 : 1);
     }
   } catch (error) {
     reply({ status: 'error', error: error.message }, 2);

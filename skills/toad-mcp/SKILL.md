@@ -49,9 +49,52 @@ When the user wants tests to run again later, for example on every deploy or in 
 
 - Never ask for or transmit secret values in chat, handoffs, scenarios, commands, logs, or reports. For supported web project tests, ask the user to put test-only values in the project's `.toad/.env` themselves, then reference names only, for example `"credentials": { "email": { "env": "TOAD_TEST_EMAIL" }, "password": { "env": "TOAD_TEST_PASSWORD" } }`. Names must be valid environment variable identifiers. The file uses `NAME=value` lines, not shell expansion. Never read it just to verify values; let the tool validate references.
 - Project CLI and API tests also accept credential references. Only the named variables are passed to the sandboxed command; use `$NAME` in commands, never a value. Certain environment names that can alter process startup are reserved and rejected. A CLI program can transmit secrets over the shared network or write them to persistent artifacts, so use trusted programs and restricted, budget-limited test keys.
-- Legacy `run_web_test` and `run_cli_test` use Toad's shared `agent/.faur/test-secrets.env`, not the project's store. The shared store may be exposed to the test process beyond the names requested; never use this as a silent substitute for project-owned or least-privilege credentials. Use it only with informed authorization and an accepted trust boundary.
 - Project web credentials are resolved by name into a temporary per-run file, not a per-tool security boundary. Toad's agents, tools, subprocesses and same-user processes may access them. Screenshots, output, files and transformed values may expose secrets; redaction is best effort. Run only trusted workloads, and tell the user that artifacts can contain sensitive information. Cleanup may be incomplete after cancellation or failure; follow the server's reported cleanup guidance and do not remove files while processes might still use them.
 
 ## Execute and report
 
 Call the discovered tool with the complete handoff. Toad runs can take minutes; respect progress and timeout behavior. Do not start duplicate runs merely because the first is slow. A failing test verdict is different from an execution or infrastructure error: inspect both `status` and `verdict`. `scenarios` gives each scenario's result by the name you gave it, and `cost` what Pi recorded for the run in US dollars; a scenario missing from the report is ERROR with `missing: true`. To rerun only what failed, send the same handoff with just those scenarios. Report PASS, FAIL, ERROR, or unknown accurately, including scenario-level evidence, actual versus expected behavior, and paths to reports and receipts. If the run is blocked, cancelled, times out, or has missing evidence, say what was not verified. Avoid reproducing secret-bearing output. Investigate failures before attributing them to the application; do not silently change the target or weaken scenarios to make a run pass.
+
+## Evidence and recording updates
+
+Use only project testing tools. Retired shared-store tools have no forwarding
+alias; migrate to setup_project + run_project_test and selected project .env
+references (see README's upgrade section). A saved assertion FAIL remains FAIL
+in JSON, JUnit, summary and exit status even if investigation passes or proposes
+a replacement. Accepting/updating recordings changes only future runs, never the
+failed run. Missing required evidence or completion is ERROR after a would-be
+pass; optional diagnostics warn. CLI/API exploratory conclusions are explicitly
+tester-attested against operation evidence, not machine-verified by command exit.
+
+
+### Explicit attempt fixtures
+
+Project handoffs and saved suites may set `attempt` with sequential `before`
+and `after` POSIX shell command arrays and an explicit `writes` boolean. Kind
+defaults (`cli.attempt`, `api.attempt`, `web.attempt`) use the same object; a
+handoff/suite replaces it as a whole. Require named scenarios. CLI/API hooks
+share the tested cloned workspace; web requires an explicit trusted
+`attempt.workdir`. Web gains no shell/browser-script tool. `target.setup` still
+runs once per run, not per attempt. Never generate destructive hooks implicitly.
+
+`credentials: [ENV_NAME]` selects a subset of the handoff's application credential
+references for hooks (empty by default), not ambient environment or provider keys.
+`timeout_seconds` bounds each attempt (default 120, max 900);
+`cleanup_timeout_seconds` gives all after commands a separate budget (default
+30, max 120) even on cancellation. The overall run timeout/cost limit is shared.
+
+Warn users: these are trusted shell commands; declarations are not enforcement.
+Sandbox networking can modify external services; workspace cloning does not reset
+remote data. Declare remote mutations with `attempt.writes: true`; CLI suites
+require `--allow-writes` even if suite `writes` is false. Direct MCP submission
+of the explicit declaration acknowledges the user-supplied commands. Nothing
+discovers/provisions/resets a database automatically. Teardown is best effort
+under a separate deadline, not guaranteed after SIGKILL, host death or power loss.
+
+Native ownership runs before commands, tested operations, durable failure facts
+and available diagnostics, then after commands and workspace disposal. A before
+error skips product work but attempts teardown after partial preparation; an
+after error makes would-be PASS ERROR without erasing observed product FAIL.
+If no owned sandbox is created, cleanup is unavailable, never improvised on the
+host. Hook-bearing suites are agent-only and unrecordable, including when old
+saved recordings exist. Keep receipt/evidence files outside disposable fixtures.

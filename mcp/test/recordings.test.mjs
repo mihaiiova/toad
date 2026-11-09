@@ -18,6 +18,8 @@ function copyStore(t) {
   const dir = runDir(t);
   mkdirSync(join(dir, 'agent/tools'), { recursive: true });
   mkdirSync(join(dir, 'mcp'));
+  symlinkSync(resolve(import.meta.dirname, '../../node_modules'), join(dir, 'node_modules'), 'dir');
+  copyFileSync(resolve(import.meta.dirname, '../definition-diagnostics.mjs'), join(dir, 'mcp/definition-diagnostics.mjs'));
   copyFileSync(resolve(import.meta.dirname, '../../agent/tools/toad-cli-recording.mjs'), join(dir, 'agent/tools/toad-cli-recording.mjs'));
   copyFileSync(resolve(import.meta.dirname, '../../agent/tools/toad-api-recording.mjs'), join(dir, 'agent/tools/toad-api-recording.mjs'));
   copyFileSync(resolve(import.meta.dirname, '../../agent/tools/toad-web-recording.mjs'), join(dir, 'agent/tools/toad-web-recording.mjs'));
@@ -28,9 +30,10 @@ function copyStore(t) {
 
 async function fixtureStore(t) {
   const dir = copyStore(t);
-  // Test-only codec accepts a closed set of actions/assertions, no arbitrary
-  // strings or credentials. It is never registered in the production module.
-  writeFileSync(join(dir, 'mcp/recording-codecs.mjs'), `export const RECORDING_CODECS = Object.freeze({ 'fixture-v1': Object.freeze({
+  // Override a copied built-in slot with a test-only codec implementation.
+  // No production registration or alternate runtime executor is introduced.
+  writeFileSync(join(dir, 'mcp/recording-codecs.mjs'), `export const RECORDING_CODECS = Object.freeze({ 'cli-command-v1': Object.freeze({
+    issue() { return null; },
     validate(payload, context) {
       return !Object.keys(context.handoff.credentials ?? {}).length &&
         payload && Object.keys(payload).sort().join(',') === 'action,assertion' &&
@@ -49,7 +52,7 @@ function completed(run, kind = 'cli', s = scenario, result = 'PASS') {
 test('unknown codecs are refused and never finalize a recording', t => {
   const run = runDir(t);
   completed(run);
-  assert.throws(() => finalizeRecording(run, 'cli', scenario, 'fixture-v1', { action: 'inspect', assertion: 'success' }), /Unsupported/);
+  assert.throws(() => finalizeRecording(run, 'cli', scenario, 'fixture-v1', { action: 'inspect', assertion: 'success' }), /Unknown recording codec|Invalid or missing field/);
   assert.deepEqual(recordingStatus(run, 'cli', scenario), { status: 'not-captured' });
 });
 
@@ -61,14 +64,14 @@ test('the built-in CLI codec records only a credential-free, completed, matching
   assert.deepEqual(recordingStatus(run, 'cli', scenario), { status: 'recorded', steps: [{ action: './check', assertion: 'exit 0; stdout {"equals":"ready\\n"}' }] });
   // A payload the codec rejects never becomes a recording.
   const rejected = runDir(t); completed(rejected);
-  assert.throws(() => finalizeRecording(rejected, 'cli', scenario, 'cli-command-v1', { ...payload, program: '-c' }), /Unsupported/);
+  assert.throws(() => finalizeRecording(rejected, 'cli', scenario, 'cli-command-v1', { ...payload, program: '-c' }), /Unsupported or unsafe recording data/);
   assert.deepEqual(recordingStatus(rejected, 'cli', scenario), { status: 'not-captured' });
   // A handoff with credentials, installs, setup or PATH is outside the codec.
   for (const extra of [{ credentials: { token: { env: 'TOKEN' } } }, { allow_installs: true }, { target: { setup: ['npm ci'] } }, { target: { path: ['node_modules/.bin'] } }]) {
     const blocked = runDir(t);
     writeFileSync(join(blocked, 'handoff.yaml'), JSON.stringify({ kind: 'cli', ...extra, request: { scenarios: [scenario] } }));
     writeFileSync(join(blocked, 'state.json'), JSON.stringify({ state: 'finished', status: 'ok', scenarios: [{ name: scenario.name, result: 'PASS' }] }));
-    assert.throws(() => finalizeRecording(blocked, 'cli', scenario, 'cli-command-v1', payload), /Unsupported or unsafe/);
+    assert.throws(() => finalizeRecording(blocked, 'cli', scenario, 'cli-command-v1', payload), /no longer matches the suite context/);
     assert.deepEqual(recordingStatus(blocked, 'cli', scenario), { status: 'not-captured' });
   }
 });
@@ -133,23 +136,23 @@ test('trusted codec finalizes only a completed matching PASS and renders validat
   const store = await fixtureStore(t), run = runDir(t);
   const payload = { action: 'inspect', assertion: 'success' };
   completed(run, 'cli', scenario, 'FAIL');
-  assert.throws(() => store.finalizeRecording(run, 'cli', scenario, 'fixture-v1', payload), /PASS/);
+  assert.throws(() => store.finalizeRecording(run, 'cli', scenario, 'cli-command-v1', payload), /PASS/);
   completed(run);
   writeFileSync(join(run, 'state.json'), JSON.stringify({ state: 'finished', status: 'ok', cleanup: 'incomplete', scenarios: [{ name: scenario.name, result: 'PASS' }] }));
-  assert.throws(() => store.finalizeRecording(run, 'cli', scenario, 'fixture-v1', payload), /complete/);
+  assert.throws(() => store.finalizeRecording(run, 'cli', scenario, 'cli-command-v1', payload), /complete/);
   writeFileSync(join(run, 'state.json'), JSON.stringify({ state: 'finished', status: 'ok', scenarios: [{ name: scenario.name, result: 'PASS' }, { name: scenario.name, result: 'PASS' }] }));
-  assert.throws(() => store.finalizeRecording(run, 'cli', scenario, 'fixture-v1', payload), /PASS/);
+  assert.throws(() => store.finalizeRecording(run, 'cli', scenario, 'cli-command-v1', payload), /PASS/);
   completed(run);
-  assert.throws(() => store.finalizeRecording(run, 'cli', { ...scenario, steps: 'different' }, 'fixture-v1', payload), /PASS/);
-  assert.throws(() => store.finalizeRecording(run, 'cli', scenario, 'missing', payload), /Unsupported/);
-  assert.throws(() => store.finalizeRecording(run, 'cli', scenario, ['fixture-v1'], payload), /Unsupported/);
-  assert.throws(() => store.finalizeRecording(run, 'cli', scenario, 'fixture-v1', { ...payload, secret: 'sensitive' }), /unsafe/);
+  assert.throws(() => store.finalizeRecording(run, 'cli', { ...scenario, steps: 'different' }, 'cli-command-v1', payload), /PASS/);
+  assert.throws(() => store.finalizeRecording(run, 'cli', scenario, 'missing', payload), /Unknown recording codec|Invalid or missing field/);
+  assert.throws(() => store.finalizeRecording(run, 'cli', scenario, ['cli-command-v1'], payload), /Unknown recording codec|Invalid or missing field/);
+  assert.throws(() => store.finalizeRecording(run, 'cli', scenario, 'cli-command-v1', { ...payload, secret: 'sensitive' }), /no longer matches the suite context/);
   writeFileSync(join(run, 'handoff.yaml'), JSON.stringify({ kind: 'cli', credentials: { token: { env: 'TOKEN' } }, request: { scenarios: [scenario] } }));
-  assert.throws(() => store.finalizeRecording(run, 'cli', scenario, 'fixture-v1', payload), /unsafe/);
+  assert.throws(() => store.finalizeRecording(run, 'cli', scenario, 'cli-command-v1', payload), /no longer matches the suite context/);
   completed(run);
-  store.finalizeRecording(run, 'cli', scenario, 'fixture-v1', payload);
+  store.finalizeRecording(run, 'cli', scenario, 'cli-command-v1', payload);
   assert.deepEqual(store.recordingStatus(run, 'cli', scenario), { status: 'recorded', steps: [{ action: 'inspect', assertion: 'success' }] });
-  assert.throws(() => store.finalizeRecording(run, 'cli', scenario, 'fixture-v1', payload), /EEXIST/);
+  assert.throws(() => store.finalizeRecording(run, 'cli', scenario, 'cli-command-v1', payload), /EEXIST/);
   assert.deepEqual(store.recordingStatus(run, 'cli', { ...scenario, expected: 'changed' }), { status: 'not-captured' });
   completed(run, 'cli', scenario, 'FAIL');
   assert.deepEqual(store.recordingStatus(run, 'cli', scenario), { status: 'not-captured' });
@@ -160,9 +163,9 @@ test('invalid, interrupted, unsafe or tampered recording envelopes never display
   completed(run);
   const dir = join(run, 'recording'); mkdirSync(dir);
   const path = join(dir, `${scenarioId(scenario.name)}.json`);
-  const envelope = { version: 1, status: 'recorded', kind: 'cli', scenarioId: scenarioId(scenario.name), intentHash: intentHash('cli', scenario), codec: 'fixture-v1', payload: { action: 'inspect', assertion: 'success' } };
+  const envelope = { version: 1, status: 'recorded', kind: 'cli', scenarioId: scenarioId(scenario.name), intentHash: intentHash('cli', scenario), codec: 'cli-command-v1', payload: { action: 'inspect', assertion: 'success' } };
   for (const bad of [
-    { ...envelope, version: 2 }, { ...envelope, codec: 'unknown' }, { ...envelope, codec: ['fixture-v1'] },
+    { ...envelope, version: 2 }, { ...envelope, codec: 'unknown' }, { ...envelope, codec: ['cli-command-v1'] },
     { ...envelope, payload: { action: 'secret=value', assertion: 'success' } },
     { ...envelope, extra: 'secret' }, { ...envelope, intentHash: 'stale' },
   ]) {
@@ -176,10 +179,10 @@ test('invalid, interrupted, unsafe or tampered recording envelopes never display
 
 test('concurrent finalizers publish only one complete validated envelope', async t => {
   const dir = copyStore(t), run = runDir(t);
-  writeFileSync(join(dir, 'mcp/recording-codecs.mjs'), `export const RECORDING_CODECS = Object.freeze({ 'fixture-v1': { validate: p => p === 'safe', describe: () => [{action:'inspect', assertion:'success'}] } });`);
+  writeFileSync(join(dir, 'mcp/recording-codecs.mjs'), `export const RECORDING_CODECS = Object.freeze({ 'cli-command-v1': { issue: () => null, validate: p => p === 'safe', describe: () => [{action:'inspect', assertion:'success'}] } });`);
   completed(run);
   const module = new URL(`file://${join(dir, 'mcp/recordings.mjs')}`).href;
-  const script = `import { finalizeRecording } from ${JSON.stringify(module)}; try { finalizeRecording(process.argv[1], 'cli', ${JSON.stringify(scenario)}, 'fixture-v1', 'safe'); } catch (e) { if (e.code !== 'EEXIST') throw e; }`;
+  const script = `import { finalizeRecording } from ${JSON.stringify(module)}; try { finalizeRecording(process.argv[1], 'cli', ${JSON.stringify(scenario)}, 'cli-command-v1', 'safe'); } catch (e) { if (e.code !== 'EEXIST') throw e; }`;
   const child = () => new Promise((resolve, reject) => {
     const p = spawn(process.execPath, ['--input-type=module', '-e', script, run]);
     let stderr = ''; p.stderr.on('data', x => { stderr += x; });

@@ -14,7 +14,7 @@ import { dirname, join, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { listProjects } from './projects.mjs';
 import { VERSION } from './agent.mjs';
-import { resultsOf, scenarioResults } from './results.mjs';
+import { overallVerdict, resultsOf, scenarioResults } from './results.mjs';
 import { recordingStatus } from './recordings.mjs';
 import { suiteOverview } from './suite-recordings.mjs';
 import { readExecutionRecords } from '../agent/tools/toad-execution.mjs';
@@ -103,10 +103,16 @@ function replayOf(value) {
   for (const [name, p] of Object.entries(value.proposed ?? {})) {
     if (!p || typeof p !== 'object') continue;
     proposed[name] = { steps: steps(p.steps) ?? [], previous: steps(p.previous), diff: Array.isArray(p.diff) ? p.diff.filter(l => str(l, 9000)).slice(0, 200) : [], updated: p.updated === true };
+    const hash = v => typeof v === 'string' && /^[a-f0-9]{64}$/.test(v);
+    const v = p.provenance;
+    if (v?.version === 1 && ['scenarioId', 'intentHash', 'contextHash', 'proposedHash'].every(k => hash(v[k])) && (v.savedHash === null || hash(v.savedHash))) proposed[name].provenance = Object.fromEntries(['version', 'scenarioId', 'intentHash', 'contextHash', 'savedHash', 'proposedHash'].map(k => [k, v[k]]));
+    const f = p.failure;
+    if (typeof f?.run === 'string' && /^[A-Za-z0-9_.-]{1,200}$/.test(f.run) && Array.isArray(f.executionIds) && f.executionIds.length <= 100 && f.executionIds.every(id => typeof id === 'string' && /^[a-f0-9-]{36}$/.test(id)) && Array.isArray(f.assertions) && f.assertions.length <= 100 && f.assertions.every(a => str(a))) proposed[name].failure = { run: f.run, executionIds: f.executionIds, assertions: f.assertions };
   }
+  const results = Object.fromEntries(Object.entries(value.results ?? {}).filter(([name, result]) => str(name, 500) && ['PASS', 'FAIL', 'ERROR'].includes(result)));
   const accept = str(value.accept, 300);
   const prior = str(value.priorRun, 200);
-  return { suite: str(value.suite, 200), modes, proposed, ...(prior && /^[A-Za-z0-9_.-]+$/.test(prior) ? { priorRun: prior } : {}), ...(accept && /^toad suites accept [A-Za-z0-9_.-]+ --suite [A-Za-z0-9_.-]+$/.test(accept) ? { accept } : {}) };
+  return { suite: str(value.suite, 200), modes, proposed, ...(Object.keys(results).length ? { results } : {}), ...(prior && /^[A-Za-z0-9_.-]+$/.test(prior) ? { priorRun: prior } : {}), ...(accept && /^toad suites accept [A-Za-z0-9_.-]+ --suite [A-Za-z0-9_.-]+$/.test(accept) ? { accept } : {}) };
 }
 
 /**
@@ -128,6 +134,7 @@ function summary(project, id) {
     : 'interrupted';
   const ended = report ? Date.parse(saved?.finished ?? '') || mtime(reportPath) : null;
   // The server records the verdict it read; older runs only have the report.
+  const aggregate = replayOf(saved?.replay)?.results;
   const verdict = state === 'failed' ? 'ERROR' : state !== 'finished' ? state.toUpperCase()
     : saved?.verdict ?? /^[#*\s]*Verdict[*:\s]*?(?:\n\s*)*[*\s]*(PASS|FAIL|ERROR)\b/im.exec(report)?.[1]?.toUpperCase() ?? 'UNKNOWN';
   return {
@@ -135,7 +142,7 @@ function summary(project, id) {
     started, ended, duration: started && ended ? ended - started : null,
     kind: handoff?.kind ?? '', title: titleOf(handoff), goal: handoff?.request?.goal ?? '', target: targetOf(handoff),
     scenarios: handoff?.request?.scenarios?.length ?? 0,
-    results: saved?.scenarios ?? (report ? scenarioResults(handoff?.request?.scenarios, resultsOf(report)) : []),
+    results: (saved?.scenarios ?? (report ? scenarioResults(handoff?.request?.scenarios, resultsOf(report)) : [])).map(s => ({ ...s, result: overallVerdict(s.result, aggregate?.[s.name] ? [{ result: aggregate[s.name] }] : []) })),
     ...(saved?.error ? { error: saved.error } : {}),
     // Who started it (a coding agent over MCP, or `toad run`), and how.
     origin: saved?.origin ?? 'mcp',
@@ -143,7 +150,7 @@ function summary(project, id) {
     ...(saved?.models ? { models: saved.models } : {}),
     ...(saved?.sandbox ? { sandbox: saved.sandbox } : {}),
     ...(replayOf(saved?.replay) ? { replay: replayOf(saved.replay) } : {}),
-    verdict, status: /^Status:\s*(\S+)/m.exec(report)?.[1] ?? (state === 'finished' ? 'unknown' : state), state,
+    verdict: aggregate ? overallVerdict(verdict, Object.values(aggregate).map(result => ({ result }))) : verdict, status: /^Status:\s*(\S+)/m.exec(report)?.[1] ?? (state === 'finished' ? 'unknown' : state), state,
   };
 }
 

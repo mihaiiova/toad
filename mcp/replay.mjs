@@ -13,19 +13,23 @@
  * `toad run --update-recordings` writes it beside the suite. Nothing here
  * runs git.
  */
-import { randomUUID } from 'node:crypto';
-import { lstatSync, mkdirSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { lstatSync, mkdirSync, realpathSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { readExecutionRecords } from '../agent/tools/toad-execution.mjs';
 import { replayCliPayloadAsync } from '../agent/tools/toad-cli-recording.mjs';
 import { apiCliPayload, validApiPayload } from '../agent/tools/toad-api-recording.mjs';
 import { WEB_CODEC, replayWebPayload, webPayloadUnder } from '../agent/tools/toad-web-recording.mjs';
-import { describeRecording, finalizeRecording, readRecordingFile, recordingStatus, scenarioId } from './recordings.mjs';
+import { describeRecording, finalizeRecording, intentHash, readRecordingFile, recordingStatus, scenarioId, recordingHash, recordingText, validateRecording } from './recordings.mjs';
 import { ensureDirectory, projectFolder, readProjectConfig, readSuites, registerProject, withDefaults } from './projects.mjs';
 import { writeState } from './run.mjs';
-import { effectiveHandoff, inspectSuite, runFolder } from './suite-recordings.mjs';
+import { HOOK_RECORDING_REASON } from './attempt-schema.mjs';
+import { DefinitionError } from './definition-diagnostics.mjs';
+import { recordingUnder, writeRecordingContext } from './recording-context.mjs';
+import { SUITE_NAME, effectiveHandoff, inspectSuite, runFolder } from './suite-recordings.mjs';
 
 export const MODES = ['replay', 'agent', 'healed'];
-const STALE = { changed: 'the saved recording is stale (steps or expected changed)', unsupported: 'the saved recording is stale (no longer supported by this suite)', invalid: 'the saved recording is not a valid recording' };
+const STALE = { changed: 'the saved recording is stale (steps or expected changed)', unsupported: 'the saved recording is stale (no longer supported by this suite)', invalid: 'the saved recording is not a valid recording', target: 'the saved recording is stale (suite target changed; original target is not replayed)' };
 
 /** The receipts folder name the lead uses for a scenario. */
 const slug = name => name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'scenario';
@@ -69,17 +73,19 @@ const recordedUnder = (envelope, base) => envelope.codec === WEB_CODEC
  * and `savedSteps`, for comparing what the agent records. Reads only.
  */
 export function replayChoices(project, suite, config, scenarios, { replay = true, url } = {}) {
-  let inspected;
-  try { inspected = inspectSuite(project, suite, config, { envelopes: true }).recordings; }
-  catch { inspected = suite.scenarios.map(() => ({ status: 'none' })); }
+  const inspection = inspectSuite(project, suite, config, { envelopes: true });
+  if (inspection.errors.length) throw new DefinitionError(inspection.errors);
+  const inspected = inspection.recordings;
   const byName = new Map(suite.scenarios.map((s, i) => [s.name, inspected[i]]));
   const base = effectiveHandoff(suite, config, project).target?.url;
   return scenarios.map(scenario => {
+    if (effectiveHandoff(suite, config, project).attempt) return { mode: 'agent', reason: HOOK_RECORDING_REASON };
     const rec = byName.get(scenario.name) ?? { status: 'none' };
-    const saved = rec.status === 'recorded' ? { saved: rec.envelope, savedSteps: rec.steps } : {};
+    const snapshot = proposalSnapshot(project, suite, config, scenario);
+    const saved = { snapshot, ...(rec.status === 'recorded' ? { saved: rec.envelope, savedSteps: rec.steps } : {}) };
     const stale = rec.status === 'stale' ? { stale: rec.reason } : {};
-    if (rec.status === 'stale') return { mode: 'agent', reason: STALE[rec.reason] ?? 'the saved recording is stale', ...stale };
-    if (rec.status !== 'recorded') return { mode: 'agent', reason: 'no saved recording' };
+    if (rec.status === 'stale') return { mode: 'agent', reason: STALE[rec.reason] ?? 'the saved recording is stale', ...stale, ...saved };
+    if (rec.status !== 'recorded') return { mode: 'agent', reason: 'no saved recording', ...saved };
     if (!replay) return { mode: 'agent', reason: 'replay is off (--no-replay)', ...saved };
     const located = suite.kind === 'api' || suite.kind === 'web';
     if (located && !recordedUnder(rec.envelope, base)) {
@@ -99,29 +105,32 @@ export function replayChoices(project, suite, config, scenarios, { replay = true
  * receipt under `receipts`. PASS or FAIL is the recording's own assertion;
  * ERROR means the replay could not run, and says why.
  */
-export async function replayScenario(envelope, { workdir, receipts, name = '01-replay', env, signal, targetUrl }) {
+export async function replayScenario(envelope, { workdir, receipts, name = '01-replay', env, signal, targetUrl, handoff }) {
+  if (handoff?.attempt || env?.TOAD_ATTEMPT_ID) return { result: 'ERROR', message: HOOK_RECORDING_REASON };
+  const observedFailure = () => env?.TOAD_EXECUTION_RUN_DIR && readExecutionRecords(env.TOAD_EXECUTION_RUN_DIR).records.some(r => r.mode === 'replay' && r.scenarioName === env.TOAD_EXECUTION_SCENARIO_NAME && (r.outcome === 'FAIL' || r.steps.some(s => s.assertion?.result === 'FAIL')));
   try {
     if (envelope.codec === WEB_CODEC) {
       // A fresh, isolated browser with no secrets; the recording is the assertion.
       const outcome = await replayWebPayload(envelope.payload, { receipts, name, env, signal, targetUrl });
-      if (outcome.result === 'ERROR') return { result: 'ERROR', receipt: outcome.receipt, message: `The replay could not run: ${outcome.message ?? 'unknown error'}` };
+      if (outcome.result === 'ERROR') return { result: observedFailure() ? 'FAIL' : 'ERROR', receipt: outcome.receipt, message: `The replay could not run: ${outcome.message ?? 'unknown error'}` };
       return { result: outcome.result, receipt: outcome.receipt, ...(outcome.result === 'FAIL' ? { message: 'The saved recording\'s assertion failed' } : {}) };
     }
     if (!['api-request-v1', 'cli-command-v1'].includes(envelope.codec)) return { result: 'ERROR', message: 'The recording uses an unknown codec' };
     const payload = envelope.codec === 'api-request-v1' ? apiCliPayload(envelope.payload) : envelope.payload;
-    const outcome = await replayCliPayloadAsync(payload, { project: workdir, receipts, name, env, signal });
+    const outcome = await replayCliPayloadAsync(payload, { project: workdir, receipts, name, env: { ...env, TOAD_EXECUTION_KIND: envelope.codec === 'api-request-v1' ? 'api' : 'cli', ...(envelope.codec === 'api-request-v1' ? { TOAD_EXECUTION_EXPECT: JSON.stringify(envelope.payload.expect) } : {}) }, signal });
     if ([126, 127].includes(outcome.actual.exitCode) || (envelope.codec === 'api-request-v1' && outcome.actual.exitCode === 2)) throw new Error('Replay infrastructure or prerequisite error');
     return { result: outcome.result, receipt: outcome.receipt, ...(outcome.result === 'FAIL' ? { message: 'The saved recording\'s assertion failed' } : {}) };
   } catch (error) {
-    return { result: 'ERROR', message: `The replay could not run: ${error.message}` };
+    return { result: observedFailure() ? 'FAIL' : 'ERROR', message: `The replay could not run: ${error.message}` };
   }
 }
 
 /** The environment a replay runs in: no secrets, the run's receipts, the chosen sandbox and image. */
 export function replayEnv(env, { receipts, sandbox, image, executionRun, scenarioName, scenarios = [] }) {
   const out = { ...env, TOAD_RECEIPTS_DIR: receipts };
+  for (const key of Object.keys(out)) if (key.startsWith('TOAD_ATTEMPT_')) delete out[key];
   for (const key of ['TOAD_PLAYWRIGHT_SECRETS_FILE', 'TOAD_CLI_SECRETS_FILE', 'TOAD_CLI_PATH', 'TOAD_EXEC_JSON', 'TOAD_RECORDING_ENABLED', 'TOAD_BASE_SCENARIO']) delete out[key];
-  for (const key of ['TOAD_EXECUTION_RUN_DIR', 'TOAD_EXECUTION_SCENARIO_NAME', 'TOAD_EXECUTION_SCENARIOS', 'TOAD_EXECUTION_MODE']) delete out[key];
+  for (const key of ['TOAD_EXECUTION_RUN_DIR', 'TOAD_EXECUTION_SCENARIO_NAME', 'TOAD_EXECUTION_SCENARIOS', 'TOAD_EXECUTION_MODE', 'TOAD_EXECUTION_KIND', 'TOAD_EXECUTION_EXPECT', 'TOAD_EXECUTION_PHASE']) delete out[key];
   if (executionRun) Object.assign(out, { TOAD_EXECUTION_RUN_DIR: executionRun, TOAD_EXECUTION_SCENARIO_NAME: scenarioName, TOAD_EXECUTION_SCENARIOS: JSON.stringify(scenarios), TOAD_EXECUTION_MODE: 'replay' });
   if (sandbox) out.TOAD_CLI_SANDBOX = sandbox;
   if (image) out.TOAD_CLI_IMAGE = image;
@@ -169,7 +178,39 @@ export function finishReplayRun(run, handoff, results, { suite, accept } = {}) {
 export function stepsDiff(previous, next) {
   const line = s => `${s.action} => ${s.assertion}`;
   const before = (previous ?? []).map(line), after = (next ?? []).map(line);
-  return [...before.filter(l => !after.includes(l)).map(l => `- ${l}`), ...after.filter(l => !before.includes(l)).map(l => `+ ${l}`)];
+  // Sequence diff, not a set: order and repeated actions/assertions are meaningful.
+  const lengths = Array.from({ length: before.length + 1 }, () => new Uint16Array(after.length + 1));
+  for (let i = before.length - 1; i >= 0; i--) for (let j = after.length - 1; j >= 0; j--) lengths[i][j] = before[i] === after[j] ? 1 + lengths[i + 1][j + 1] : Math.max(lengths[i + 1][j], lengths[i][j + 1]);
+  const diff = [];
+  let i = 0, j = 0;
+  while (i < before.length || j < after.length) {
+    if (i < before.length && j < after.length && before[i] === after[j]) { i++; j++; }
+    else if (i < before.length && (j === after.length || lengths[i + 1][j] >= lengths[i][j + 1])) diff.push(`- ${before[i++]}`);
+    else diff.push(`+ ${after[j++]}`);
+  }
+  return diff;
+}
+
+const digest = value => createHash('sha256').update(recordingText(value)).digest('hex');
+
+function savedHash(project, suite, id) {
+  try { return recordingHash(readRecordingFile(join(project, '.toad', 'suites', `${suite}.recordings`, `${id}.json`))); }
+  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+}
+
+/** Includes absent-file state and effective intent/target/restrictions, not secret values. */
+export function proposalSnapshot(project, suite, config, scenario) {
+  return { version: 1, scenarioId: scenarioId(scenario.name), intentHash: intentHash(suite.kind, scenario),
+    contextHash: digest(effectiveHandoff(suite, config, project)), savedHash: savedHash(project, suite.name, scenarioId(scenario.name)) };
+}
+
+function checkProposal(project, suite, scenario, envelope, provenance) {
+  const folder = projectFolder(project);
+  const current = readSuites(folder).find(s => s.name === suite.name);
+  const currentScenario = current?.scenarios.find(s => scenarioId(s.name) === scenarioId(scenario.name));
+  if (!currentScenario) throw new Error('Suite scenario changed; regenerate and review the proposal.');
+  const snapshot = proposalSnapshot(project, current, readProjectConfig(folder), currentScenario);
+  if (!provenance || provenance.proposedHash !== recordingHash(envelope) || Object.keys(snapshot).some(k => snapshot[k] !== provenance[k])) throw new Error('Proposal provenance is missing or changed (saved recording, intent, target or proposed payload). Regenerate the proposal against the current suite, review it, then accept again.');
 }
 
 /**
@@ -178,7 +219,7 @@ export function stepsDiff(previous, next) {
  * diff, file }. Null when the run captured none, or the same, or one the
  * suite cannot hold. `url` is the --url the run used, if any.
  */
-export function proposedRecording(run, project, suite, config, scenario, saved, { url } = {}) {
+export function proposedRecording(run, project, suite, config, scenario, saved, { url, snapshot, failureRun } = {}) {
   if (recordingStatus(run, suite.kind, scenario).status !== 'recorded') return null;
   const file = join(run, 'recording', `${scenarioId(scenario.name)}.json`);
   let envelope;
@@ -188,15 +229,40 @@ export function proposedRecording(run, project, suite, config, scenario, saved, 
   if (!envelope) return null;
   let steps;
   try { steps = describeRecording(envelope, suite.kind, scenario, { handoff, scenario }); } catch { return null; }
-  if (saved?.envelope && JSON.stringify(saved.envelope) === JSON.stringify(envelope)) return null;
-  return { envelope, steps, previous: saved?.steps ?? null, diff: stepsDiff(saved?.steps, steps), file };
+  if (saved?.envelope && recordingHash(saved.envelope) === recordingHash(envelope)) return null;
+  const baseline = snapshot ?? proposalSnapshot(project, suite, config, scenario);
+  const failure = failureRun ? { run: failureRun.split('/').at(-1), executionIds: readExecutionRecords(failureRun).records.filter(r => r.scenarioName === scenario.name && r.mode === 'replay' && (r.outcome === 'FAIL' || r.assertion?.result === 'FAIL' || r.steps.some(s => s.assertion?.result === 'FAIL'))).map(r => r.id), assertions: saved?.steps?.map(s => s.assertion) ?? [] } : null;
+  return { envelope, steps, previous: saved?.steps ?? null, diff: stepsDiff(saved?.steps, steps), file, provenance: { ...baseline, proposedHash: recordingHash(envelope) }, ...(failure ? { failure } : {}) };
 }
 
 /**
  * Write a recording beside its suite, replacing the scenario's old one.
  * The folder must be a plain folder; the file is replaced atomically.
  */
-export function writeSuiteRecording(project, suiteName, envelope) {
+export function writeSuiteRecording(project, suiteName, envelope, options = {}) {
+  if (typeof suiteName !== 'string' || !SUITE_NAME.test(suiteName)) throw new Error('Invalid suite name');
+  projectFolder(project);
+  const suites = join(project, '.toad', 'suites');
+  if (!lstatSync(suites).isDirectory() || realpathSync(suites) !== suites) throw new Error('Recording acceptance needs a plain suites folder');
+  const lock = join(suites, `.${suiteName}.recording-lock`);
+  try { mkdirSync(lock, { mode: 0o700 }); }
+  catch { throw new Error('Recording acceptance is already active or interrupted. Finish the other acceptance; remove the suite recording-lock folder only after verifying no writer is running.'); }
+  try { return writeCheckedSuiteRecording(project, suiteName, envelope, options); }
+  finally { rmdirSync(lock); }
+}
+
+function writeCheckedSuiteRecording(project, suiteName, envelope, { provenance } = {}) {
+  if (typeof suiteName !== 'string' || !SUITE_NAME.test(suiteName)) throw new Error('Invalid suite name');
+  validateRecording(envelope);
+  const folder = projectFolder(project);
+  const config = readProjectConfig(folder);
+  const suite = readSuites(folder).find(s => s.name === suiteName);
+  const scenario = suite?.scenarios.find(s => scenarioId(s.name) === envelope.scenarioId);
+  if (!scenario) throw new Error('Recording has no matching suite scenario');
+  describeRecording(envelope, suite.kind, scenario, { handoff: effectiveHandoff(suite, config, project), scenario });
+  if (!recordingUnder(envelope, effectiveHandoff(suite, config, project).target?.url)) throw new Error('Recording is outside the current target');
+  checkProposal(project, suite, scenario, envelope, provenance);
+  if (Buffer.byteLength(recordingText(envelope), 'utf8') > 65536) throw new Error('Formatted recording exceeds 64 KiB; reduce supported literal data or re-record.');
   const suites = join(project, '.toad', 'suites');
   const dir = join(suites, `${suiteName}.recordings`);
   if (!lstatSync(suites).isDirectory() || realpathSync(suites) !== suites) throw new Error('.toad/suites must be a folder, not a symlink');
@@ -205,7 +271,10 @@ export function writeSuiteRecording(project, suiteName, envelope) {
   const target = join(dir, `${envelope.scenarioId}.json`);
   const temp = join(dir, `.tmp-${randomUUID()}`);
   try {
-    writeFileSync(temp, JSON.stringify(envelope) + '\n', { flag: 'wx', mode: 0o644 });
+    writeFileSync(temp, recordingText(envelope), { flag: 'wx', mode: 0o644 });
+    // Recheck immediately before publication; serialize cooperative accept/update writers.
+    checkProposal(project, suite, scenario, envelope, provenance);
+    writeRecordingContext(project, suiteName, envelope, effectiveHandoff(suite, config, project).target?.url);
     renameSync(temp, target);
   } finally {
     try { unlinkSync(temp); } catch (error) { if (error.code !== 'ENOENT') throw error; }
@@ -261,12 +330,26 @@ export function acceptRecordings(project, run, suiteName, { cwd = process.cwd() 
   if (handoff?.kind !== suite.kind) throw new Error(`The run is not a ${suite.kind} run, as ${suiteName} is`);
   const base = effectiveHandoff(suite, config, project).target?.url;
   const url = (suite.kind === 'api' || suite.kind === 'web') && handoff.target?.url && handoff.target.url !== base ? handoff.target.url : undefined;
-  const { recordings } = inspectSuite(project, suite, config, { envelopes: true });
+  const inspection = inspectSuite(project, suite, config, { envelopes: true });
+  if (inspection.errors.length) throw new DefinitionError(inspection.errors);
+  const { recordings } = inspection;
+  let state;
+  try { state = readRecordingFile(join(dir, 'state.json'), 1024 * 1024); } catch { throw new Error('The run has no readable proposal provenance; regenerate and review proposals.'); }
   return suite.scenarios.map((scenario, i) => {
     const saved = recordings[i].status === 'recorded' ? recordings[i] : null;
+    const stored = state.replay?.proposed?.[scenario.name];
+    if (stored) {
+      let candidate;
+      try { candidate = readRecordingFile(join(dir, 'recording', `${scenarioId(scenario.name)}.json`)); }
+      catch { throw new Error('Proposed recording is missing or invalid; regenerate and review the proposal.'); }
+      if (url) candidate = rebasedEnvelope(candidate, url, base);
+      if (!candidate) throw new Error('Proposed target changed; regenerate and review the proposal.');
+      if (saved && recordingHash(saved.envelope) === recordingHash(candidate)) return { name: scenario.name, status: 'unchanged' };
+      checkProposal(project, suite, scenario, candidate, stored.provenance);
+    }
     const proposal = proposedRecording(dir, project, suite, config, scenario, saved, { url });
     if (!proposal) return { name: scenario.name, status: saved && recordingStatus(dir, suite.kind, scenario).status === 'recorded' ? 'unchanged' : 'none' };
-    writeSuiteRecording(project, suite.name, proposal.envelope);
+    writeSuiteRecording(project, suite.name, proposal.envelope, { provenance: state.replay?.proposed?.[scenario.name]?.provenance });
     return { name: scenario.name, status: 'accepted', diff: proposal.diff };
   });
 }
