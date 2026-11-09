@@ -51,7 +51,7 @@ toad setup
 ```
 
 Toad installs straight from GitHub for now (it is not on npm yet). Add a
-release tag, such as `#v0.7.0`, or `#<commit>` to install that version
+release tag, such as `#v0.8.0`, or `#<commit>` to install that version
 instead of `main`.
 
 `toad setup` walks through everything once, and can be run again at any time:
@@ -656,7 +656,7 @@ jobs:
         with:
           node-version: 22
       # Pin a release tag or commit you have reviewed.
-      - run: npm install --global github:mihaiiova/toad#v0.7.0
+      - run: npm install --global github:mihaiiova/toad#v0.8.0
       - id: toad
         run: echo "version=$(toad --version)" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v4
@@ -973,7 +973,7 @@ edits the model fields of a checkout's agent in the same way.
 
 `.github/workflows/test.yml` runs the tests on Linux, macOS and Windows for
 every push. Installs come from GitHub for now: `main` is the latest, and each
-release is a tag that installs and CI jobs can pin (`github:mihaiiova/toad#v0.7.0`).
+release is a tag that installs and CI jobs can pin (`github:mihaiiova/toad#v0.8.0`).
 Release a version with:
 
 ```sh
