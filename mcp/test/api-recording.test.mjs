@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { once } from 'node:events';
@@ -20,7 +20,8 @@ test('API validation rejects credentials, unsafe protocols, unsupported assertio
 
 for (const backend of ['none', 'bwrap']) test(`API capture and assertion replay with ${backend}`, async t => {
   try { chooseSandbox({TOAD_CLI_SANDBOX:backend}); } catch { t.skip('sandbox unavailable'); return; }
-  const root = mkdtempSync(join(tmpdir(), 'toad-api-'));
+  // macOS temp roots may be symlinked; sandbox inputs must be canonical.
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'toad-api-')));
   t.after(() => rmSync(root, {recursive:true,force:true}));
   const server = spawn(process.execPath, ['--input-type=module','-e', `import http from 'node:http';const s=http.createServer((q,r)=>{r.statusCode=q.url==='/wrong'?201:200;r.end(q.url==='/broken'?'broken':'hello')});s.listen(0,'127.0.0.1',()=>console.log(s.address().port));`]);
   t.after(() => server.kill());

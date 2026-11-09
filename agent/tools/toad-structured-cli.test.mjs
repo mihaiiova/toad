@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync, symlinkSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -13,7 +13,8 @@ const bwrap = version && version.some((v, i) => v !== MIN_BWRAP[i] && version.sl
 const backends = ['none', ...(bwrap ? ['bwrap'] : []), ...(containerRuntime() ? ['container'] : [])];
 
 function fixture(t, backend) {
-  const root = mkdtempSync(join(tmpdir(), 'toad-structured-'));
+  // macOS temp roots may be symlinked; sandbox inputs must be canonical.
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'toad-structured-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const project = join(root, 'project'); mkdirSync(project);
   const receipts = join(root, 'receipts'); mkdirSync(receipts);

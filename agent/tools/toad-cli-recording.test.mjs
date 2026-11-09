@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -56,7 +56,7 @@ test('replay needs a valid payload, a project and a receipts folder', () => {
 });
 
 function fixture(t, backend) {
-  const root = mkdtempSync(join(tmpdir(), 'toad-replay-'));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'toad-replay-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const project = join(root, 'project'); mkdirSync(project);
   const receipts = join(root, 'data/receipts');

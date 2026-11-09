@@ -40,7 +40,8 @@ On Linux without Docker or Podman, CLI tests can use
 **Windows:** Toad's code is written to run there, but it is not verified yet:
 stopping a cancelled or timed-out run relies on POSIX process groups, which
 Windows does not have, so testers started in the background can keep running.
-Use WSL until a release says otherwise.
+Use WSL until a release says otherwise. Native Windows CI is temporarily
+disabled; Linux and macOS remain required CI checks.
 
 ## Install
 
