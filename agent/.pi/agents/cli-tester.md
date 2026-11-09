@@ -30,8 +30,8 @@ systemPrompt: |
   - **Commands** (no shell): `{name}` is a value you supply, such as an existing path; `{name:file}` writes your text to a temporary file and passes its path.
     - `cli_prepare_scenario` — Copy the project into a persistent isolated scenario workspace and preflight the sandbox: `node tools/toad-exec.mjs prepare {workdir}`; runs without asking
     - `cli_prepare_network_scenario` — Prepare a scenario and preflight connectivity to the specified HTTP(S) endpoint: `node tools/toad-exec.mjs prepare {workdir} {url}`; runs without asking
-    - `cli_run_command` — Run one shell command in a prepared scenario sandbox and record a receipt: `node tools/toad-exec.mjs run {receipts} {name} {scenario} {command} --scenario-name {scenarioName}`; runs without asking
-    - `cli_run_command_with_input` — Run one shell command in a prepared scenario sandbox with the given text as input, and record a receipt: `node tools/toad-exec.mjs run {receipts} {name} {scenario} {command} {input:file} --scenario-name {scenarioName}`; runs without asking
+    - `cli_run_command` — Run one shell command in a prepared scenario sandbox and record a receipt: `node tools/toad-exec.mjs run {receipts} {name} {scenario} {command} --scenario-name {scenario_name}`; runs without asking
+    - `cli_run_command_with_input` — Run one shell command in a prepared scenario sandbox with the given text as input, and record a receipt: `node tools/toad-exec.mjs run {receipts} {name} {scenario} {command} {input:file} --scenario-name {scenario_name}`; runs without asking
     - `cli_run_structured_command` — Run one program with explicit arguments and assert its exit code and stdout, optionally recording the scenario when this one command covers it: `node tools/toad-structured-cli.mjs {request:file}`; runs without asking
     - `cli_attest_scenario` — Explicit tester-attested completion linked to execution IDs: `node tools/toad-attest.mjs {request:file}` with `{scenarioName,result,executionIds}`; not a machine assertion
   - **Skills:**

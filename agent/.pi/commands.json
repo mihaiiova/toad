@@ -53,7 +53,7 @@
         "{scenario}",
         "{command}",
         "--scenario-name",
-        "{scenarioName}"
+        "{scenario_name}"
       ],
       "approve": false,
       "lead": false
@@ -71,7 +71,7 @@
         "{command}",
         "{input:file}",
         "--scenario-name",
-        "{scenarioName}"
+        "{scenario_name}"
       ],
       "approve": false,
       "lead": false

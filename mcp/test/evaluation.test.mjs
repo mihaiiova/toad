@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { evaluationCases, SENTINEL } from '../evaluation-fixtures.mjs';
+import { evaluationCases, FIXTURE_VERSION, SENTINEL } from '../evaluation-fixtures.mjs';
 import { evaluationReferenceState, observeEvaluationCase, parseEvaluationArgs, requireEvaluationSandbox, runEvaluation, scanEvaluationArtifacts } from '../evaluation.mjs';
 
 const CLI = resolve(import.meta.dirname, '../cli.mjs');
@@ -77,6 +77,8 @@ test('harness injection is visibly not agent quality, has reproducible identitie
   assert.equal(existsSync(join(opts.output, 'work')), false);
   assert.equal(manifest.sourceCleanupComplete, true);
   for (const url of calls.map(c => c.url).filter(Boolean)) await assert.rejects(fetch(url, { signal: AbortSignal.timeout(1000) }));
+  assert.equal(manifest.fixtureVersion, FIXTURE_VERSION);
+  assert.equal(manifest.fixtureVersion, '2', 'corrected selected web credential has new fixture provenance');
   assert.match(manifest.fixtureSha256, /^[a-f0-9]{64}$/);
   assert.match(manifest.harnessSha256, /^[a-f0-9]{64}$/);
   assert.ok(manifest.toadVersion);

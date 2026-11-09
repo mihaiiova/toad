@@ -34,3 +34,7 @@ Private local log: `.pi/artifacts/evaluations/baseline-20261109T183352Z.log`.
 Raw sessions/reports/receipts remain private under the baseline output directory; inspect before sharing.
 
 Investigate the API/CLI tool/execution-evidence path and the synthetic web-secret artifact leak before claiming acceptance or a successful real-tester baseline. No root cause or repair is asserted by this evaluation. No second paid run, broader budget, merge, release, formal approval or issue closure is authorized by these observations. The 276 passing deterministic tests remain valid but did not predict these real-runtime failures.
+
+## Subsequent offline diagnosis
+
+See [offline defect diagnosis and repair](evaluation-baseline-2026-11-09-diagnosis.md) for the confirmed native command-registration blocker, fixture-origin unknown-value web exposure, narrow fixes and regression evidence. This later offline work does not change any measured result above and is not a paid rerun or real-model acceptance claim.

@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createEvaluationFixture, evaluationCases, INTENT, SENTINEL, VARIANTS, originalEvaluationAssertion } from '../evaluation-fixtures.mjs';
+import { createEvaluationFixture, evaluationCases, FIXTURE_VERSION, INTENT, SENTINEL, VARIANTS, originalEvaluationAssertion } from '../evaluation-fixtures.mjs';
 import { validApiPayload } from '../../agent/tools/toad-api-recording.mjs';
 import { validCliPayload } from '../../agent/tools/toad-cli-recording.mjs';
 import { validWebPayload } from '../../agent/tools/toad-web-recording.mjs';
@@ -14,6 +14,15 @@ function temp(t) {
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   return dir;
 }
+
+test('web secret fixture selects its prefilled credential for native known-value redaction', async t => {
+  const fixture = await createEvaluationFixture(temp(t), evaluationCases().find(c => c.id === 'web/secret/1'));
+  t.after(() => fixture.close());
+  assert.deepEqual(fixture.handoff.credentials, { token: { env: 'EVAL_SENTINEL' } });
+  assert.equal(FIXTURE_VERSION, '2', 'corrected credential contract needs distinct manifest provenance');
+  assert.equal(fixture.handoff.request.scenarios[0].name, 'web/secret/1');
+  assert.equal(evaluationCases().find(c => c.id === 'web/secret/1').expectedClass, 'PASS');
+});
 
 test('evaluation ground truth fixes intent, classifications and identities across variants/repeats', () => {
   const cases = evaluationCases(2);
