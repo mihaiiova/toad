@@ -9,6 +9,7 @@
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { executionScenarioId, readExecutionRecords } from '../agent/tools/toad-execution.mjs';
 import { readdirSync, readFileSync, statSync, lstatSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { z } from 'zod';
@@ -203,6 +204,12 @@ export async function runTest(text, input, ctx, { attachImages, projectRun, secr
     delete env.TOAD_EXEC_JSON;
     delete env.TOAD_RECORDING_ENABLED;
     delete env.TOAD_WEB_TARGET_URL;
+    for (const key of ['TOAD_EXECUTION_RUN_DIR', 'TOAD_EXECUTION_SCENARIOS', 'TOAD_EXECUTION_SCENARIO_NAME', 'TOAD_EXECUTION_MODE']) delete env[key];
+    if (projectRun && input.handoff?.kind === 'web') {
+      env.TOAD_EXECUTION_RUN_DIR = projectRun;
+      env.TOAD_EXECUTION_SCENARIOS = JSON.stringify((input.handoff.request.scenarios ?? []).map(s => s.name));
+      env.TOAD_EXECUTION_MODE = 'agent';
+    }
     if (webTarget) env.TOAD_WEB_TARGET_URL = webTarget;
     if (cliRecording) env.TOAD_RECORDING_ENABLED = { api: 'api-v1', web: 'web-v1' }[input.handoff?.kind] ?? 'cli-v1';
     if (cliPath?.length) env.TOAD_CLI_PATH = JSON.stringify(cliPath);
@@ -320,8 +327,26 @@ export function writeState(run, fields) {
 /** Map a workflow result, and the receipts it left, onto a tool result. */
 function finish(input, result, folder, { attachImages, projectRun }) {
   const scenarios = scenarioResults(input.handoff?.request?.scenarios ?? input.scenarios, resultsOf(result.answer));
+  const execution = projectRun && input.handoff?.kind === 'web' ? readExecutionRecords(projectRun) : null;
+  const failedRecord = r => r.outcome === 'FAIL' || r.steps.some(s => s.assertion?.result === 'FAIL');
+  let incomplete = !!execution && (execution.errors.length > 0 || !execution.records.length || execution.records.some(r => !r.evidenceComplete || r.outcome === 'running'));
+  if (execution) {
+    for (const scenario of scenarios) {
+      const records = execution.records.filter(r => r.scenarioId === executionScenarioId(scenario.name));
+      if (records.some(failedRecord)) scenario.result = 'FAIL';
+      else if (scenario.result === 'PASS' && !records.some(r => r.evidenceComplete && r.finishedAt !== null && ['completed', 'PASS'].includes(r.outcome))) {
+        scenario.result = 'ERROR';
+        incomplete = true;
+      }
+    }
+  }
+  if (incomplete) {
+    for (const s of scenarios) if (s.result === 'PASS') s.result = 'ERROR';
+    result = { ...result, status: result.status === 'ok' ? 'evidence_error' : result.status, message: [result.message, 'Required web operation evidence is incomplete'].filter(Boolean).join('. ') };
+  }
+  const observedFailure = execution?.records.some(failedRecord);
   // A run stopped for its spending limit is an error whatever it reported so far.
-  const verdict = result.status === 'cost_limit' ? 'ERROR' : overallVerdict(verdictOf(result.answer), scenarios);
+  const verdict = result.status === 'cost_limit' ? 'ERROR' : overallVerdict(observedFailure ? 'FAIL' : incomplete && verdictOf(result.answer) !== 'FAIL' ? 'ERROR' : verdictOf(result.answer), scenarios);
   const cost = result.cost !== undefined ? { cost: Number(result.cost.toFixed(6)) } : {};
   if (projectRun) {
     writeState(projectRun, { state: 'finished', finished: new Date().toISOString(), verdict, status: result.status, ...(result.cleanup ? { cleanup: result.cleanup } : {}), scenarios, ...cost });

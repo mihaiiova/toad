@@ -21,6 +21,7 @@ function copyStore(t) {
   copyFileSync(resolve(import.meta.dirname, '../../agent/tools/toad-cli-recording.mjs'), join(dir, 'agent/tools/toad-cli-recording.mjs'));
   copyFileSync(resolve(import.meta.dirname, '../../agent/tools/toad-api-recording.mjs'), join(dir, 'agent/tools/toad-api-recording.mjs'));
   copyFileSync(resolve(import.meta.dirname, '../../agent/tools/toad-web-recording.mjs'), join(dir, 'agent/tools/toad-web-recording.mjs'));
+  copyFileSync(resolve(import.meta.dirname, '../../agent/tools/toad-execution.mjs'), join(dir, 'agent/tools/toad-execution.mjs'));
   copyFileSync(resolve(import.meta.dirname, '../recordings.mjs'), join(dir, 'mcp/recordings.mjs'));
   return dir;
 }

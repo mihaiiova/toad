@@ -13,6 +13,7 @@
  * and isolated, and one fixed script, with the payload as data, drives it.
  */
 import { spawn } from 'node:child_process';
+import { artifactReference, beginExecution, executionContext, executionOutputPath, finishExecution, noteExecutionError, operationReceipt } from './toad-execution.mjs';
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -165,7 +166,9 @@ export function webScript(p, nonce, stepMs = 10000, targetUrl = new URL(p.steps[
   const N = ${JSON.stringify(nonce)};
   const T = ${Number(stepMs)};
   const hex = s => { let o = ''; for (const c of s) o += c.codePointAt(0).toString(16).padStart(6, '0'); return o; };
-  const done = v => ['TOADWEB', N, hex(JSON.stringify(v)), 'END'].join('-');
+  const steps = [];
+  const finishStep = result => { const s = steps.at(-1); if (s && !s.finishedAt) { s.finishedAt = new Date().toISOString(); s.outcome = result === 'PASS' && !s.assertion ? 'completed' : result; if (s.assertion) s.assertion.result = result === 'PASS' ? 'PASS' : result === 'FAIL' ? 'FAIL' : 'ERROR'; } };
+  const done = v => { finishStep(v.result); return ['TOADWEB', N, hex(JSON.stringify({...v, steps})), 'END'].join('-'); };
   const loc = t => t.role ? page.getByRole(t.role, { name: t.name, exact: true }) : t.label ? page.getByLabel(t.label, { exact: true }) : page.getByText(t.text, { exact: true });
   const until = async check => { const end = Date.now() + T; for (;;) { try { if (await check()) return true; } catch {} if (Date.now() > end) return false; await page.waitForTimeout(100); } };
   const one = async l => (await l.count()) === 1;
@@ -178,7 +181,9 @@ export function webScript(p, nonce, stepMs = 10000, targetUrl = new URL(p.steps[
   });
   const sensitive = l => l.evaluate(e => { const t = String(e.getAttribute('type') || '').toLowerCase(); const a = String(e.getAttribute('autocomplete') || '').toLowerCase(); return ['password', 'hidden', 'file'].includes(t) || /password|one-time-code|cc-|webauthn|username/.test(a); });
   for (let i = 0; i < P.steps.length; i++) {
+    finishStep('PASS');
     const s = P.steps[i];
+    steps.push({index:i+1, operation:s.action, startedAt:new Date().toISOString(), finishedAt:null, outcome:'running', assertion:s.action.startsWith('expect') ? {kind:s.action,result:'ERROR'} : null});
     if (s.action === 'goto') {
       let r;
       try { r = await page.goto(s.url, { timeout: T * 3, waitUntil: 'load' }); } catch { return done({ result: 'ERROR', step: i, message: 'the page could not be loaded' }); }
@@ -204,7 +209,7 @@ export function webScript(p, nonce, stepMs = 10000, targetUrl = new URL(p.steps[
 }
 
 /** Decode the runner's answer from the tool text: exactly one marker with this nonce. */
-export function decodeWebAnswer(text, nonce) {
+export function decodeWebAnswer(text, nonce, includeSteps = false) {
   const found = [...String(text).matchAll(new RegExp(`TOADWEB-${nonce}-([0-9a-f]+)-END`, 'g'))];
   if (found.length !== 1 || found[0][1].length % 6) return null;
   let json = '';
@@ -212,7 +217,7 @@ export function decodeWebAnswer(text, nonce) {
   try {
     const v = JSON.parse(json);
     if (!['PASS', 'FAIL', 'ERROR', 'UNSAFE'].includes(v?.result)) return null;
-    return { result: v.result, ...(Number.isInteger(v.step) ? { step: v.step } : {}), ...(typeof v.message === 'string' ? { message: v.message.slice(0, 200) } : {}) };
+    return { result: v.result, ...(Number.isInteger(v.step) ? { step: v.step } : {}), ...(typeof v.message === 'string' ? { message: v.message.slice(0, 200) } : {}), ...(includeSteps && Array.isArray(v.steps) ? { steps: v.steps } : {}) };
   } catch { return null; }
 }
 
@@ -266,11 +271,12 @@ function mcpSession(driver, env, signal) {
     await wait(3000);
     kill('SIGKILL');
   }
-  const onAbort = () => { fail(new Error('cancelled or timed out')); stop(); };
+  // The owner gets a short diagnostic window before closing the process.
+  const onAbort = () => { fail(new Error('cancelled or timed out')); };
   signal?.addEventListener('abort', onAbort, { once: true });
-  const request = (method, params, ms) => new Promise((resolve, reject) => {
+  const request = (method, params, ms, diagnostic = false) => new Promise((resolve, reject) => {
     if (closed) return reject(new Error('the browser driver is not running'));
-    if (signal?.aborted) return reject(new Error('cancelled or timed out'));
+    if (signal?.aborted && !diagnostic) return reject(new Error('cancelled or timed out'));
     const id = next++;
     const timer = setTimeout(() => { pending.delete(id); reject(new Error(`${method} timed out`)); }, ms);
     timer.unref();
@@ -285,61 +291,107 @@ function mcpSession(driver, env, signal) {
  * { result: PASS | FAIL | ERROR | UNSAFE, step?, message? }; never throws.
  * The browser gets no secrets file, and its own scratch output folder.
  */
-export async function runWebPayload(p, { env = process.env, signal, screenshot, targetUrl, startMs = 180000 } = {}) {
+export async function runWebPayload(p, { env = process.env, signal, screenshot, targetUrl, startMs = 180000, execution, receipt } = {}) {
   if (targetUrl) {
     try { p = bindWebTarget(p, targetUrl); } catch { return {result:'ERROR',message:'web navigation is outside the run target'}; }
   }
   if (!validWebPayload(p)) return { result: 'ERROR', message: 'invalid web recording payload' };
-  let scratch, session;
+  let scratch, session, handle, names = [], outcome, observedSteps = [];
+  const captures = [], artifacts = [];
   try {
+    const context = execution ?? executionContext(env, env.TOAD_EXECUTION_SCENARIO_NAME);
+    handle = beginExecution(context, 'structured_web');
     const driver = webDriver(env);
     scratch = mkdtempSync(join(tmpdir(), 'toad-web-'));
-    // An explicit, empty secrets file: the launcher never falls back to the agent's shared store.
     const secrets = join(scratch, 'no-secrets.env');
     writeFileSync(secrets, '', { mode: 0o600 });
     const childEnv = { ...env, TOAD_RECEIPTS_DIR: join(scratch, 'output'), TOAD_PLAYWRIGHT_SECRETS_FILE: secrets };
-    for (const k of ['TOAD_CLI_SECRETS_FILE', 'TOAD_RECORDING_ENABLED', 'TOAD_WEB_DRIVER']) delete childEnv[k];
+    // Structured execution owns its record; its inner transport must not double-record.
+    for (const k of ['TOAD_CLI_SECRETS_FILE', 'TOAD_RECORDING_ENABLED', 'TOAD_WEB_DRIVER', 'TOAD_EXECUTION_RUN_DIR']) delete childEnv[k];
     session = mcpSession(driver, childEnv, signal);
-    // The first start may download the pinned Playwright MCP.
     await session.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'toad-web-recording', version: '1' } }, startMs);
     session.notify('notifications/initialized');
-    const { tools = [] } = await session.request('tools/list', {}, 30000);
-    const names = tools.map(t => t?.name);
+    const listed = await session.request('tools/list', {}, 30000);
+    names = (listed.tools ?? []).map(t => t?.name);
     const tool = ['browser_run_code_unsafe', 'browser_run_code'].find(n => names.includes(n));
-    if (!tool) return { result: 'ERROR', message: 'the browser driver cannot run a scripted scenario' };
+    if (!tool) throw new Error('the browser driver cannot run a scripted scenario');
     const nonce = randomBytes(16).toString('hex');
-    // TOAD_WEB_STEP_TIMEOUT_MS shortens each step's wait for Toad's own tests only.
     const stepMs = Number(env.TOAD_WEB_STEP_TIMEOUT_MS) > 0 ? Math.min(Number(env.TOAD_WEB_STEP_TIMEOUT_MS), 10000) : 10000;
     const called = await session.request('tools/call', { name: tool, arguments: { code: webScript(p, nonce, stepMs, targetUrl) } }, 60000 + p.steps.length * 40000);
     const text = (called?.content ?? []).filter(c => c?.type === 'text').map(c => c.text).join('\n');
-    const outcome = decodeWebAnswer(text, nonce) ?? { result: 'ERROR', message: called?.isError ? 'the browser driver reported an error' : 'the browser driver returned no result' };
-    // A checkpoint after PASS or at the failing step. Screenshots can contain
-    // sensitive page content and are stored with the other run receipts.
-    if (screenshot && names.includes('browser_take_screenshot') && !signal?.aborted) {
-      try {
-        await session.request('tools/call', { name: 'browser_take_screenshot', arguments: { filename: 'toad-screenshot.png' } }, 30000);
-        const image = readFileSync(join(scratch, 'output', 'toad-screenshot.png'));
-        if (image.length <= 16 * 1024 * 1024) writeFileSync(screenshot, image, { flag: 'wx', mode: 0o600 });
-      } catch { /* A missing screenshot does not change the test result. */ }
-    }
-    return outcome;
-  } catch (error) {
-    return { result: 'ERROR', message: `the browser could not run: ${String(error?.message ?? error).slice(0, 200)}` };
+    const decoded = decodeWebAnswer(text, nonce, true);
+    observedSteps = decoded?.steps ?? [];
+    if (decoded) { const { steps, ...result } = decoded; outcome = result; }
+    else outcome = { result: 'ERROR', message: called?.isError ? 'the browser driver reported an error' : 'the browser driver returned no result' };
+  } catch {
+    // Driver exceptions can contain page text/credentials. Persist only fixed classifications.
+    outcome = { result: 'ERROR', message: signal?.aborted ? 'cancelled or timed out' : 'the browser could not run' };
   } finally {
-    if (session) await session.close();
+    if (session) {
+      const diagnostic = async (kind, tool, args, save) => {
+        if (!names.includes(tool)) { captures.push({ kind, status: 'unavailable' }); return; }
+        try {
+          const response = await session.request('tools/call', { name: tool, arguments: args }, 1000, true);
+          if (response?.isError) throw new Error();
+          if (save) await save(response);
+          captures.push({ kind, status: 'saved' });
+        } catch { captures.push({ kind, status: 'error' }); }
+      };
+      // Capture failure state before any receipt finalization or session close, including cancellation.
+      if (screenshot) await diagnostic('screenshot', 'browser_take_screenshot', { filename: 'toad-screenshot.png' }, () => {
+        const image = readFileSync(join(scratch, 'output', 'toad-screenshot.png'));
+        if (image.length > 16 * 1024 * 1024) throw new Error();
+        if (handle) executionOutputPath(handle.run, screenshot);
+        writeFileSync(screenshot, image, { flag: 'wx', mode: 0o600 });
+        if (handle) artifacts.push(artifactReference(handle.run, screenshot, 'screenshot'));
+      });
+      if (handle && outcome?.result !== 'PASS') {
+        for (const [kind, tool] of [['hierarchy', 'browser_snapshot'], ['console', 'browser_console_messages']]) {
+          await diagnostic(kind, tool, {}, response => {
+            const dir = join(handle.run, 'execution-artifacts');
+            mkdirSync(dir, { recursive: true, mode: 0o700 });
+            const file = join(dir, `${handle.record.id}-${kind}.txt`);
+            // Structured scenarios are credential-free; diagnostics remain sensitive artifacts, not metadata.
+            const text = (response.content ?? []).filter(c => c.type === 'text').map(c => c.text).join('\n');
+            if (Buffer.byteLength(text) > 1024 * 1024) throw new Error();
+            executionOutputPath(handle.run, file);
+            writeFileSync(file, text, { flag: 'wx', mode: 0o600 });
+            artifacts.push(artifactReference(handle.run, file, kind));
+          });
+        }
+      }
+      await session.close();
+    }
     if (scratch) rmSync(scratch, { recursive: true, force: true });
   }
+  outcome ??= { result: 'ERROR', message: 'the browser could not run' };
+  if (handle) {
+    try {
+      if (receipt) {
+        executionOutputPath(handle.run, receipt);
+        writeFileSync(receipt, webReceipt(p, outcome), { flag: 'wx', mode: 0o600 });
+        artifacts.unshift(artifactReference(handle.run, receipt, 'receipt'));
+      } else artifacts.unshift(operationReceipt(handle, outcome.result));
+      finishExecution(handle, { outcome: signal?.aborted ? 'cancelled' : outcome.result === 'UNSAFE' ? 'ERROR' : outcome.result,
+        steps: observedSteps, assertion: observedSteps.findLast(s => s.assertion)?.assertion ?? null, artifacts, captures, evidenceComplete: true });
+    } catch {
+      // Preserve an observed failure even when its mandatory receipt is unavailable.
+      try { finishExecution(handle, { outcome: outcome.result === 'FAIL' ? 'FAIL' : 'ERROR', steps: observedSteps, captures, artifacts, evidenceComplete: false }); } catch { /* initial running record remains incomplete */ }
+      if (outcome.result !== 'FAIL') outcome = { result: 'ERROR', message: 'required web evidence could not be saved' };
+    }
+  } else if (env.TOAD_EXECUTION_RUN_DIR || execution) {
+    noteExecutionError(execution?.run ?? env.TOAD_EXECUTION_RUN_DIR);
+    outcome = { result: 'ERROR', message: 'required web execution record could not be created' };
+  }
+  return outcome;
 }
 
-/**
- * Replay a recorded payload and leave its receipt as `<receipts>/<name>.txt`.
- * PASS or FAIL is the recording's own assertion; anything else is ERROR.
- */
-export async function replayWebPayload(p, { receipts, name = '01-replay', env, signal, targetUrl }) {
+/** Replay shares exactly the structured capture executor and immutable proof receipt. */
+export async function replayWebPayload(p, { receipts, name = '01-replay', env, signal, targetUrl, execution }) {
   if (!validWebPayload(p)) throw new Error('Invalid web recording payload');
   mkdirSync(receipts, { recursive: true });
-  const outcome = await runWebPayload(p, { env, signal, targetUrl, screenshot: join(receipts, `${name}.png`) });
   const receipt = join(receipts, `${name}.txt`);
-  writeFileSync(receipt, webReceipt(p, outcome), { mode: 0o600 });
+  const outcome = await runWebPayload(p, { env, signal, targetUrl, execution, receipt, screenshot: join(receipts, `${name}.png`) });
+  if (!execution && !(env ?? process.env).TOAD_EXECUTION_RUN_DIR) writeFileSync(receipt, webReceipt(p, outcome), { mode: 0o600 });
   return { ...outcome, result: outcome.result === 'PASS' || outcome.result === 'FAIL' ? outcome.result : 'ERROR', receipt };
 }

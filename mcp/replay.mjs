@@ -118,9 +118,11 @@ export async function replayScenario(envelope, { workdir, receipts, name = '01-r
 }
 
 /** The environment a replay runs in: no secrets, the run's receipts, the chosen sandbox and image. */
-export function replayEnv(env, { receipts, sandbox, image }) {
+export function replayEnv(env, { receipts, sandbox, image, executionRun, scenarioName, scenarios = [] }) {
   const out = { ...env, TOAD_RECEIPTS_DIR: receipts };
   for (const key of ['TOAD_PLAYWRIGHT_SECRETS_FILE', 'TOAD_CLI_SECRETS_FILE', 'TOAD_CLI_PATH', 'TOAD_EXEC_JSON', 'TOAD_RECORDING_ENABLED', 'TOAD_BASE_SCENARIO']) delete out[key];
+  for (const key of ['TOAD_EXECUTION_RUN_DIR', 'TOAD_EXECUTION_SCENARIO_NAME', 'TOAD_EXECUTION_SCENARIOS', 'TOAD_EXECUTION_MODE']) delete out[key];
+  if (executionRun) Object.assign(out, { TOAD_EXECUTION_RUN_DIR: executionRun, TOAD_EXECUTION_SCENARIO_NAME: scenarioName, TOAD_EXECUTION_SCENARIOS: JSON.stringify(scenarios), TOAD_EXECUTION_MODE: 'replay' });
   if (sandbox) out.TOAD_CLI_SANDBOX = sandbox;
   if (image) out.TOAD_CLI_IMAGE = image;
   return out;

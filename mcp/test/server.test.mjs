@@ -33,12 +33,17 @@ function standIn(dir, body) {
   writeFileSync(join(dir, COMMANDS), '{}');
   writeFileSync(join(dir, 'fake-pi.mjs'), `#!/usr/bin/env node
 import fs from 'node:fs'; import path from 'node:path';
+import { fakeWebEvidence } from ${JSON.stringify(new URL('./fake-web-evidence.mjs', import.meta.url).href)};
 const all = process.argv.slice(2);
 const prompt = all[all.indexOf('-p') + 1];
 const receipts = /^\\/skill:test receipts: (.+)$/m.exec(prompt)[1];
 const request = prompt.slice(prompt.indexOf('\\n\\n') + 2);
 const args = ['request=' + request, 'receipts=' + receipts];
-const reply = (text, stopReason = 'stop') => console.log(JSON.stringify({ type: 'agent_end', messages: [{ role: 'assistant', content: [{ type: 'text', text }], stopReason }] }));
+const reply = (text, stopReason = 'stop') => {
+  const behavior = fs.existsSync('behaviour.json') ? JSON.parse(fs.readFileSync('behaviour.json', 'utf8')) : {};
+  fakeWebEvidence(process.env, text, { skip: behavior.missingWebEvidence || behavior.noWebEvidence, machineFailure: behavior.machineFailure });
+  console.log(JSON.stringify({ type: 'agent_end', messages: [{ role: 'assistant', content: [{ type: 'text', text }], stopReason }] }));
+};
 ${body}`, { mode: 0o755 });
 }
 
@@ -63,6 +68,7 @@ fs.mkdirSync(receipts, { recursive: true });
 fs.writeFileSync(path.join(receipts, 'scenario-01-home.png'), Buffer.from(${JSON.stringify(PNG)}, 'base64'));
 fs.writeFileSync(path.join(receipts, 'scenario-02-help.txt'), '$ tool --help\\nexit: 0\\n');
 if (b.nested) { fs.mkdirSync(path.join(receipts, 'scenario')); fs.writeFileSync(path.join(receipts, 'scenario', '01.txt'), 'nested evidence'); }
+if (b.missingWebEvidence) fs.writeFileSync(path.join(process.env.TOAD_EXECUTION_RUN_DIR, 'execution-error.txt'), 'Required evidence missing');
 if (b.background) {
   // Like a pi-subagents background tester: detached, in its own process group.
   const { spawn } = await import('node:child_process');
@@ -752,4 +758,45 @@ test('web handoffs reject setup commands', async t => {
   const result = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff } });
   assert.equal(result.isError, true);
   assert.match(JSON.stringify(result.content), /cli and api handoffs/);
+});
+
+test('project web runs cannot accept agent PASS when mandatory operation evidence is missing', async t => {
+  for (const reported of ['PASS', 'FAIL']) {
+    const dir = agent(t, { answer: `Verdict: ${reported}\nResults:\n- ${reported} | Home`, missingWebEvidence: true });
+    const project = mkdtempSync(join(tmpdir(), 'toad-required-web-evidence-'));
+    t.after(() => rmSync(project, { recursive: true, force: true }));
+    const client = await connect(t, dir);
+    await client.callTool({ name: 'setup_project', arguments: { project_path: project } });
+    const handoff = { version: 1, kind: 'web', target: { url: 'https://app.test' }, request: { goal: 'Home', scenarios: [{ name: 'Home', steps: 'Open /', expected: 'A heading' }] } };
+    const result = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff } });
+    assert.equal(result.structuredContent.verdict, reported === 'FAIL' ? 'FAIL' : 'ERROR');
+    assert.equal(result.structuredContent.scenarios[0].result, reported === 'FAIL' ? 'FAIL' : 'ERROR');
+    assert.equal(result.structuredContent.status, 'evidence_error');
+    assert.equal(result.isError, true);
+  }
+});
+
+test('project web PASS requires actual operation evidence, not only an agent report', async t => {
+  const dir = agent(t, { answer: 'Verdict: PASS\nResults:\n- PASS | Home', noWebEvidence: true });
+  const project = mkdtempSync(join(tmpdir(), 'toad-empty-web-evidence-'));
+  t.after(() => rmSync(project, { recursive: true, force: true }));
+  const client = await connect(t, dir);
+  await client.callTool({ name: 'setup_project', arguments: { project_path: project } });
+  const handoff = { version: 1, kind: 'web', target: { url: 'https://app.test' }, request: { goal: 'Home', scenarios: [{ name: 'Home', steps: 'Open /', expected: 'A heading' }] } };
+  const result = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff } });
+  assert.equal(result.structuredContent.verdict, 'ERROR');
+  assert.equal(result.structuredContent.scenarios[0].result, 'ERROR');
+  assert.equal(result.structuredContent.status, 'evidence_error');
+});
+
+test('project web assertion failure cannot be overwritten by agent PASS', async t => {
+  const dir = agent(t, { answer: 'Verdict: PASS\nResults:\n- PASS | Home', machineFailure: true });
+  const project = mkdtempSync(join(tmpdir(), 'toad-failed-web-evidence-'));
+  t.after(() => rmSync(project, { recursive: true, force: true }));
+  const client = await connect(t, dir);
+  await client.callTool({ name: 'setup_project', arguments: { project_path: project } });
+  const handoff = { version: 1, kind: 'web', target: { url: 'https://app.test' }, request: { goal: 'Home', scenarios: [{ name: 'Home', steps: 'Open /', expected: 'A heading' }] } };
+  const result = await client.callTool({ name: 'run_project_test', arguments: { project_path: project, handoff } });
+  assert.equal(result.structuredContent.verdict, 'FAIL');
+  assert.equal(result.structuredContent.scenarios[0].result, 'FAIL');
 });

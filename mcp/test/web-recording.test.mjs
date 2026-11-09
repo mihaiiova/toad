@@ -271,6 +271,7 @@ function agent(t, { result = 'PASS', capture } = {}) {
   writeFileSync(join(dir, 'fake-pi.mjs'), `#!/usr/bin/env node
 import fs from 'node:fs'; import path from 'node:path';
 import { webReceipt } from ${JSON.stringify(RECORDING)};
+import { fakeWebEvidence } from ${JSON.stringify(new URL('./fake-web-evidence.mjs', import.meta.url).href)};
 const pre = process.argv.slice(2);
 const prompt = pre[pre.indexOf('-p') + 1];
 fs.appendFileSync('requests', JSON.stringify({ request: prompt, recording: process.env.TOAD_RECORDING_ENABLED ?? null }) + '\\n');
@@ -281,6 +282,7 @@ if (capture && ${JSON.stringify(result)} === 'PASS') {
   fs.writeFileSync(path.join(dir, '01-structured.txt.recording.json'), JSON.stringify({ version: 1, scenarioName: ${JSON.stringify(S.name)}, payload: capture }));
 }
 const text = ['Verdict: ${result}', 'Results:', '- ${result} | ${S.name}'].join('\\n');
+fakeWebEvidence(process.env, text);
 console.log(JSON.stringify({ type: 'agent_end', messages: [{ role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text }] }] }));
 `, { mode: 0o755 });
   return dir;

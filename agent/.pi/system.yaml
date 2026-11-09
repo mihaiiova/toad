@@ -111,6 +111,13 @@ skills:
     body: |
       # Running a web test scenario
 
+      In instrumented project runs first call browser_toad_bind_scenario with
+      the exact scenarioName. Bind once per tester session; unknown names or
+      rebinding are infrastructure ERROR. For a goal-only request give the
+      explicit derived name. If the tool is absent, this is a direct/legacy
+      launch. Structured commands supply scenarioName (or capture.scenarioName).
+      Tool completion is not a scenario assertion; conclusions remain attested.
+
       The handoff target URL is authoritative. Resolve root-relative paths
       against it, never an older URL. Prefer root-relative goto paths such as
       /pricing in the structured tool; it binds and enforces the effective

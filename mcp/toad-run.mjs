@@ -382,7 +382,7 @@ export async function toadRun(options, { cwd = process.cwd(), env = process.env,
           // Retries cover a replay that could not run; a failed assertion goes to the agent instead.
           for (let attempt = 0; attempt <= options.retries; attempt++) {
             if (replaySignal.aborted) { outcome = { result: 'ERROR', message: signal.aborted ? 'Not run: toad run was interrupted' : 'The replay run timed out' }; s.attempts.push('ERROR'); break; }
-            outcome = await replay.replayScenario(envelope, { workdir: handoff.target?.workdir, targetUrl: suite.kind === 'web' ? handoff.target?.url : undefined, receipts, name: `${String(attempt + 1).padStart(2, '0')}-replay`, env: replay.replayEnv(env, { receipts: receiptsRoot, sandbox: options.sandbox, image: handoff.target?.image }), signal: replaySignal });
+            outcome = await replay.replayScenario(envelope, { workdir: handoff.target?.workdir, targetUrl: suite.kind === 'web' ? handoff.target?.url : undefined, receipts, name: `${String(attempt + 1).padStart(2, '0')}-replay`, env: replay.replayEnv(env, { receipts: receiptsRoot, sandbox: options.sandbox, image: handoff.target?.image, ...(suite.kind === 'web' ? { executionRun: replayRun, scenarioName: scenario.name, scenarios: handoff.request.scenarios.map(s => s.name) } : {}) }), signal: replaySignal });
             if (outcome.result === 'FAIL') break;
             s.attempts.push(outcome.result);
             if (outcome.result === 'PASS') break;

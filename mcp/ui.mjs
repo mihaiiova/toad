@@ -9,7 +9,7 @@
  * localhost only; run artifacts can contain sensitive data.
  */
 import { createServer } from 'node:http';
-import { readdirSync, readFileSync, existsSync, lstatSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync, existsSync, lstatSync, statSync, realpathSync } from 'node:fs';
 import { dirname, join, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { listProjects } from './projects.mjs';
@@ -17,6 +17,7 @@ import { VERSION } from './agent.mjs';
 import { resultsOf, scenarioResults } from './results.mjs';
 import { recordingStatus } from './recordings.mjs';
 import { suiteOverview } from './suite-recordings.mjs';
+import { readExecutionRecords } from '../agent/tools/toad-execution.mjs';
 
 const HOST = '127.0.0.1';
 const PAGE = join(dirname(fileURLToPath(import.meta.url)), 'ui.html');
@@ -57,7 +58,7 @@ function requireRun(project, id) {
   const decoded = decodeURIComponent(id);
   if (decoded === '.' || decoded === '..' || decoded.includes('/') || decoded.includes('\\')) throw httpError(404, 'Run not found');
   const dir = join(project.runs, decoded);
-  if (!existsSync(dir) || !lstatSync(dir).isDirectory()) throw httpError(404, 'Run not found');
+  if (!existsSync(dir) || !lstatSync(dir).isDirectory() || lstatSync(dir).isSymbolicLink() || realpathSync(dir) !== dir) throw httpError(404, 'Run not found');
   return dir;
 }
 
@@ -184,7 +185,7 @@ function detail(project, id) {
   const recordings = (handoff.request?.scenarios ?? []).map(s => recordingStatus(dir, handoff.kind, s));
   return {
     ...summary(project, id), projectPath: project.path,
-    handoff, recordings,
+    handoff, recordings, execution: readExecutionRecords(dir),
     report: readText(join(dir, 'reports', 'report.md')),
     files: receiptFiles(dir),
     newer: runs[at - 1] ?? null, older: runs[at + 1] ?? null,
@@ -197,7 +198,15 @@ function serveFile(res, project, id, rel) {
   if (decoded.startsWith('/') || decoded.includes('\\') || decoded.split('/').includes('..')) throw httpError(400, 'Invalid path');
   const target = join(dir, decoded);
   let st;
-  try { st = lstatSync(target); } catch { throw httpError(404, 'File not found'); }
+  try {
+    let current = dir;
+    for (const part of decoded.split('/')) {
+      if (!part || part === '.') throw new Error();
+      current = join(current, part);
+      if (lstatSync(current).isSymbolicLink()) throw new Error();
+    }
+    st = lstatSync(target);
+  } catch { throw httpError(404, 'File not found'); }
   if (!st.isFile()) throw httpError(404, 'Not a file');
   const data = readFileSync(target);
   res.writeHead(200, {

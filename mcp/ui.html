@@ -310,7 +310,7 @@ h1 { font-size: 22px; line-height: 1.25; margin: 0; letter-spacing: -.015em; }
       <dt><kbd>[</kbd> <kbd>]</kbd></dt><dd>Previous / next project</dd>
       <dt><kbd>j</kbd> <kbd>k</kbd></dt><dd>Move through runs (older / newer on a run page)</dd>
       <dt><kbd>↵</kbd></dt><dd>Open the selected run</dd>
-      <dt><kbd>1</kbd>–<kbd>4</kbd></dt><dd>Run tabs: report, scenarios, receipts, handoff</dd>
+      <dt><kbd>1</kbd>–<kbd>5</kbd></dt><dd>Run tabs: report, scenarios, receipts, handoff, timeline</dd>
       <dt><kbd>g</kbd> <kbd>h</kbd></dt><dd>All projects</dd>
       <dt><kbd>esc</kbd></dt><dd>Close, or go up one level</dd>
     </dl>
@@ -679,7 +679,7 @@ function runPage(r) {
   const ctx = { runDir: `${d.projectPath}/.toad/runs/${d.id}`, pid: r.pid, rid: r.rid };
   const scenarios = d.handoff?.request?.scenarios || [];
   const shots = d.files.filter(f => isImage(f.path));
-  const tabs = [['report', 'Report', ''], ['scenarios', 'Scenarios', scenarios.length], ['receipts', 'Receipts', d.files.length], ['handoff', 'Handoff', '']];
+  const tabs = [['report', 'Report', ''], ['scenarios', 'Scenarios', scenarios.length], ['receipts', 'Receipts', d.files.length], ['handoff', 'Handoff', ''], ['timeline', 'Timeline', d.execution?.records?.length ?? 0]];
   const nav = `<button class="btn" data-act="go" data-href="${d.newer ? href.run(r.pid, d.newer, r.tab) : ''}" ${d.newer ? '' : 'disabled'} title="Newer run (k)">${ICON.left} Newer</button><button class="btn" data-act="go" data-href="${d.older ? href.run(r.pid, d.older, r.tab) : ''}" ${d.older ? '' : 'disabled'} title="Older run (j)">Older ${ICON.right}</button>`;
   const counts = { PASS: 0, FAIL: 0, ERROR: 0 };
   const redo = [];
@@ -722,6 +722,20 @@ function runPage(r) {
       }).join('')}</div>`;
   }).join('') : `<div class="empty">${live(d) ? 'No receipts yet; they appear here as the run records them.' : 'No receipts.'}</div>`;
   if (r.tab === 'handoff') body = `<pre class="json">${jsonHtml(d.handoff)}</pre>`;
+  if (r.tab === 'timeline') {
+    const execution = d.execution ?? { records: [], errors: [] };
+    const warnings = execution.errors.map(e => `<div class="banner warn">${esc(e)}</div>`).join('');
+    body = warnings + (execution.records.length ? execution.records.map(record => `<div class="group">
+      <h3><b>${esc(record.scenarioName)}</b><span>${esc(record.mode)} · ${esc(record.scenarioSource)} scenario</span></h3>
+      <div class="scenario"><span class="num">·</span><span class="name">${esc(record.operation)}</span><span class="tag">${esc(record.outcome)}</span>
+      <div class="line"><b>Execution</b> <code>${esc(record.id)}</code> · <b>Attempt</b> <code>${esc(record.attemptId)}</code></div>
+      <div class="line"><b>Started</b> ${esc(record.startedAt)} · <b>Duration</b> ${record.finishedAt ? esc(dur(Date.parse(record.finishedAt) - Date.parse(record.startedAt))) : 'in progress'}</div>
+      <div class="line">${record.assertion ? `Machine assertion: ${esc(record.assertion.kind)} — ${esc(record.assertion.result)}` : 'Tool operation only; scenario conclusions are tester-attested, not machine assertions.'}</div>
+      ${record.steps.map(step => `<div class="line"><b>${step.index}. ${esc(step.operation)}</b> — ${esc(step.outcome)}${step.assertion ? ` · assertion ${esc(step.assertion.kind)}: ${esc(step.assertion.result)}` : ' · action completion only'}</div>`).join('')}
+      <div class="line"><b>Required evidence</b> ${record.evidenceComplete ? 'saved' : 'incomplete'}</div>
+      <div class="line">${record.captures.map(c => `${esc(c.kind)}: ${esc(c.status)}`).join(' · ')}</div>
+      <div class="files">${record.artifacts.map(a => `<a target="_blank" rel="noopener" href="/api/projects/${enc(r.pid)}/runs/${enc(r.rid)}/file/${enc(a.path)}">${esc(a.kind)}</a>`).join(' · ')}</div></div></div>`).join('') : '<div class="empty">Timeline unavailable. Historical runs retain their summary and receipts; no operation evidence is inferred.</div>');
+  }
   const banner = live(d) ? `<div class="banner"><span class="spinner"></span><span>${d.state === 'waiting' ? 'Waiting for a free test slot' : 'Running'} for <b data-live="${d.started}">${dur(elapsed(d))}</b>. ${d.files.length} receipt${d.files.length === 1 ? '' : 's'} so far; this page updates on its own.</span></div>`
     : d.state === 'failed' ? `<div class="banner warn">This run could not start: ${esc(d.error || 'unknown error')}</div>`
     : d.state === 'interrupted' ? `<div class="banner warn">This run stopped without a report: its server exited or was killed, or it never started.</div>`
@@ -918,7 +932,7 @@ document.addEventListener('keydown', e => {
     const d = data.details.get(`${r.pid}/${r.rid}`);
     if (e.key === 'j' && d?.older) location.hash = href.run(r.pid, d.older, r.tab);
     if (e.key === 'k' && d?.newer) location.hash = href.run(r.pid, d.newer, r.tab);
-    const tab = ['report', 'scenarios', 'receipts', 'handoff'][Number(e.key) - 1];
+    const tab = ['report', 'scenarios', 'receipts', 'handoff', 'timeline'][Number(e.key) - 1];
     if (tab) location.hash = href.run(r.pid, r.rid, tab);
     if (e.key === 'Escape') location.hash = href.project(r.pid);
     return;

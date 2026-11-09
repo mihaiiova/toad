@@ -316,6 +316,21 @@ toad projects forget /path/to/x   # drop one from the list (its files stay)
 
 A project joins the list when it is set up or runs a test.
 
+### Web execution timeline
+
+Project web runs also expose a **Timeline** tab in the viewer. It links each
+actual browser operation or structured check to its scenario, unique attempt,
+duration, outcome and evidence. Successful browser actions are not themselves
+scenario assertions; exploratory conclusions remain tester-attested. Historical
+runs without instrumentation show **Timeline unavailable**, not inferred steps.
+
+The web tester first binds its owned browser session to the exact scenario name.
+Structured web capture and replay use the same execution records. Records live
+under `executions/`, separate from proof-checked scenario receipts. Required
+operation evidence that cannot be saved blocks PASS; optional diagnostic capture
+failures are visible without changing a product assertion. Screenshots and other
+diagnostics may contain sensitive page content; treat the whole run as sensitive.
+
 ## Run tests on every deploy
 
 A handoff your agent sends once can be saved as a **suite** and run again

@@ -11,6 +11,15 @@ such as `/pricing`; the tool binds them to the effective run target and refuses
 off-target navigation. Use target-relative paths when describing reusable
 scenarios. Do not rewrite expected text to make an assertion pass.
 
+In instrumented project runs, FIRST call `browser_toad_bind_scenario` with
+`scenarioName` copied exactly from the request. Bind once per tester/browser
+session; never reuse a session for a different scenario. For a goal-only request,
+provide the explicit bounded scenario name you derived. Binding errors are ERROR,
+not product FAIL. If this tool is absent (direct/legacy launch), proceed normally.
+A successful browser tool operation is not a scenario assertion; report your
+observed conclusions as tester-attested and cite the evidence. For the structured
+web command, always supply `scenarioName` (or the same exact name in capture).
+
 1. Open the URL. If it fails to load, stop: the scenario is ERROR, with
    the error and a screenshot if a page rendered.
 2. Before each action, take an accessibility snapshot and act on the
