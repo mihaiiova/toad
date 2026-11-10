@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runProject } from '../run.mjs';
@@ -8,7 +8,7 @@ import { scoreEvaluation } from '../evaluation-score.mjs';
 
 // Harness-only: real runProject/record writer/reader, no model or product calls.
 test('completed ERROR attestations are conclusions, not missing execution evidence', async t => {
-  const root = mkdtempSync(join(tmpdir(), 'toad-attestation-completion-'));
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'toad-attestation-completion-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const agent = join(root, 'agent');
   mkdirSync(join(agent, '.pi/git/github.com/mihaiiova/pi-commands'), { recursive: true });
