@@ -49,3 +49,13 @@ proof. `captured:true` means a candidate was written beside the receipt, not
 that it was finalized. Finalization requires the scenario to PASS, this to be
 its only structured run, and the handoff to have no credentials. `toad run`
 replays a saved suite's recording the same way, without a model.
+
+## Execution evidence
+
+Project runs also write versioned operation evidence under the run’s `executions/`
+directory, not in proof-checked receipt folders. Supply `scenarioName` with the
+exact declared scenario name (the same value in `capture.scenarioName` also
+suffices). The execution timeline distinguishes action completion from typed
+assertions and preserves partial/cancelled operations. Required outcome/receipt
+persistence failure is ERROR; optional diagnostic capture failure does not turn
+a passing assertion into FAIL. Diagnostics remain sensitive run artifacts.

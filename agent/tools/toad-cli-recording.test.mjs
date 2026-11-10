@@ -80,11 +80,11 @@ for (const backend of backends) test(`replay of a recorded payload is determinis
   assert.deepEqual(first.checks, { exitCode: true, stdout: true });
   assert.equal(first.actual.stdout, 'ready\n');
   // A second run reaches the same verdict from the recording alone.
-  assert.equal(replayCliPayload(payload, { project, receipts, env }).result, 'PASS');
+  assert.equal(replayCliPayload(payload, { project, receipts, env, name: '02-repeat' }).result, 'PASS');
 
   // A changed program fails the recorded assertion: a regression, reported as FAIL.
   script('printf "broken\\n"\n');
-  const regression = replayCliPayload(payload, { project, receipts, env });
+  const regression = replayCliPayload(payload, { project, receipts, env, name: '03-regression' });
   assert.equal(regression.result, 'FAIL');
   assert.deepEqual(regression.checks, { exitCode: true, stdout: false });
   assert.equal(regression.actual.stdout, 'broken\n');
@@ -92,8 +92,8 @@ for (const backend of backends) test(`replay of a recorded payload is determinis
   // An expected nonzero exit is its own assertion, not a failure.
   script('printf "expected\\n"; exit 7\n');
   const nonzero = { program: './check', args: [], expect: { exitCode: 7, stdout: { equals: 'expected\n' } } };
-  assert.equal(replayCliPayload(nonzero, { project, receipts, env }).result, 'PASS');
-  assert.equal(replayCliPayload({ ...nonzero, expect: { exitCode: 0, stdout: { equals: 'expected\n' } } }, { project, receipts, env }).result, 'FAIL');
+  assert.equal(replayCliPayload(nonzero, { project, receipts, env, name: '04-nonzero' }).result, 'PASS');
+  assert.equal(replayCliPayload({ ...nonzero, expect: { exitCode: 0, stdout: { equals: 'expected\n' } } }, { project, receipts, env, name: '05-wrong-exit' }).result, 'FAIL');
 });
 
 test('replay ignores an inherited setup workspace, PATH addition and capture switch', { skip: !sandboxAvailable && 'no CLI sandbox on this machine' }, t => {
@@ -113,9 +113,7 @@ test('replay ignores an inherited setup workspace, PATH addition and capture swi
   assert.equal(replay.result, 'FAIL');
   assert.equal(replay.actual.stdout, 'broken\n');
   // The PATH addition is not part of the recording either.
-  const byPath = replayCliPayload({ program: 'ready-tool', args: [], expect: { exitCode: 0, stdout: { contains: 'ready' } } }, { project, receipts, env: dirty });
-  assert.equal(byPath.result, 'FAIL');
-  assert.equal(byPath.actual.exitCode, 127);
+  assert.throws(() => replayCliPayload({ program: 'ready-tool', args: [], expect: { exitCode: 0, stdout: { contains: 'ready' } } }, { project, receipts, env: dirty, name: '02-no-path' }), /did not run cleanly/);
 });
 
 test('replay reports an infrastructure failure instead of a verdict', { skip: !sandboxAvailable && 'no CLI sandbox on this machine' }, t => {

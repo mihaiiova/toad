@@ -8,6 +8,7 @@
 import { closeSync, constants, fstatSync, mkdirSync, openSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { executionContext, noteExecutionError } from './toad-execution.mjs';
 import { bindWebTarget, runWebPayload, validWebPayload, webCandidateFits, webReceipt } from './toad-web-recording.mjs';
 
 const agentRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -35,16 +36,17 @@ function assertNoSecrets() {
   catch (error) { if (error instanceof Refused) throw error; if (error.code !== 'ENOENT') throw new Refused('credentials are not supported'); }
 }
 
-let request, receiptsDir;
+let request, receiptsDir, execution;
 try {
   if (process.argv.length > 3) throw new Error();
   const raw = readFileSync(process.argv[2] ?? 0);
   if (raw.length > 65536) throw new Error();
   request = JSON.parse(raw.toString('utf8'));
   const capture = request && Object.hasOwn(request, 'capture');
-  if (!exactKeys(request, ['receipts', 'name', 'payload', ...(capture ? ['capture'] : [])]) ||
+  if (!exactKeys(request, ['receipts', 'name', 'payload', ...(capture ? ['capture'] : []), ...(Object.hasOwn(request, 'scenarioName') ? ['scenarioName'] : [])]) ||
       typeof request.receipts !== 'string' || !request.receipts || request.receipts.includes('\0') ||
       typeof request.name !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(request.name) ||
+      (Object.hasOwn(request, 'scenarioName') && (typeof request.scenarioName !== 'string' || !request.scenarioName.trim() || request.scenarioName.length > 500)) ||
       (capture && (!exactKeys(request.capture, ['scenarioName', 'complete']) || typeof request.capture.scenarioName !== 'string' || !request.capture.scenarioName.trim() || request.capture.complete !== true))) throw new Error();
   if (Object.hasOwn(process.env, 'TOAD_WEB_TARGET_URL')) {
     try { request.payload = bindWebTarget(request.payload, process.env.TOAD_WEB_TARGET_URL); }
@@ -57,6 +59,17 @@ try {
   receiptsDir = resolve(process.cwd(), request.receipts);
   if (receiptsDir !== root && !receiptsDir.startsWith(root + sep)) throw new Refused(`the receipts folder must be inside ${root}`);
   assertNoSecrets();
+  if (process.env.TOAD_EXECUTION_RUN_DIR) {
+    try {
+      let scenarioName = request.scenarioName ?? request.capture?.scenarioName;
+      if (!scenarioName) {
+        const names = JSON.parse(process.env.TOAD_EXECUTION_SCENARIOS ?? '[]');
+        const matches = names.filter(n => n.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') === receiptsDir.split(sep).at(-1));
+        if (matches.length === 1) scenarioName = matches[0];
+      }
+      execution = executionContext(process.env, scenarioName);
+    } catch { noteExecutionError(process.env.TOAD_EXECUTION_RUN_DIR); throw new Refused('ERROR: provide the exact scenarioName for web execution evidence'); }
+  }
 } catch (error) {
   request = undefined;
   reply({ status: 'error', error: error instanceof Refused ? error.message : 'invalid structured web request' }, 2);
@@ -67,9 +80,9 @@ if (request) {
     const receipt = join(receiptsDir, `${request.name}.txt`);
     try { statSync(receipt); throw Object.assign(new Error(), { code: 'EEXIST' }); } catch (error) { if (error.code !== 'ENOENT') throw error; }
     mkdirSync(receiptsDir, { recursive: true });
-    const outcome = await runWebPayload(request.payload, { targetUrl: process.env.TOAD_WEB_TARGET_URL, screenshot: join(receiptsDir, `${request.name}.png`) });
-    // A receipt is never overwritten: a later run cannot replace a passing one.
-    writeFileSync(receipt, webReceipt(request.payload, outcome), { flag: 'wx', mode: 0o600 });
+    const outcome = await runWebPayload(request.payload, { targetUrl: process.env.TOAD_WEB_TARGET_URL, execution, receipt, screenshot: join(receiptsDir, `${request.name}.png`) });
+    // The instrumented executor writes its proof before finalizing required evidence.
+    if (!execution) writeFileSync(receipt, webReceipt(request.payload, outcome), { flag: 'wx', mode: 0o600 });
     const status = outcome.result === 'PASS' ? 'pass' : outcome.result === 'FAIL' ? 'fail' : 'error';
     let captured = false;
     if (status === 'pass' && request.capture && process.env.TOAD_RECORDING_ENABLED === 'web-v1' && webCandidateFits(request.payload, request.capture.scenarioName)) {

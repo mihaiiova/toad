@@ -79,3 +79,13 @@ PASS or FAIL with the observed exit code and stdout. It drops an inherited
 `TOAD_BASE_SCENARIO`, `TOAD_CLI_PATH`, credential selector or recording switch,
 because none of those belong to the recording, and keeps an explicit
 `TOAD_CLI_SANDBOX` choice.
+
+## Project evidence
+
+Supply `scenarioName` with the exact declared scenario name even when not
+capturing (`capture.scenarioName` also binds it). CLI exit/stdout checks and API
+status/body checks use the existing sandbox runner and shared run-local execution
+records outside receipt folders. Operation completion and machine assertions are
+distinct. For exploratory shell commands, cite returned execution IDs in an
+explicit `cli_attest_scenario` request; missing completion is ERROR. Required
+receipt failure cannot turn a would-be pass into PASS or erase observed FAIL.

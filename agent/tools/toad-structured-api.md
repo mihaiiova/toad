@@ -35,3 +35,13 @@ outside the agent: `toad run` replays a suite's saved recording with the
 deterministic replay helper, moving the URL only when `--url` overrides the
 suite's URL and the recorded URL is under it. Never replay write requests
 against production.
+
+## Project evidence
+
+Supply `scenarioName` with the exact declared scenario name even when not
+capturing (`capture.scenarioName` also binds it). CLI exit/stdout checks and API
+status/body checks use the existing sandbox runner and shared run-local execution
+records outside receipt folders. Operation completion and machine assertions are
+distinct. For exploratory shell commands, cite returned execution IDs in an
+explicit `cli_attest_scenario` request; missing completion is ERROR. Required
+receipt failure cannot turn a would-be pass into PASS or erase observed FAIL.

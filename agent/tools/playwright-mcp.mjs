@@ -9,6 +9,7 @@
  * relative name lands there too, never in the agent's folder.
  */
 import { spawn } from 'node:child_process';
+import { relayWebTransport } from './toad-web-transport.mjs';
 import { existsSync, mkdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -19,7 +20,9 @@ const secrets = process.env.TOAD_PLAYWRIGHT_SECRETS_FILE || join(root, '.faur', 
 mkdirSync(out, { recursive: true });
 const args = [...process.argv.slice(2), '--output-dir', out, ...(existsSync(secrets) ? ['--secrets', secrets] : [])];
 // npx is a .cmd script on Windows; the arguments here are fixed, not user input.
-const child = spawn('npx', args, { cwd: out, stdio: 'inherit', shell: process.platform === 'win32' });
-for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => child.kill(signal));
+const instrumented = !!process.env.TOAD_EXECUTION_RUN_DIR;
+const child = spawn('npx', args, { cwd: out, stdio: instrumented ? ['pipe', 'pipe', 'inherit'] : 'inherit', shell: process.platform === 'win32' });
+const relay = instrumented ? relayWebTransport(child) : null;
+for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => relay ? relay.shutdown() : child.kill(signal));
 child.on('error', error => { process.stderr.write(`playwright-mcp: ${error.message}\n`); process.exit(1); });
 child.on('exit', (code, signal) => process.exit(code ?? (signal ? 1 : 0)));

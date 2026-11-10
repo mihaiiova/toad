@@ -310,7 +310,7 @@ h1 { font-size: 22px; line-height: 1.25; margin: 0; letter-spacing: -.015em; }
       <dt><kbd>[</kbd> <kbd>]</kbd></dt><dd>Previous / next project</dd>
       <dt><kbd>j</kbd> <kbd>k</kbd></dt><dd>Move through runs (older / newer on a run page)</dd>
       <dt><kbd>↵</kbd></dt><dd>Open the selected run</dd>
-      <dt><kbd>1</kbd>–<kbd>4</kbd></dt><dd>Run tabs: report, scenarios, receipts, handoff</dd>
+      <dt><kbd>1</kbd>–<kbd>5</kbd></dt><dd>Run tabs: report, scenarios, receipts, handoff, timeline</dd>
       <dt><kbd>g</kbd> <kbd>h</kbd></dt><dd>All projects</dd>
       <dt><kbd>esc</kbd></dt><dd>Close, or go up one level</dd>
     </dl>
@@ -513,7 +513,7 @@ function projectPage(pid) {
 
 /** Saved suites, each scenario's recording (recorded, stale or none) and its readable steps. */
 const RECORDING = { recorded: 'Recorded', stale: 'Stale', none: 'None' };
-const STALE_WHY = { changed: 'steps or expected changed', unsupported: 'no longer supported by this suite', invalid: 'not a valid recording' };
+const STALE_WHY = { changed: 'steps or expected changed', unsupported: 'no longer supported by this suite', invalid: 'not a valid recording', target: 'suite target changed; original target is not replayed' };
 function suitesSection(pid) {
   const s = data.suites.get(pid);
   if (!s) return '';
@@ -524,8 +524,8 @@ function suitesSection(pid) {
     const n = k => suite.scenarios.filter(x => x.recording.status === k).length;
     const key = `suite:${suite.name}`;
     return `<details class="receipt-row" data-path="${esc(key)}"${ui.open.has(key) ? ' open' : ''}><summary>${ICON.chev}<span class="cmd">${esc(suite.name)}${suite.title && suite.title !== suite.name ? ` · ${esc(suite.title)}` : ''}</span><span class="tag">${esc(suite.kind)}</span><span class="file">${suite.scenarios.length} scenario${suite.scenarios.length === 1 ? '' : 's'} · ${n('recorded')} recorded${n('stale') ? ` · ${n('stale')} stale` : ''}</span></summary>
-      <div style="padding:10px 12px;border-top:1px solid var(--border)">${suite.scenarios.map((sc, i) => `<div class="scenario${sc.recording.status === 'stale' ? ' r-ERROR' : sc.recording.status === 'recorded' ? ' r-PASS' : ''}"><span class="num">${i + 1}</span><span class="name">${esc(sc.name)}</span><span class="tag" title="Saved recording">${esc(RECORDING[sc.recording.status] ?? 'None')}</span>
-        <div class="line"><b>Steps</b> ${esc(sc.steps)}</div><div class="line"><b>Expected</b> ${esc(sc.expected)}</div>
+      <div style="padding:10px 12px;border-top:1px solid var(--border)"><div class="line">${esc(suite.edits ?? '')}</div>${(suite.diagnostics ?? []).map(d => `<div class="banner warn">${esc(`${d.file}${d.line ? `:${d.line}:${d.column}` : ''}: ${d.path}: ${d.explanation}. ${d.remedy}`)}</div>`).join('')}${suite.scenarios.map((sc, i) => `<div class="scenario${sc.recording.status === 'stale' ? ' r-ERROR' : sc.recording.status === 'recorded' ? ' r-PASS' : ''}"><span class="num">${i + 1}</span><span class="name">${esc(sc.name)}</span><span class="tag" title="Saved recording">${esc(RECORDING[sc.recording.status] ?? 'None')}</span>
+        <div class="line"><b>Steps</b> ${esc(sc.steps)}</div><div class="line"><b>Expected</b> ${esc(sc.expected)}</div><div class="line"><b>Current intent</b> <code>${esc(sc.intentHash ?? '')}</code> · <b>Source</b> <code>${esc(sc.recordingFile ?? '')}</code></div>
         ${sc.recording.status === 'stale' ? `<div class="line"><b>Recording</b> Stale: ${esc(STALE_WHY[sc.recording.reason] ?? sc.recording.reason)}; ignored</div>` : ''}
         ${sc.recording.status === 'recorded' ? sc.recording.steps.map(step => `<div class="line"><b>Action</b> <code>${esc(step.action)}</code> · <b>Assertion</b> ${esc(step.assertion)}</div>`).join('') : ''}</div>`).join('')}</div></details>`;
   }).join('')}</div>`;
@@ -679,7 +679,7 @@ function runPage(r) {
   const ctx = { runDir: `${d.projectPath}/.toad/runs/${d.id}`, pid: r.pid, rid: r.rid };
   const scenarios = d.handoff?.request?.scenarios || [];
   const shots = d.files.filter(f => isImage(f.path));
-  const tabs = [['report', 'Report', ''], ['scenarios', 'Scenarios', scenarios.length], ['receipts', 'Receipts', d.files.length], ['handoff', 'Handoff', '']];
+  const tabs = [['report', 'Report', ''], ['scenarios', 'Scenarios', scenarios.length], ['receipts', 'Receipts', d.files.length], ['handoff', 'Handoff', ''], ['timeline', 'Timeline', d.execution?.records?.length ?? 0]];
   const nav = `<button class="btn" data-act="go" data-href="${d.newer ? href.run(r.pid, d.newer, r.tab) : ''}" ${d.newer ? '' : 'disabled'} title="Newer run (k)">${ICON.left} Newer</button><button class="btn" data-act="go" data-href="${d.older ? href.run(r.pid, d.older, r.tab) : ''}" ${d.older ? '' : 'disabled'} title="Older run (j)">Older ${ICON.right}</button>`;
   const counts = { PASS: 0, FAIL: 0, ERROR: 0 };
   const redo = [];
@@ -687,9 +687,9 @@ function runPage(r) {
   const tally = counts.PASS + counts.FAIL + counts.ERROR ? `<span class="item tally">${['PASS', 'FAIL', 'ERROR'].filter(k => counts[k]).map(k => `<span class="${k}">${counts[k]} ${k.toLowerCase()}</span>`).join('')}</span>` : '';
   const modes = Object.values(d.replay?.modes || {});
   const modeCount = m => modes.filter(x => x === m).length;
-  const modeTally = modes.length ? `<span class="item" title="How toad run decided each scenario: replayed a saved recording without a model, ran the agent, or healed a failed recording">${[['replay', 'replayed'], ['agent', 'by the agent'], ['healed', 'healed']].filter(([m]) => modeCount(m)).map(([m, label]) => `${modeCount(m)} ${label}`).join(' · ')}</span>` : '';
+  const modeTally = modes.length ? `<span class="item" title="How toad run decided each scenario: replayed a saved recording without a model, ran the agent, or investigated a failed recording without erasing its failure">${[['replay', 'replayed'], ['agent', 'by the agent'], ['healed', 'investigated (FAIL retained)']].filter(([m]) => modeCount(m)).map(([m, label]) => `${modeCount(m)} ${label}`).join(' · ')}</span>` : '';
   let body = '';
-  if (r.tab === 'report') body = d.report ? `<div class="md">${markdown(reportBody(d.report), ctx)}</div>` : `<div class="empty">${live(d) ? 'The report is written when the run finishes. Receipts appear as they are recorded.' : 'This run has no report.'}</div>`;
+  if (r.tab === 'report') body = (d.replay?.priorRun && Object.values(d.replay?.results ?? {}).includes('FAIL') ? `<div class="banner warn">Agent investigation report; the original deterministic FAIL is retained. Replacement recordings do not change this outcome.</div>` : '') + (d.report ? `<div class="md">${markdown(reportBody(d.report), ctx)}</div>` : `<div class="empty">${live(d) ? 'The report is written when the run finishes. Receipts appear as they are recorded.' : 'This run has no report.'}</div>`);
   const byFolder = groups(d.files);
   const folders = byFolder.map(([name]) => name).filter(Boolean);
   const fileLinks = files => files.map(f => `<a href="${href.run(r.pid, r.rid, 'receipts')}&file=${enc(f.path)}" title="${esc(f.path)}">${esc(f.name)}</a>`).join('');
@@ -704,8 +704,10 @@ function runPage(r) {
       <div class="line"><b>Steps</b> ${esc(s.steps)}</div><div class="line"><b>Expected</b> ${esc(s.expected)}</div>
       <div class="line"><b>Recording</b> ${d.recordings?.[i]?.status === 'recorded' ? 'Recorded' : d.recordings?.[i]?.status === 'not-recordable' ? `Not recordable (${esc(d.recordings[i].reason)})` : 'Not captured'}</div>
       ${d.recordings?.[i]?.status === 'recorded' ? d.recordings[i].steps.map(step => `<div class="line"><b>Action</b> ${esc(step.action)} · <b>Assertion</b> ${esc(step.assertion)}</div>`).join('') : ''}
-      ${d.replay?.modes?.[s.name] ? `<div class="line"><b>Mode</b> ${esc({ replay: 'Replayed the saved recording, without a model', agent: 'Run by the agent', healed: 'Healed: the saved recording failed, and the agent passed it' }[d.replay.modes[s.name]])}</div>` : ''}
+      ${d.replay?.modes?.[s.name] ? `<div class="line"><b>Mode</b> ${esc({ replay: 'Replayed the saved recording, without a model', agent: 'Run by the agent', healed: 'Investigated: the original saved assertion remains FAIL; any replacement is separate' }[d.replay.modes[s.name]])}</div>` : ''}
       ${d.replay?.proposed?.[s.name] ? `<div class="line"><b>${d.replay.proposed[s.name].updated ? 'Updated recording' : 'Proposed recording'}</b> ${d.replay.proposed[s.name].previous ? 'replaces the saved one' : 'new; the suite had none usable'}</div>
+        ${d.replay.proposed[s.name].failure ? `<div class="line"><b>Original failed assertion</b> ${d.replay.proposed[s.name].failure.assertions.map(a => esc(a)).join('; ')} · <a href="${href.run(r.pid, d.replay.proposed[s.name].failure.run)}">Failed replay and receipts</a> · ${d.replay.proposed[s.name].failure.executionIds.length} execution reference(s). Original FAIL is retained.</div>` : ''}
+        <div class="line">Review changed actions and assertions, including weakened checks. Complete-scenario capture is tester-attested, not a semantic equivalence proof.</div>
         <pre class="diff">${d.replay.proposed[s.name].diff.map(l => esc(l)).join('\n')}</pre>` : ''}
       ${own.length ?`<div class="files">${fileLinks(own)}</div>` : ''}</div>`;
   }).join('') : `<div class="empty">No scenarios were given; Toad derived them from the goal. See the report.</div>`);
@@ -722,6 +724,21 @@ function runPage(r) {
       }).join('')}</div>`;
   }).join('') : `<div class="empty">${live(d) ? 'No receipts yet; they appear here as the run records them.' : 'No receipts.'}</div>`;
   if (r.tab === 'handoff') body = `<pre class="json">${jsonHtml(d.handoff)}</pre>`;
+  if (r.tab === 'timeline') {
+    const execution = d.execution ?? { records: [], errors: [] };
+    const warnings = execution.errors.map(e => `<div class="banner warn">${esc(e)}</div>`).join('');
+    body = warnings + (execution.records.length ? execution.records.map(record => `<div class="group">
+      <h3><b>${esc(record.scenarioName)}</b><span>${esc(record.kind)} · ${esc(record.mode)} · ${esc(record.scenarioSource)} scenario</span></h3>
+      <div class="scenario"><span class="num">·</span><span class="name">${esc(record.operation)}</span><span class="tag">${esc(record.outcome)}</span>
+      <div class="line"><b>Execution</b> <code>${esc(record.id)}</code> · <b>Attempt</b> <code>${esc(record.attemptId)}</code></div>
+      <div class="line"><b>Started</b> ${esc(record.startedAt)} · <b>Duration</b> ${record.finishedAt ? esc(dur(Date.parse(record.finishedAt) - Date.parse(record.startedAt))) : 'in progress'}</div>
+      <div class="line">${record.assertion ? `${record.assertion.kind === 'agentAttestation' ? 'Tester-attested conclusion (not machine verified)' : 'Machine assertion'}: ${esc(record.assertion.kind)} — ${esc(record.assertion.result)}` : record.steps.some(s => s.assertion) ? 'Typed machine assertions below; action completion alone is not a scenario assertion.' : 'Tool operation only; scenario conclusions require explicit verification.'}</div>
+      ${record.verification ? `<div class="line"><b>Verification</b> ${esc(record.verification.source)}${record.verification.executionIds.length ? ` · linked executions: ${record.verification.executionIds.map(id => esc(id)).join(', ')}` : ''}</div>` : ''}
+      ${record.steps.map(step => `<div class="line"><b>${step.index}. ${esc(step.operation)}</b> — ${esc(step.outcome)}${step.assertion ? ` · assertion ${esc(step.assertion.kind)}: ${esc(step.assertion.result)}` : ' · action completion only'}</div>`).join('')}
+      <div class="line"><b>Required evidence</b> ${record.evidenceComplete ? 'saved' : 'incomplete'}</div>
+      <div class="line">${record.captures.map(c => `${esc(c.kind)}: ${esc(c.status)}`).join(' · ')}</div>
+      <div class="files">${record.artifacts.map(a => `<a target="_blank" rel="noopener" href="/api/projects/${enc(r.pid)}/runs/${enc(r.rid)}/file/${enc(a.path)}">${esc(a.kind)}</a>`).join(' · ')}</div></div></div>`).join('') : '<div class="empty">Timeline unavailable. Historical runs retain their summary and receipts; no operation evidence is inferred.</div>');
+  }
   const banner = live(d) ? `<div class="banner"><span class="spinner"></span><span>${d.state === 'waiting' ? 'Waiting for a free test slot' : 'Running'} for <b data-live="${d.started}">${dur(elapsed(d))}</b>. ${d.files.length} receipt${d.files.length === 1 ? '' : 's'} so far; this page updates on its own.</span></div>`
     : d.state === 'failed' ? `<div class="banner warn">This run could not start: ${esc(d.error || 'unknown error')}</div>`
     : d.state === 'interrupted' ? `<div class="banner warn">This run stopped without a report: its server exited or was killed, or it never started.</div>`
@@ -918,7 +935,7 @@ document.addEventListener('keydown', e => {
     const d = data.details.get(`${r.pid}/${r.rid}`);
     if (e.key === 'j' && d?.older) location.hash = href.run(r.pid, d.older, r.tab);
     if (e.key === 'k' && d?.newer) location.hash = href.run(r.pid, d.newer, r.tab);
-    const tab = ['report', 'scenarios', 'receipts', 'handoff'][Number(e.key) - 1];
+    const tab = ['report', 'scenarios', 'receipts', 'handoff', 'timeline'][Number(e.key) - 1];
     if (tab) location.hash = href.run(r.pid, r.rid, tab);
     if (e.key === 'Escape') location.hash = href.project(r.pid);
     return;

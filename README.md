@@ -148,7 +148,7 @@ tool timeout to 15 minutes or more.
 
 Restart the coding agent, then ask it to *"list the Toad tools"*. You should
 see `get_toad_guide`, `setup_project`, `run_project_test`,
-`save_suite_from_run`, `run_web_test` and `run_cli_test`.
+`save_suite_from_run`.
 
 The server also gives the agent a guide (the `get_toad_guide` tool and the
 `toad://guide` resource) on how to write good tests and handle credentials.
@@ -288,7 +288,8 @@ out of git.
 ├── .gitignore
 ├── suites/          saved suites for `toad run` (commit them)
 │   ├── example.yaml     a commented template
-│   └── <name>.recordings/   recordings saved with a suite by `toad suites save`
+│   ├── <name>.recordings/   recordings saved with a suite by `toad suites save`
+│   └── <name>.recording-context.json   original target provenance for API/web
 └── runs/            one folder per run (ignored by git)
     └── 2026-11-02T15-04-17-657Z-<id>/
         ├── handoff.yaml     what was asked, with defaults filled in
@@ -315,6 +316,21 @@ toad projects forget /path/to/x   # drop one from the list (its files stay)
 ```
 
 A project joins the list when it is set up or runs a test.
+
+### Web execution timeline
+
+Project web runs also expose a **Timeline** tab in the viewer. It links each
+actual browser operation or structured check to its scenario, unique attempt,
+duration, outcome and evidence. Successful browser actions are not themselves
+scenario assertions; exploratory conclusions remain tester-attested. Historical
+runs without instrumentation show **Timeline unavailable**, not inferred steps.
+
+The web tester first binds its owned browser session to the exact scenario name.
+Structured web capture and replay use the same execution records. Records live
+under `executions/`, separate from proof-checked scenario receipts. Required
+operation evidence that cannot be saved blocks PASS; optional diagnostic capture
+failures are visible without changing a product assertion. Screenshots and other
+diagnostics may contain sensitive page content; treat the whole run as sensitive.
 
 ## Run tests on every deploy
 
@@ -499,32 +515,74 @@ Review both, then commit them yourself.
   false unless you pass `--writes`.
 - A recording is copied only when the run's recording is valid (see
   [Run-local recordings](#run-local-recordings)) and still valid under the
-  suite as saved. Today that means a single structured CLI command or a single
-  structured API request, in a suite with no `credentials`, `allow_installs`,
-  `target.setup` or `target.path` (its own or from `toad.yaml`). Web
-  scenarios have no recordings yet. Every other scenario is saved without one.
+  suite as saved. Today that means a single structured CLI command, a single
+  structured API request, or a supported structured web scenario, in a suite
+  with no `credentials`, `allow_installs`, `target.setup`, `target.path` or
+  `attempt` hooks (its own or from `toad.yaml`). Every other scenario is saved
+  without one.
 - A recording is the run's envelope as it was: the program, arguments and
   expected output, or the request and expected response. It holds no secret
   values, because the codecs refuse credential-bearing runs, but it holds
   what you put in the command, so keep secrets out of commands.
 
-Toad checks saved recordings whenever it reads suites, and never writes while
-it does. `toad ui` lists each project's saved suites with every scenario's
-recording, **Recorded** (with its readable action and assertion), **Stale**
-or **None**. `toad run` prints a warning for each problem, runs those scenarios with the
-agent instead of replaying them, and `--json` includes them as `warnings`.
-None of these is an error:
+### Review and edit saved recordings
 
-| Warning | Means |
-|---|---|
-| stale: kind, steps or expected changed | The scenario was edited after it was recorded |
-| stale: no longer supported | The suite (or `toad.yaml`) now adds credentials, installs, setup or PATH, or the codec refuses it |
-| stale: not a valid recording | The file is unreadable, malformed, too large or a symlink |
-| orphan | A recording no scenario has (renamed or removed), or a `<name>.recordings/` with no suite |
+The existing recording JSON **is** the executable representation, not a second
+language. New recordings use stable, indented JSON with sorted object keys;
+array order is preserved. Older compact version-1 envelopes remain readable.
+`toad ui` is GET-only: inspect actions and assertions there, then edit files in
+source control and review `git diff`.
 
-To refresh a stale recording, accept the one a passing `toad run` proposes
-(see [Replay and healing](#replay-and-healing)), or delete it and save a new
-suite from a passing run.
+Supported literal edits stay inside the existing codec:
+
+- CLI: `payload.program`, literal `args`, `expect.exitCode` (0–255) and
+  `expect.stdout` (`equals` or nonempty `contains`). Arguments are quoted
+  words, not a new shell/control-flow language.
+- API: supported `method`, URL under the current suite target, `headers`
+  (`accept`/`content-type` only), literal `body`, `expect.status` (100–599)
+  and `expect.body` (`equals` or nonempty `contains`).
+- Web: the existing 2–30 ordered `steps`, exact locators, non-secret fill
+  values and explicit checks. Start with `goto`, end with an assertion;
+  navigation stays under the target. No selectors, credentials or new actions.
+
+Keep `scenarioId`, `intentHash`, kind, version and codec identities unchanged.
+A valid literal edit remains executable against the same suite intent, but is
+not evidence that the edited assertion already passed. Changes to suite intent
+require re-recording. Review assertion weakening (for example `equals` changed
+to `contains`) explicitly: complete-scenario capture remains tester-attested,
+not a proof of semantic equivalence or assertion strength.
+
+Toad reads without writing. The viewer shows current intent, source, safe
+supported-edit guidance and recorded/stale/none status. Context changes (intent,
+credentials, installs, setup/PATH) make a valid recording stale and ineligible;
+the scenario may fall back to the agent with an explicit reason. Orphan files
+remain warnings. **Corrupt/unsafe recordings are not fallback opportunities:**
+malformed JSON, unsupported codecs/versions/actions, credential-like web data,
+unproven out-of-target URLs, oversized or symlinked files fail preflight before
+any model/browser launch, even with `--no-replay`. Fix/remove the invalid file,
+review, then re-record rather than editing identity hashes.
+
+Config, suite and recording diagnostics use one safe shape: file, line/column
+when source exists, structural path, explanation and remedy. Nested array and
+locator fields retain source locations. Parser messages, source excerpts and
+invalid literal values are never echoed; dynamic credential/map keys are
+redacted in paths. Comment-only config/suites and absent optional defaults
+remain intentional.
+
+Saving/accepting API or web recordings also writes
+`<suite>.recording-context.json` **beside** the suite, outside recording/receipt
+proof folders; commit it too. This bounded version-1 sidecar binds canonical
+scenario IDs and envelope hashes to the original credential-free target only.
+A matching hash plus original-target confinement can identify an intentional
+target change as stale. Without matching provenance, an out-of-current-target
+legacy recording is refused; restore/review the original target and re-record.
+Legacy recordings still under their current target need no migration. Valid
+current-target literal edits remain usable even when the old context hash no
+longer matches. This trusted-test-data provenance is not tamper-proof security
+attestation and grants no new replay privileges.
+
+To refresh a stale recording, review and accept a passing investigation's
+proposal (below), or remove it and save a new suite from a passing run.
 
 ### toad run
 
@@ -539,13 +597,12 @@ toad run --junit toad.xml --summary toad.md --json
 Each suite is one Toad run, recorded under `.toad/runs/` and shown in
 `toad ui` like any other. A scenario that does not pass is run once more (a
 new run with only those scenarios; `--retries 0` turns this off,
-`--retries 2` allows two more). A scenario that fails and then passes is
-**flaky**: it does not fail the build, but the output, JUnit and summary all
-say so.
+`--retries 2` allows two more). A scenario that fails and then passes still **fails this run**. All attempts
+remain visible; an investigation or proposed replacement never erases a failure.
 
 | Exit code | Meaning |
 |---|---|
-| `0` | Every scenario passed (flaky ones included) |
+| `0` | Every scenario passed with complete required evidence |
 | `1` | A scenario failed |
 | `2` | A run errored, timed out, hit the spending limit or was interrupted, so a scenario's result is unknown |
 | `3` | Toad could not start: no model key, invalid suites or options, a write suite without `--allow-writes`, a missing credential |
@@ -569,20 +626,20 @@ summary and the run page in `toad ui`:
 | Mode | When |
 |---|---|
 | `replay` | The saved recording replayed; its assertion decided the result |
-| `agent` | No saved recording, a stale one, `--no-replay`, a recorded URL not under the suite's URL, or the replay's assertion failed and the agent did not then pass it with a new recording |
-| `healed` | The saved recording failed, and the agent passed the scenario and captured a different recording |
+| `agent` | No saved recording, a context-stale one, `--no-replay`, or the replay's assertion failed and the agent did not then pass it with a new recording |
+| `healed` | Investigation passed and proposed a replacement; the original assertion and aggregate result remain **FAIL** |
 
 - A replay whose assertion **fails** goes to the agent, which tests the
   scenario from its steps. If the agent fails it too, it is a regression
-  (`FAIL`, with `replay: FAIL` in `--json`). If the agent passes it, the
-  recording is out of date, not the program.
+  (`FAIL`, with `replay: FAIL` in `--json`). If the agent passes it, a replacement may be proposed for review, but this
+  does not prove the old expectation obsolete: this run remains **FAIL**.
 - A replay that **cannot run** (the sandbox did not start, the working folder
   is missing, the HTTP request could not be made, the page could not load or
   the browser could not start) is an `ERROR`, retried like
   any result that did not pass. It never calls the agent.
 - A replay whose assertion fails needs the agent; without a model key that
-  scenario is an `ERROR` (exit 3), never a guess.
-- The suite's saved recording is never changed by a run. When the agent
+  scenario remains `FAIL` (exit 1), with the investigation error reported separately.
+- Except for explicit `--update-recordings`, the suite's saved recording is never changed by a run. When the agent
   passes a scenario and captures a recording that differs from the saved
   one (or there was none), it is **proposed**: it stays in the run's
   `recording/` folder, `--json` shows it with a step diff, and the output and
@@ -594,13 +651,28 @@ summary and the run page in `toad ui`:
   ```
 
   Both write only recordings from passing scenarios that are valid under the
-  suite, replace the scenario's old file, and leave the change for you to
-  review (`git diff`) and commit; neither runs git.
+  suite in the separate passing investigation, replace the scenario's old file, and leave the change for you to
+  review (`git diff`) and commit; neither runs git. Neither changes the failed
+  run, its exit code or historical evidence. A later run with reviewed data can pass.
+  Proposals expose ordered old/new action/assertion diffs (including repetitions),
+  original failed assertions, failed replay/execution references and snapshot hashes.
+  Acceptance binds the prior saved recording (including absence), proposed payload,
+  scenario intent and effective context. Concurrent or edited saved files, intent,
+  target/restriction changes and modified proposals are refused, not silently repaired.
+  Older proposals without adequate provenance must be regenerated against the current
+  suite and reviewed again. Publication uses atomic individual files and a cooperative
+  per-suite lock; an interrupted lock must only be removed after confirming no writer
+  remains. Context is published before its envelope; failed context publication never
+  publishes a new executable recording. No multi-file transaction or tamper-proof
+  filesystem claim is made.
 - `--no-replay` runs everything with the agent, as before replay existed;
   with `--update-recordings` it re-records every scenario it can.
 - Overrides still apply: `--workdir` replays in that folder, `--url` moves a
-  recorded API URL from the suite's URL to the new one (a recording outside
-  the suite's URL goes to the agent), and `--sandbox` picks the replay's sandbox.
+  recorded API/web URL from the suite's URL to the new one, preserving
+  whole-path-segment confinement; a legitimate override is not itself unsafe.
+  Valid recordings stale under a changed target need matching original-target
+  provenance for agent fallback; unproven off-target recordings fail preflight.
+  `--sandbox` picks the replay's sandbox.
   If an agent fallback is needed and the suite's goal, scenario steps,
   expected result or limitations contain an absolute URL for the original
   target that conflicts with `--url`, Toad reports `ERROR` rather than ask
@@ -705,6 +777,7 @@ that test the same deployment, or run `toad run` once per target.
 | `toad doctor` | Check the agent, model key, browser, CLI sandbox and coding agents |
 | `toad update` | Install the latest version from GitHub and prepare it |
 | `toad run [options]` | Run the project's saved suites, e.g. in CI (see [Run tests on every deploy](#run-tests-on-every-deploy)) |
+| `toad evaluate --help` | Explicitly opt-in to budgeted local tester evaluations; no default paid execution (see [Local evaluations](#local-evaluations)) |
 | `toad suites save <run> --name <name>` | Save a finished run as a suite, with its recordings (see [Save a run as a suite](#save-a-run-as-a-suite)) |
 | `toad mcp` | The MCP server; coding agents start it |
 | `toad ui [--port <port>]` | The run viewer |
@@ -718,7 +791,6 @@ that test the same deployment, or run `toad run` once per target.
 | `setup_project` | Creates `.toad/` in a project (never overwrites files) and adds it to the viewer's list |
 | `run_project_test` | Runs a handoff in a set-up project; results go to `.toad/runs/<id>/` |
 | `save_suite_from_run` | Saves a finished run as `.toad/suites/<name>.yaml`, with its recordings beside it (never overwrites; runs and commits nothing) |
-| `run_web_test`, `run_cli_test` | Legacy: tests without a project (see [Legacy tools](#legacy-tools)) |
 
 ### Handoff
 
@@ -943,14 +1015,57 @@ records for each reply, checked every two seconds, so a run can go slightly
 over before it stops, and a model without catalog prices counts as free. Set
 a limit with your provider too.
 
-### Legacy tools
+### Upgrade: project tools and truthful evidence
 
-`run_web_test` and `run_cli_test` predate projects. They take `url`, or
-`workdir` and `program`, plus `what`, optional `scenarios`, `secrets`,
-`timeout_minutes` and (web) `screenshots`. Their receipts go to the agent's
-`data/receipts`. Their `secrets` are names in the agent's shared
-`.faur/test-secrets.env`, and that whole store is available to the run, not
-only the names requested. Prefer `run_project_test`.
+The MCP tools `run_web_test` and `run_cli_test` have been **removed**. There is
+no shared-secret forwarding or compatibility alias. Replace old calls with:
+
+1. `setup_project({project_path:"/absolute/project"})`
+2. `run_project_test({project_path:"/absolute/project",handoff:{version:1,
+   kind:"web",target:{url:"https://staging.example.test"},
+   request:{goal:"Check checkout",scenarios:[{name:"Checkout",steps:"Open /checkout",
+   expected:"Checkout form is visible"}]}}})`
+
+For CLI use `kind:"cli",target:{workdir:"/absolute/project",program:"./tool"}`;
+for HTTP use `kind:"api",target:{url:"https://api.example.test"}`. Move only
+needed credentials to the project's ignored `.toad/.env`, then select them as
+`credentials:{token:{env:"API_TOKEN"}}`; never send values in calls. Internal
+`agent/run`, MCP progress/cancellation, guide/resource and suite saving remain.
+
+Project CLI/API commands now appear on the shared timeline with exact scenario
+and attempt IDs. Structured checks record typed machine assertions. Ordinary
+command success is **operation evidence only**: the tester must explicitly
+attest the scenario conclusion against execution IDs. The viewer labels that
+conclusion tester-attested, not machine verified. Missing completion or required
+receipts makes a would-be PASS **ERROR**; optional diagnostics only warn.
+An observed assertion **FAIL** outranks ERROR and PASS, even after investigation,
+proposal acceptance or explicit recording updates. Existing recording codecs
+are unchanged; unknown codecs are rejected, never guessed or backfilled.
+
+## Local evaluations
+
+`toad evaluate` measures known healthy/seeded-bug web, API and CLI fixtures with
+fixed intent and deterministic scoring. Actual tester runs require `--real`,
+both configured model identifiers, a new output directory and explicit cost,
+time and scenario caps. Nothing installs or spends by default. Loopback-only
+fixtures require Bubblewrap or explicit `--sandbox none` **without isolation**;
+container selection is refused, never silently downgraded.
+
+`manifest.json` retains planned/observed outcomes, versions, models, evidence,
+recorded cost, incomplete/unexecuted cases and scoring denominators. Fake Pi is
+**harness-only**, never evidence of agent quality. The [first paid baseline](docs/evaluation-baseline-2026-11-09.md)
+ran on `5caf372` with fixture v1: it was incomplete, with 14 missing-evidence
+cases and one synthetic-secret leak. [Offline repairs](docs/evaluation-baseline-2026-11-09-diagnosis.md)
+cover native command registration and the selected-secret fixture contract;
+the [fixture-v2 Luna rerun](docs/evaluation-baseline-2026-11-10.md) executed all
+21 cases but remained incomplete (10 evidence errors, 11/21 credited correct,
+no sentinel leaks detected). Further paid runs need fresh explicit model and
+cost/time/scenario authorization. Changing models is supported, but changes
+the comparison as well as the runtime repairs. Ordinary
+`npm test` includes offline fixture/scorer/harness contracts without keys or
+browser download; installed-only native tests can skip without their prerequisites.
+See [the evaluation guide](docs/evaluations.md) for usage, fixture ground truth,
+reference-failure provenance, budgets and measurement limitations.
 
 ## Development
 
@@ -971,9 +1086,11 @@ edits the model fields of a checkout's agent in the same way.
 
 ### Releasing
 
-`.github/workflows/test.yml` runs the tests on Linux, macOS and Windows for
-every push. Installs come from GitHub for now: `main` is the latest, and each
-release is a tag that installs and CI jobs can pin (`github:mihaiiova/toad#v0.8.0`).
+`.github/workflows/test.yml` runs tests on Linux and macOS for pull requests
+and pushes to `main`; native Windows CI is currently paused. Installs can come
+from GitHub: `main` is the latest, and published release tags are installable
+and pinnable (for example `github:mihaiiova/toad#v0.8.0`). A version bump alone
+is not a published release.
 Release a version with:
 
 ```sh
@@ -988,3 +1105,93 @@ still installable from GitHub.
 ## License
 
 [MIT](LICENSE)
+
+
+### Explicit before/after-attempt fixtures
+
+**Trusted commands can be destructive.** Toad does not inspect shell text to
+decide it is read-only. Sandboxes have networking: a command can change remote
+services, and a copied workspace does not isolate or reset remote state. Use
+only an existing disposable test backend and commands you have reviewed. Toad
+does not discover databases, provision resources, reset systems automatically,
+manipulate browser cookies, or keep fixture servers/daemons alive.
+
+A project handoff or saved suite can declare the same top-level object:
+
+```yaml
+attempt:
+  before:
+    - node fixtures/prepare.mjs
+    - node fixtures/check-ready.mjs
+  after:
+    - node fixtures/cleanup.mjs
+  credentials: [APP_FIXTURE_TOKEN] # subset of handoff/suite credential references
+  timeout_seconds: 120            # default 120; prepare + before + product; 1–900
+  cleanup_timeout_seconds: 30     # default 30; all after commands; separate 1–120
+  writes: true                   # explicitly declares remote create/change/delete
+```
+
+Declare `credentials: {fixture: {env: APP_FIXTURE_TOKEN}}` on that handoff/suite
+and supply its value through existing project secret/CI selection mechanisms,
+never as a command literal. Hooks receive only `attempt.credentials` (default
+empty), while tested operations retain their normal selected references. Names
+must be distinct, non-reserved references; provider namespaces (including
+OpenAI/Anthropic/cloud model credentials) are rejected for hook-bearing runs.
+Ambient model/provider keys are never copied into hook workload environments.
+Receipts redact selected values and retain the existing bounded output policy.
+
+Kind defaults in `.toad/toad.yaml` use `cli.attempt`, `api.attempt`, or
+`web.attempt`. A suite/handoff replaces the whole default object (arrays are
+not concatenated); use empty before/after arrays to override inherited hooks.
+Even an empty declared object is agent-only. Named scenarios are required; a
+goal-only hook handoff is rejected before model/fixture work. Saved suites
+preserve the declaration. A suite requires `--allow-writes` whenever either
+its own `writes` **or its effective `attempt.writes`** is true. This includes
+project-default hooks and cannot be overridden by `writes: false` on the suite.
+Direct MCP submission of the explicit `attempt.writes` declaration acknowledges
+user-supplied commands; false is a declaration, not a safety guarantee. Hook
+write permission does not broaden the tested product operations' read-only
+limitations when suite `writes` remains false.
+
+CLI/API hooks use the tested target's cloned workspace. Omit `attempt.workdir`
+or set it to the same canonical directory as `target.workdir`. `target.setup`
+keeps its old meaning: once per overall run; each scenario clones that prepared
+project/home. Hooks run once per scenario attempt, not once per command. Files
+they create stay available throughout that scenario's commands. Each subsequent
+scenario or requested retry gets a fresh clone and a new attempt ID. All attempt
+records/receipts are retained; no extra implicit fixture retry is added. The
+overall run deadline and spending allowance cover all sequential workflows.
+
+For **web** hooks, set `attempt.workdir` explicitly to a trusted fixture-code
+folder (relative to the project or absolute). There is no implicit project/host
+shell fallback, browser script hook, or shared browser cookie context. Commands
+use the existing chosen sandbox and require the same backend preflight. Only
+explicit `--sandbox none` opts out of isolation; timeout/backend failure never
+downgrades isolation. Web testers gain no shell capability.
+
+Native ownership orders one attempt as: prepare workspace → sequential before
+commands → tested operations → durable failure facts/report and available
+diagnostics **before teardown** → sequential after commands → dispose workspace.
+`receipts/attempts/<attempt-id>/{before,after}/` holds required command receipts;
+the shared execution timeline labels hook phases as infrastructure, never
+scenario assertion evidence. `attempts/<attempt-id>.json` and
+`reports/<attempt-id>.md` are sibling run metadata, outside proof-checked receipt
+folders. Do not put evidence only inside the disposable fixture workspace.
+
+A before failure skips product execution but after commands are still attempted
+after partial preparation. After failures do not stop remaining declared cleanup
+commands while budget remains. A cleanup failure converts would-be PASS to
+ERROR; observed product FAIL stays FAIL with cleanup errors attached. Cancellation
+stops product work but gives teardown its own short deadline (plus the existing
+process-stop grace). If no owned sandbox can be created, report cleanup
+unavailable; never improvise host execution. On cancellation only already
+obtainable evidence can be retained; no late browser screenshot is guaranteed.
+Evidence publication failure retains the workspace for investigation. Teardown
+is best effort: SIGKILL, OS/hardware failure and power loss cannot guarantee it.
+
+**Hook-bearing suites cannot capture/replay in this epic.** They select agent
+mode with an explicit lifecycle reason even with an older saved recording, so
+recordings cannot bypass hooks. Existing hook-free model-free replay is unchanged.
+External reset/idempotency remains the author's responsibility: bounded retries
+repeat exactly the declared lifecycle and can duplicate remote effects if the
+supplied commands do not safely reset their own state.

@@ -28,7 +28,7 @@ test('the block is found after a stray preamble, and in bold or heading form', (
 
 test('a report without the block has no results', () => {
   assert.deepEqual(resultsOf('Verdict: PASS\n\nAll good.'), []);
-  assert.deepEqual(scenarioResults([{ name: 'A' }], []), []);
+  assert.deepEqual(scenarioResults([{ name: 'A' }], []), [{ name: 'A', result: 'ERROR', missing: true }]);
 });
 
 test('results follow the requested scenarios; a missing one is ERROR', () => {
@@ -50,4 +50,9 @@ test('the verdict never contradicts a scenario', () => {
   assert.equal(overallVerdict('FAIL', [pass, pass]), 'FAIL');
   assert.equal(overallVerdict('UNKNOWN', [pass, pass]), 'PASS');
   assert.equal(overallVerdict('PASS', []), 'PASS');
+});
+
+test('duplicate result formatting cannot overwrite an observed failure', () => {
+  assert.deepEqual(scenarioResults([{ name: 'A' }], [{ name: 'A', result: 'FAIL' }, { name: 'A', result: 'PASS' }]), [{ name: 'A', result: 'FAIL' }]);
+  assert.deepEqual(scenarioResults([{ name: 'A' }], [{ name: 'A', result: 'PASS' }, { name: 'A', result: 'PASS' }]), [{ name: 'A', result: 'ERROR' }]);
 });

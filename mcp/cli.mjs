@@ -18,6 +18,7 @@ const USAGE = `Usage:
   toad doctor                   check that everything Toad needs is in place
   toad update [--from <dir>]    install the latest from GitHub (or a local checkout's) and prepare it
   toad run [options]            run the project's saved suites, e.g. in CI (toad run --help)
+  toad evaluate [options]       opt-in budgeted local tester evaluation (toad evaluate --help)
   toad suites save <run> --name <name> [--tag <tag>] [--writes]
                                 save a finished run as a suite, with its recordings
   toad suites accept <run> --suite <name>
@@ -52,6 +53,19 @@ try {
       process.exitCode = await toadRun(options, { signal: stop.signal });
     }
   }
+  else if (command === 'evaluate') {
+    const { EVALUATION_USAGE, parseEvaluationArgs, runEvaluation } = await import('./evaluation.mjs');
+    if (args.includes('--help') || args.includes('-h')) console.log(EVALUATION_USAGE);
+    else {
+      const options = parseEvaluationArgs(args); // All opt-in/budget checks precede fixture/model work.
+      const stop = new AbortController();
+      for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => stop.abort());
+      const { manifest, exitCode } = await runEvaluation(options, { signal: stop.signal });
+      console.log(`Evaluation (${manifest.mode}): ${manifest.score.accuracy.count}/${manifest.score.planned} correct; ${manifest.score.incomplete} incomplete, ${manifest.score.unexecuted} unexecuted; recorded $${manifest.recordedCost.toFixed(4)}.`);
+      console.log(`FALSE PASSES: ${manifest.score.falsePasses.count}; SENTINEL LEAKS: ${manifest.score.secretLeakCases}. Results: ${options.output}/manifest.json`);
+      process.exitCode = exitCode;
+    }
+  }
   else if (command === 'suites' && args[0] === 'save') {
     const { SAVE_USAGE, SaveUsageError, parseSaveArgs, saveSuiteFromRun } = await import('./suite-recordings.mjs');
     if (args.includes('--help') || args.includes('-h')) console.log(SAVE_USAGE);
@@ -67,6 +81,7 @@ try {
       const saved = saveSuiteFromRun(project, options.run, options.name, { tags: options.tags, writes: options.writes });
       const recorded = saved.scenarios.filter(s => s.recording === 'recorded').length;
       console.log(`Saved ${relative(process.cwd(), saved.suite) || saved.suite}: ${saved.scenarios.length} scenario${saved.scenarios.length === 1 ? '' : 's'}, ${recorded} with a recording${saved.recordings ? ` in ${relative(process.cwd(), saved.recordings)}` : ''}.`);
+      if (saved.context) console.log(`Target context: ${relative(process.cwd(), saved.context)} (commit alongside the suite and recordings).`);
       for (const s of saved.scenarios) console.log(`  ${s.recording === 'recorded' ? 'recorded' : 'none    '} ${s.name}`);
       console.log(`Review and commit it, then run it with: toad run --suite ${options.name}`);
     }
@@ -90,7 +105,7 @@ try {
         console.log(`  ${s.status.padEnd(9)} ${s.name}`);
         for (const line of s.diff ?? []) console.log(`      ${line}`);
       }
-      if (n) console.log('Review the change (git diff) and commit it.');
+      if (n) console.log('Review the change (git diff) and commit recordings and any suite recording-context.json sidecar.');
     }
   }
   else if (command === 'setup') {

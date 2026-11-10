@@ -43,15 +43,58 @@ For a CLI handoff use `"kind": "cli"` and `"target": { "workdir": "/absolute/can
 
 ## Save suites to rerun
 
-When the user wants tests to run again later, for example on every deploy or in CI, save the run you just made: call `save_suite_from_run` with the project path, the run id (the last part of the `run` folder `run_project_test` returned), a suite `name`, and optional `tags` and `writes`. It writes `.toad/suites/<name>.yaml` from the run's handoff and copies the run's valid recordings to `.toad/suites/<name>.recordings/`; it refuses a name already in use, never overwrites, and runs and commits nothing. Recordings exist only for single-command CLI, single-request API and structured web (navigate, click, fill and explicit checks with role, label or text locators) scenarios without credentials, installs, setup or PATH; other scenarios are saved without one. Do not copy, edit or create recording files yourself; tell the user to review and commit the suite and its recordings folder. If a saved suite's scenario is later edited, its recording becomes stale: `toad run` and `toad ui` warn and ignore it, which is not an error. `toad run` replays valid saved recordings without a model; a stale or missing recording, or a replay whose assertion fails, is tested by the agent instead, and a new recording it captures is only proposed. The user accepts it with the `toad suites accept <run> --suite <name>` command `toad run` prints, or `toad run --update-recordings`; never accept or write recordings yourself. Without a suitable run, write the suite by hand instead: `.toad/suites/<name>.yaml` (lowercase name, letters, digits, `-`, `_` or `.`). A suite has the handoff's fields at the top level, not under `request`: `kind`, optional `title` and `target`, `goal`, `scenarios` (at least one, each with `name`, `steps`, `expected` and optional `tags`), optional `limitations`, `credentials` (references only), `allow_installs` and `timeout_minutes`. It also has optional `tags` and `writes`. Set `writes: true` only when a scenario creates, changes or deletes data; such a suite then runs only with `--allow-writes`, and a suite without it is told it is read-only. Leave out of `target` what `.toad/toad.yaml` already sets, so a deploy can override the URL. `.toad/suites/example.yaml` shows the format. The user runs suites with `toad run` (`--suite`, `--tag`, `--url`, `--junit`, `--summary`); it exits 0 on pass, 1 on a failure, 2 on an error and 3 when it cannot start. Saving a suite runs nothing: run a hand-written one once through `run_project_test` to check it works, and tell the user the `toad run` command. In CI, credentials come from the job's environment with `--env NAME,…`; the model key comes from the provider's variable, e.g. `ANTHROPIC_API_KEY`.
+When the user wants tests to run again later, for example on every deploy or in CI, save the run you just made: call `save_suite_from_run` with the project path, the run id (the last part of the `run` folder `run_project_test` returned), a suite `name`, and optional `tags` and `writes`. It writes `.toad/suites/<name>.yaml` from the run's handoff and copies the run's valid recordings to `.toad/suites/<name>.recordings/`; it refuses a name already in use, never overwrites, and runs and commits nothing. Recordings exist only for single-command CLI, single-request API and structured web (navigate, click, fill and explicit checks with role, label or text locators) scenarios without credentials, installs, setup or PATH; other scenarios are saved without one. Saving does not authorize recording edits or proposal acceptance. Tell the user to review and commit the suite, its recordings folder and any generated `<suite>.recording-context.json` sidecar. When the user explicitly requests recording edits, inspect the current payload in the GET-only `toad ui` or source control, change only supported trusted non-secret actions/assertions without weakening intent, and review `git diff`. `toad run --suite <name>` validates before execution and uses model-free replay for eligible recordings; it can launch the agent for stale/missing recordings, so obtain any required model-spend approval first. Never fabricate proof receipts or provenance. If a saved suite's scenario is later edited, a valid recording becomes stale and ineligible for replay, with an explicit reason; agent fallback can test the current intent. Malformed, unsafe or unknown-codec/version recordings are definition errors before model/browser launch, not warning-only fallbacks. Out-of-target legacy data without sufficient original-target provenance requires review/re-recording. `toad run` replays valid saved recordings without a model; a stale or missing recording, or a replay whose assertion fails, is tested by the agent instead, and a new recording it captures is only proposed. The user accepts it with the `toad suites accept <run> --suite <name>` command `toad run` prints, or `toad run --update-recordings`; never accept a proposal or write a recording without explicit user approval. Without a suitable run, write the suite by hand instead: `.toad/suites/<name>.yaml` (lowercase name, letters, digits, `-`, `_` or `.`). A suite has the handoff's fields at the top level, not under `request`: `kind`, optional `title` and `target`, `goal`, `scenarios` (at least one, each with `name`, `steps`, `expected` and optional `tags`), optional `limitations`, `credentials` (references only), `allow_installs` and `timeout_minutes`. It also has optional `tags` and `writes`. Set `writes: true` only when a scenario creates, changes or deletes data; such a suite then runs only with `--allow-writes`, and a suite without it is told it is read-only. Leave out of `target` what `.toad/toad.yaml` already sets, so a deploy can override the URL. `.toad/suites/example.yaml` shows the format. The user runs suites with `toad run` (`--suite`, `--tag`, `--url`, `--junit`, `--summary`); it exits 0 on pass, 1 on a failure, 2 on an error and 3 when it cannot start. Saving a suite runs nothing: run a hand-written one once through `run_project_test` to check it works, and tell the user the `toad run` command. In CI, credentials come from the job's environment with `--env NAME,…`; the model key comes from the provider's variable, e.g. `ANTHROPIC_API_KEY`.
 
 ## Credentials and trust
 
 - Never ask for or transmit secret values in chat, handoffs, scenarios, commands, logs, or reports. For supported web project tests, ask the user to put test-only values in the project's `.toad/.env` themselves, then reference names only, for example `"credentials": { "email": { "env": "TOAD_TEST_EMAIL" }, "password": { "env": "TOAD_TEST_PASSWORD" } }`. Names must be valid environment variable identifiers. The file uses `NAME=value` lines, not shell expansion. Never read it just to verify values; let the tool validate references.
 - Project CLI and API tests also accept credential references. Only the named variables are passed to the sandboxed command; use `$NAME` in commands, never a value. Certain environment names that can alter process startup are reserved and rejected. A CLI program can transmit secrets over the shared network or write them to persistent artifacts, so use trusted programs and restricted, budget-limited test keys.
-- Legacy `run_web_test` and `run_cli_test` use Toad's shared `agent/.faur/test-secrets.env`, not the project's store. The shared store may be exposed to the test process beyond the names requested; never use this as a silent substitute for project-owned or least-privilege credentials. Use it only with informed authorization and an accepted trust boundary.
 - Project web credentials are resolved by name into a temporary per-run file, not a per-tool security boundary. Toad's agents, tools, subprocesses and same-user processes may access them. Screenshots, output, files and transformed values may expose secrets; redaction is best effort. Run only trusted workloads, and tell the user that artifacts can contain sensitive information. Cleanup may be incomplete after cancellation or failure; follow the server's reported cleanup guidance and do not remove files while processes might still use them.
 
 ## Execute and report
 
 Call the discovered tool with the complete handoff. Toad runs can take minutes; respect progress and timeout behavior. Do not start duplicate runs merely because the first is slow. A failing test verdict is different from an execution or infrastructure error: inspect both `status` and `verdict`. `scenarios` gives each scenario's result by the name you gave it, and `cost` what Pi recorded for the run in US dollars; a scenario missing from the report is ERROR with `missing: true`. To rerun only what failed, send the same handoff with just those scenarios. Report PASS, FAIL, ERROR, or unknown accurately, including scenario-level evidence, actual versus expected behavior, and paths to reports and receipts. If the run is blocked, cancelled, times out, or has missing evidence, say what was not verified. Avoid reproducing secret-bearing output. Investigate failures before attributing them to the application; do not silently change the target or weaken scenarios to make a run pass.
+
+## Evidence and recording updates
+
+Use only project testing tools. Retired shared-store tools have no forwarding
+alias; migrate to setup_project + run_project_test and selected project .env
+references (see README's upgrade section). A saved assertion FAIL remains FAIL
+in JSON, JUnit, summary and exit status even if investigation passes or proposes
+a replacement. Accepting/updating recordings changes only future runs, never the
+failed run. Missing required evidence or completion is ERROR after a would-be
+pass; optional diagnostics warn. CLI/API exploratory conclusions are explicitly
+tester-attested against operation evidence, not machine-verified by command exit.
+
+
+### Explicit attempt fixtures
+
+Project handoffs and saved suites may set `attempt` with sequential `before`
+and `after` POSIX shell command arrays and an explicit `writes` boolean. Kind
+defaults (`cli.attempt`, `api.attempt`, `web.attempt`) use the same object; a
+handoff/suite replaces it as a whole. Require named scenarios. CLI/API hooks
+share the tested cloned workspace; web requires an explicit trusted
+`attempt.workdir`. Web gains no shell/browser-script tool. `target.setup` still
+runs once per run, not per attempt. Never generate destructive hooks implicitly.
+
+`credentials: [ENV_NAME]` selects a subset of the handoff's application credential
+references for hooks (empty by default), not ambient environment or provider keys.
+`timeout_seconds` bounds preparation, before commands and the product workflow together for each attempt (default 120, max 900);
+`cleanup_timeout_seconds` gives all after commands a separate budget (default
+30, max 120) even on cancellation. The overall run timeout/cost limit is shared.
+
+Warn users: these are trusted shell commands; declarations are not enforcement.
+Sandbox networking can modify external services; workspace cloning does not reset
+remote data. Declare remote mutations with `attempt.writes: true`; CLI suites
+require `--allow-writes` even if suite `writes` is false. Direct MCP submission
+of the explicit declaration acknowledges the user-supplied commands. Nothing
+discovers/provisions/resets a database automatically. Teardown is best effort
+under a separate deadline, not guaranteed after SIGKILL, host death or power loss.
+
+Native ownership runs before commands, tested operations, durable failure facts
+and available diagnostics, then after commands and workspace disposal. A before
+error skips product work but attempts teardown after partial preparation; an
+after error makes would-be PASS ERROR without erasing observed product FAIL.
+If no owned sandbox is created, cleanup is unavailable, never improvised on the
+host. Hook-bearing suites are agent-only and unrecordable, including when old
+saved recordings exist. Keep receipt/evidence files outside disposable fixtures.

@@ -34,6 +34,7 @@ function agent(t, behaviour) {
   writeFileSync(join(dir, COMMANDS), '{}');
   writeFileSync(join(dir, 'fake-pi.mjs'), `#!/usr/bin/env node
 import fs from 'node:fs'; import path from 'node:path';
+import { fakeExecutionEvidence } from ${JSON.stringify(new URL('./fake-web-evidence.mjs', import.meta.url).href)};
 const pre = process.argv.slice(2);
 const prompt = pre[pre.indexOf('-p') + 1];
 const b = JSON.parse(fs.readFileSync('behaviour.json', 'utf8'));
@@ -45,6 +46,7 @@ const counts = fs.existsSync('counts.json') ? JSON.parse(fs.readFileSync('counts
 const names = [...request.matchAll(/^\\d+\\. "(.+?)":/gm)].map(m => m[1]);
 const lines = names.map(name => { const i = counts[name] = (counts[name] ?? -1) + 1; const list = b.results?.[name] ?? ['PASS']; return '- ' + list[Math.min(i, list.length - 1)] + ' | ' + name; });
 fs.writeFileSync('counts.json', JSON.stringify(counts));
+fakeExecutionEvidence(process.env, lines.join('\\n'));
 const verdict = lines.some(l => l.includes('FAIL')) ? 'FAIL' : lines.some(l => l.includes('ERROR')) ? 'ERROR' : 'PASS';
 const done = () => {
   if (b.status === 'error') { console.error('pi failed'); process.exit(1); }
@@ -109,16 +111,18 @@ test('scenarios are chosen by suite and tag and capped in order', () => {
   assert.throws(() => selectScenarios(suites, { names: ['nope'] }), /No suite named nope/);
 });
 
-test('results combine into flaky, final results and exit codes', () => {
-  assert.equal(finalResult(['FAIL', 'PASS']), 'FLAKY');
+test('results retain historical failures and errors in final results and exit codes', () => {
+  assert.equal(finalResult(['FAIL', 'PASS']), 'FAIL');
   assert.equal(finalResult(['PASS']), 'PASS');
+  assert.equal(finalResult(['ERROR', 'PASS']), 'ERROR');
+  assert.equal(finalResult(['FAIL', 'ERROR', 'PASS']), 'FAIL');
   assert.equal(finalResult(['FAIL', 'FAIL']), 'FAIL');
-  assert.equal(exitCodeOf(['PASS', 'FLAKY']), 0);
+  assert.equal(exitCodeOf(['PASS', 'FLAKY']), 2);
   assert.equal(exitCodeOf(['PASS', 'ERROR', 'FAIL']), 1);
   assert.equal(exitCodeOf(['PASS', 'ERROR']), 2);
   const s = [{ name: 'A' }, { name: 'B' }];
   assert.deepEqual(outcomes(s, { status: 'ok', verdict: 'FAIL', scenarios: [{ name: 'a', result: 'PASS' }] }), ['PASS', 'ERROR']);
-  assert.deepEqual(outcomes(s, { status: 'ok', verdict: 'PASS', scenarios: [] }), ['PASS', 'PASS'], 'a passing run without a results block');
+  assert.deepEqual(outcomes(s, { status: 'ok', verdict: 'PASS', scenarios: [] }), ['ERROR', 'ERROR'], 'silence cannot verify scenarios');
   assert.deepEqual(outcomes(s, { status: 'timeout', verdict: 'UNKNOWN', scenarios: [] }), ['ERROR', 'ERROR']);
   assert.deepEqual(outcomes(s, { status: 'error', verdict: 'FAIL', scenarios: [{ name: 'A', result: 'PASS' }, { name: 'B', result: 'FAIL' }] }), ['ERROR', 'FAIL'], 'an incomplete run proves failures, not passes');
   assert.equal(slug('Rejects a missing token!'), 'rejects-a-missing-token');
@@ -138,27 +142,27 @@ test('suites are validated with the file named, and become handoffs', t => {
   assert.equal(overridden.target.url, 'https://preview.example/api');
   assert.equal(overridden.target.workdir, '/tmp');
   writeFileSync(join(dir, '.toad', 'suites', 'bad.yaml'), CLI_SUITE(['same', 'Same']));
-  assert.throws(() => readSuites(join(dir, '.toad')), /bad\.yaml: scenarios\.1\.name: scenario names must be distinct/);
+  assert.throws(() => readSuites(join(dir, '.toad')), /bad\.yaml:\d+:\d+: scenarios\.1\.name: Scenario names must be distinct/);
   writeFileSync(join(dir, '.toad', 'suites', 'bad.yaml'), 'kind: cli\ngoal: g\nscenarios: []\n');
-  assert.throws(() => readSuites(join(dir, '.toad')), /bad\.yaml: scenarios/);
+  assert.throws(() => readSuites(join(dir, '.toad')), /bad\.yaml:\d+:\d+: scenarios/);
 });
 
-test('JUnit escapes names and marks failures, errors and flaky passes', () => {
+test('JUnit and summary normalize failed attempts even when passed a legacy flaky result', () => {
   const report = { seconds: 12, verdict: 'FAIL', notes: [], suites: [{ name: 'smoke', seconds: 12, runs: [{ folder: '.toad/runs/x' }], scenarios: [
     { name: 'A <&> "b"', result: 'FAIL', attempts: ['FAIL', 'FAIL'], receipts: '.toad/runs/x/receipts/a' },
     { name: 'C', result: 'FLAKY', attempts: ['FAIL', 'PASS'] },
     { name: 'D', result: 'ERROR', attempts: ['ERROR'], message: 'Run timeout' },
   ] }] };
   const xml = junit(report);
-  assert.match(xml, /tests="3" failures="1" errors="1"/);
+  assert.match(xml, /tests="3" failures="2" errors="1"/);
   assert.match(xml, /name="A &lt;&amp;&gt; &quot;b&quot;"/);
   assert.match(xml, /<failure [^>]*>Result: FAIL \(attempts: FAIL, FAIL\)/);
-  assert.match(xml, /<property name="flaky" value="true"\/>/);
+  assert.match(xml, /<failure message="C failed"/);
   assert.match(xml, /<error message="Run timeout"/);
   const md = summary(report);
   assert.match(md, /^## Toad: FAIL/);
-  assert.match(md, /0 passed, 1 failed, 1 flaky, 1 errored/);
-  assert.match(md, /Flaky \(failed, then passed on a retry\): C\./);
+  assert.match(md, /0 passed, 2 failed, 1 errored/);
+  assert.doesNotMatch(md, /Flaky \(failed/);
 });
 
 test('session cost sums assistant replies and skips the subagent copies', t => {
@@ -208,13 +212,13 @@ test('toad run warns about orphaned or stray saved recordings and still runs the
   assert.deepEqual(report.suites[0].scenarios.map(s => s.result), ['PASS']);
 });
 
-test('toad run retries what failed, reports flaky passes, and exits 1 on a real failure', t => {
+test('toad run retains all failed attempts even after a passing retry', t => {
   const agentDir = agent(t, { results: { Flaky: ['FAIL', 'PASS'], Broken: ['FAIL', 'FAIL'] } });
   const dir = project(t, { smoke: CLI_SUITE(['Fine', 'Flaky', 'Broken']) });
   const r = toad(t, ['--json'], { cwd: dir, agentDir });
   assert.equal(r.code, 1, r.err);
   const scenarios = JSON.parse(r.out).suites[0].scenarios;
-  assert.deepEqual(scenarios.map(s => [s.name, s.result, s.attempts.join(',')]), [['Fine', 'PASS', 'PASS'], ['Flaky', 'FLAKY', 'FAIL,PASS'], ['Broken', 'FAIL', 'FAIL,FAIL']]);
+  assert.deepEqual(scenarios.map(s => [s.name, s.result, s.attempts.join(',')]), [['Fine', 'PASS', 'PASS'], ['Flaky', 'FAIL', 'FAIL,PASS'], ['Broken', 'FAIL', 'FAIL,FAIL']]);
   const requests = readFileSync(join(agentDir, 'requests'), 'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(requests.length, 2);
   assert.doesNotMatch(requests[1].request, /"Fine"/, 'the retry runs only what did not pass');

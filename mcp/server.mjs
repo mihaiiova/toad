@@ -11,7 +11,7 @@
 import { readFileSync, lstatSync, realpathSync } from 'node:fs';
 import { CONFIG_TEMPLATE, SUITE_TEMPLATE, checkIgnore, createIfMissing, ensureDirectory, projectFolder, readProjectConfig, registerProject } from './projects.mjs';
 import { VERSION } from './agent.mjs';
-import { handoffSchema, request, runProject, runTest, scenariosSchema as scenarios } from './run.mjs';
+import { handoffSchema, runProject } from './run.mjs';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -37,8 +37,6 @@ function callContext(extra) {
   };
 }
 
-const secrets = z.array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/)).optional()
-  .describe("Names of login secrets in the bot's .faur/test-secrets.env; values never pass through the call");
 const timeout = z.number().int().min(1).max(60).optional().describe('Default 15');
 const outputSchema = {
   verdict: z.enum(['PASS', 'FAIL', 'ERROR', 'UNKNOWN']),
@@ -105,7 +103,7 @@ server.registerTool('run_project_test', {
 
 server.registerTool('save_suite_from_run', {
   title: 'Save a run as a suite',
-  description: 'Only when the user asks to keep a test: save a finished project run as .toad/suites/<name>.yaml for toad run, copying its validated recordings into .toad/suites/<name>.recordings/. Never overwrites a file; refuses a name already in use. Writes only those files; runs nothing and commits nothing. Recordings are kept only for single-command CLI, single-request API and structured web (navigate/click/fill/assert) scenarios without credentials, installs, setup or PATH.',
+  description: 'Only when the user asks to keep a test: save a finished project run as .toad/suites/<name>.yaml for toad run, copying its validated recordings into .toad/suites/<name>.recordings/. Never overwrites a file; refuses a name already in use. Also writes the sibling <name>.recording-context.json original-target provenance for API/web recordings. Writes only suite/recording/context files; runs nothing and commits nothing. Recordings are kept only for single-command CLI, single-request API and structured web (navigate/click/fill/assert) scenarios without credentials, installs, setup or PATH.',
   inputSchema: {
     project_path: z.string().min(1).describe('Absolute path to the project directory'),
     run: z.string().min(1).describe('The run id, the last part of the run folder that run_project_test returned'),
@@ -117,35 +115,7 @@ server.registerTool('save_suite_from_run', {
   const { saveSuiteFromRun } = await import('./suite-recordings.mjs');
   const saved = saveSuiteFromRun(project_path, run, name, { tags: tags ?? [], writes: !!writes });
   const lines = saved.scenarios.map(s => `- ${s.recording === 'recorded' ? 'recorded' : 'no recording'}: ${s.name}`);
-  return { content: [{ type: 'text', text: [`Saved ${saved.suite}${saved.recordings ? ` and ${saved.recordings}/` : ''}.`, ...lines, `Ask the user to review and commit it; run it with: toad run --suite ${name}`].join('\n') }] };
+  return { content: [{ type: 'text', text: [`Saved ${saved.suite}${saved.recordings ? ` and ${saved.recordings}/` : ''}${saved.context ? ` and ${saved.context}` : ''}.`, ...lines, `Ask the user to review and commit it; run it with: toad run --suite ${name}`].join('\n') }] };
 });
-
-server.registerTool('run_web_test', {
-  title: 'Run a web test',
-  description: 'Call get_toad_guide before testing; this legacy tool uses the shared agent secret store. Tests a web application end to end in a real headless browser and returns the verdict (PASS, FAIL or ERROR), a report per scenario, and screenshots as receipts. Give the URL and what to test; add scenarios with steps and expected outcomes for precise checks. Takes from tens of seconds to several minutes. Use test or staging environments: the bot clicks, types and submits forms.',
-  inputSchema: {
-    url: z.string().url().describe('Where the application is reachable'),
-    what: z.string().min(1).describe('What to test: a goal, a feature or a user flow'),
-    scenarios,
-    secrets,
-    timeout_minutes: timeout,
-    screenshots: z.enum(['inline', 'paths']).optional().describe('inline (default): attach up to 8 screenshots as images; paths: only return their file paths'),
-  },
-  outputSchema,
-}, (input, extra) => runTest(request([`Test ${input.url}.`], input), input, callContext(extra), { attachImages: input.screenshots !== 'paths' }));
-
-server.registerTool('run_cli_test', {
-  title: 'Run a command-line test',
-  description: 'Call get_toad_guide before testing; this legacy tool uses the shared agent secret store. Tests a command-line program by running it in a shell, and returns the verdict (PASS, FAIL or ERROR), a report per scenario, and every command as a recorded receipt (command, exit code, output). Give the working folder, how to invoke the program and what to test; add scenarios with steps and expected outcomes for precise checks. Commands run with your user\'s permissions; they write only inside the receipts folder unless a scenario says otherwise.',
-  inputSchema: {
-    workdir: z.string().min(1).describe('Absolute path of the folder to run the program in, usually the project under test'),
-    program: z.string().min(1).describe('How to invoke the program from that folder, for example `node apps/cli/dist/bin.js` or `owlie`'),
-    what: z.string().min(1).describe('What to test: a command, a behaviour or a workflow'),
-    scenarios,
-    secrets,
-    timeout_minutes: timeout,
-  },
-  outputSchema,
-}, (input, extra) => runTest(request([`Test the command-line program in the working folder ${input.workdir}.`, `Invoke it as: ${input.program}`], input), input, callContext(extra), { attachImages: false }));
 
 await server.connect(new StdioServerTransport());

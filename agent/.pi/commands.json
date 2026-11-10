@@ -43,22 +43,7 @@
     },
     {
       "name": "run-command",
-      "description": "Run one shell command in a prepared scenario sandbox and record a receipt",
-      "command": "node",
-      "args": [
-        "tools/toad-exec.mjs",
-        "run",
-        "{receipts}",
-        "{name}",
-        "{scenario}",
-        "{command}"
-      ],
-      "approve": false,
-      "lead": false
-    },
-    {
-      "name": "run-command-with-input",
-      "description": "Run one shell command in a prepared scenario sandbox with the given text as input, and record a receipt",
+      "description": "Run one shell command in a prepared scenario sandbox and record a receipt; bind scenarioName to the exact requested scenario (operation completion alone is not an assertion)",
       "command": "node",
       "args": [
         "tools/toad-exec.mjs",
@@ -67,7 +52,26 @@
         "{name}",
         "{scenario}",
         "{command}",
-        "{input:file}"
+        "--scenario-name",
+        "{scenario_name}"
+      ],
+      "approve": false,
+      "lead": false
+    },
+    {
+      "name": "run-command-with-input",
+      "description": "Run one shell command in a prepared scenario sandbox with the given text as input, and record a receipt; bind scenarioName to the exact requested scenario (operation completion alone is not an assertion)",
+      "command": "node",
+      "args": [
+        "tools/toad-exec.mjs",
+        "run",
+        "{receipts}",
+        "{name}",
+        "{scenario}",
+        "{command}",
+        "{input:file}",
+        "--scenario-name",
+        "{scenario_name}"
       ],
       "approve": false,
       "lead": false
@@ -78,6 +82,17 @@
       "command": "node",
       "args": [
         "tools/toad-structured-cli.mjs",
+        "{request:file}"
+      ],
+      "approve": false,
+      "lead": false
+    },
+    {
+      "name": "attest-scenario",
+      "description": "Explicit CLI/API tester-attested scenario completion linked to executionIds; not a machine assertion. Request: {scenarioName,result:PASS|FAIL|ERROR,executionIds:[ID,...]}",
+      "command": "node",
+      "args": [
+        "tools/toad-attest.mjs",
         "{request:file}"
       ],
       "approve": false,

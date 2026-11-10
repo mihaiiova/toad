@@ -8,9 +8,19 @@ import { fileURLToPath } from 'node:url';
 const runner = join(dirname(fileURLToPath(import.meta.url)), 'toad-exec.mjs');
 const keys = (value, names) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).sort().join(',') === names.slice().sort().join(',');
 const text = value => typeof value === 'string' && value.length <= 8192 && !value.includes('\0');
-export function validCliPayload(p) {
-  return !!(keys(p, ['program', 'args', 'expect']) && text(p.program) && p.program.length && !p.program.startsWith('-') && Array.isArray(p.args) && p.args.length <= 100 && p.args.every(text) && keys(p.expect, ['exitCode', 'stdout']) && Number.isInteger(p.expect.exitCode) && p.expect.exitCode >= 0 && p.expect.exitCode <= 255 && (keys(p.expect.stdout, ['equals']) && text(p.expect.stdout.equals) || keys(p.expect.stdout, ['contains']) && text(p.expect.stdout.contains) && p.expect.stdout.contains.length));
+/** The first invalid structural path, without any literal values. */
+export function cliPayloadIssue(p) {
+  if (!keys(p, ['program', 'args', 'expect'])) return [];
+  if (!text(p.program) || !p.program.length || p.program.startsWith('-')) return ['program'];
+  if (!Array.isArray(p.args) || p.args.length > 100) return ['args'];
+  const arg = p.args.findIndex(v => !text(v));
+  if (arg >= 0) return ['args', arg];
+  if (!keys(p.expect, ['exitCode', 'stdout'])) return ['expect'];
+  if (!Number.isInteger(p.expect.exitCode) || p.expect.exitCode < 0 || p.expect.exitCode > 255) return ['expect', 'exitCode'];
+  if (!(keys(p.expect.stdout, ['equals']) && text(p.expect.stdout.equals) || keys(p.expect.stdout, ['contains']) && text(p.expect.stdout.contains) && p.expect.stdout.contains.length)) return ['expect', 'stdout'];
+  return null;
 }
+export function validCliPayload(p) { return cliPayloadIssue(p) === null; }
 
 /** One POSIX shell command: the program and every argument is a separately quoted word. */
 export function cliCommand(p) {
@@ -69,13 +79,13 @@ export function replayCliPayload(payload, { project, receipts, name = '01-replay
     writeFileSync(secrets, '{}', { mode: 0o600 });
     const result = spawnSync(process.execPath, [runner, 'run', receipts, name, scenario, cliCommand(payload)], {
       encoding: 'utf8', timeout: 180000, maxBuffer: 8 * 1024 * 1024,
-      env: { ...replayEnv, TOAD_CLI_SECRETS_FILE: secrets, TOAD_EXEC_JSON: '1' },
+      env: { ...replayEnv, TOAD_CLI_SECRETS_FILE: secrets, TOAD_EXEC_JSON: '1', TOAD_EXECUTION_KIND: replayEnv.TOAD_EXECUTION_KIND === 'api' ? 'api' : 'cli', TOAD_EXECUTION_EXPECT: replayEnv.TOAD_EXECUTION_KIND === 'api' ? replayEnv.TOAD_EXECUTION_EXPECT : JSON.stringify(payload.expect) },
     });
     let run;
     try { run = JSON.parse(result.stdout); } catch { throw new Error('The replayer returned no result'); }
-    if (run.infrastructureError || run.timedOut || run.interrupted || run.outputTruncated || !Number.isInteger(run.exitCode) || typeof run.stdout !== 'string') throw new Error('The replay did not run cleanly');
+    if (run.executionOutcome !== 'FAIL' && (run.executionOutcome === 'ERROR' || run.evidenceError || run.infrastructureError || run.timedOut || run.interrupted || run.outputTruncated || !Number.isInteger(run.exitCode) || typeof run.stdout !== 'string')) throw new Error('The replay did not run cleanly');
     const checks = cliChecks(payload, run.exitCode, run.stdout);
-    return { result: checks.exitCode && checks.stdout ? 'PASS' : 'FAIL', checks, actual: { exitCode: run.exitCode, stdout: run.stdout }, receipt: run.receipt };
+    return { result: run.executionOutcome === 'FAIL' ? 'FAIL' : checks.exitCode && checks.stdout ? 'PASS' : 'FAIL', checks, actual: { exitCode: run.exitCode, stdout: run.stdout }, receipt: run.receipt };
   } finally { if (dir) rmSync(dir, { recursive: true, force: true }); }
 }
 
@@ -107,10 +117,10 @@ export async function replayCliPayloadAsync(payload, { project, receipts, name =
   try {
     const secrets = join(dir, 'empty.json');
     writeFileSync(secrets, '{}', { mode: 0o600 });
-    const result = await execute(['run', receipts, name, scenario, cliCommand(payload)], { ...replayEnv, TOAD_CLI_SECRETS_FILE: secrets, TOAD_EXEC_JSON: '1' });
+    const result = await execute(['run', receipts, name, scenario, cliCommand(payload)], { ...replayEnv, TOAD_CLI_SECRETS_FILE: secrets, TOAD_EXEC_JSON: '1', TOAD_EXECUTION_KIND: replayEnv.TOAD_EXECUTION_KIND === 'api' ? 'api' : 'cli', TOAD_EXECUTION_EXPECT: replayEnv.TOAD_EXECUTION_KIND === 'api' ? replayEnv.TOAD_EXECUTION_EXPECT : JSON.stringify(payload.expect) });
     const run = JSON.parse(result.stdout);
-    if (result.status !== 0 || run.infrastructureError || run.timedOut || run.interrupted || run.outputTruncated || !Number.isInteger(run.exitCode) || typeof run.stdout !== 'string') throw new Error('The replay did not run cleanly');
+    if (run.executionOutcome !== 'FAIL' && (result.status !== 0 || run.executionOutcome === 'ERROR' || run.evidenceError || run.infrastructureError || run.timedOut || run.interrupted || run.outputTruncated || !Number.isInteger(run.exitCode) || typeof run.stdout !== 'string')) throw new Error('The replay did not run cleanly');
     const checks = cliChecks(payload, run.exitCode, run.stdout);
-    return { result: checks.exitCode && checks.stdout ? 'PASS' : 'FAIL', checks, actual: { exitCode: run.exitCode, stdout: run.stdout }, receipt: run.receipt };
+    return { result: run.executionOutcome === 'FAIL' ? 'FAIL' : checks.exitCode && checks.stdout ? 'PASS' : 'FAIL', checks, actual: { exitCode: run.exitCode, stdout: run.stdout }, receipt: run.receipt };
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }

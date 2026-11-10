@@ -34,9 +34,13 @@ export function resultsOf(answer) {
  * scenario the report left out is ERROR: silence is never a pass.
  */
 export function scenarioResults(requested, reported) {
-  // No block at all (an older agent): results are unknown, not ERROR.
-  if (!reported.length || !requested?.length) return reported;
-  const byName = new Map(reported.map(r => [r.name.trim().toLowerCase(), r.result]));
+  if (!requested?.length) return reported;
+  const byName = new Map();
+  for (const r of reported) {
+    const key = r.name.trim().toLowerCase();
+    const previous = byName.get(key);
+    byName.set(key, previous === 'FAIL' || r.result === 'FAIL' ? 'FAIL' : previous ? 'ERROR' : r.result);
+  }
   return requested.map(s => ({ name: s.name, result: byName.get(s.name.trim().toLowerCase()) ?? 'ERROR', ...(byName.has(s.name.trim().toLowerCase()) ? {} : { missing: true }) }));
 }
 

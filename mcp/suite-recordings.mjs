@@ -6,24 +6,33 @@
  *
  * Saving is deliberate: `toad suites save` or the save_suite_from_run tool
  * writes new files and never overwrites one. Reading never writes. A
- * recording file is the run's envelope, copied as it is; it is used only
- * while it still matches its suite. One that no longer does is stale, and one
- * with no scenario is an orphan: both are warnings, never errors.
+ * recording file is the run's envelope, stably formatted; it is used only
+ * while it still matches its suite. Context-stale recordings and orphans warn;
+ * corrupt/unsafe definitions carry diagnostics and block execution preflight.
  */
 import { lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 import { stringify } from 'yaml';
-import { describeRecording, intentHash, readRecordingFile, recordingStatus, scenarioId } from './recordings.mjs';
-import { ensureDirectory, projectFolder, readProjectConfig, readSuites, suiteHandoff, suiteSchema, withDefaults } from './projects.mjs';
+import { describeRecording, intentHash, readRecordingFile, recordingStatus, scenarioId, recordingText, validateRecording, recordingError } from './recordings.mjs';
+import { definitionError, validateDefinition } from './definition-diagnostics.mjs';
+import { originalTargetMatches, readRecordingContext, recordingUnder, writeRecordingContext } from './recording-context.mjs';
+import { ensureDirectory, projectFolder, readProjectConfig, readSuites, suiteHandoff, suiteSchema, withDefaults, SUITE_NAME } from './projects.mjs';
 
 /** The names readSuites accepts for .toad/suites/<name>.yaml. */
-export const SUITE_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+export { SUITE_NAME };
 const READ_ONLY = 'This suite is declared read-only: do not create, change or delete data in the target.';
 const RECORDING_FILE = /^([0-9a-f]{64})\.json$/;
 const STALE = {
   changed: 'its kind, steps or expected result changed since it was recorded',
-  unsupported: 'the suite now uses credentials, installs, setup or PATH, or the codec no longer accepts it',
+  unsupported: 'the suite now uses attempt hooks, credentials, installs, setup or PATH, or the codec no longer accepts it',
   invalid: 'the file is not a valid recording',
+  target: 'the suite target changed; the recording is confined to its original target',
+};
+
+const EDITS = {
+  cli: 'Edit payload.program and args (literal words), expect.exitCode (0–255), and expect.stdout (exactly equals or nonempty contains). No shell DSL, credentials, setup or PATH capture. Keep identity hashes unchanged.',
+  api: 'Edit payload.method (GET/POST/PUT/PATCH/DELETE/HEAD), target-confined url, headers (accept/content-type only), literal body, expect.status (100–599) and expect.body (equals or nonempty contains). No credentials. Keep identity hashes unchanged.',
+  web: 'Edit 2–30 bounded payload.steps: goto under target, click/fill with exact role/name, label or text locators, and expectVisible/expectText/expectUrl checks. Start with goto; end with a check. No credentials or selectors. Keep identity hashes unchanged.',
 };
 
 export const SAVE_USAGE = `Usage: toad suites save <run> --name <name> [options]
@@ -107,6 +116,7 @@ export function suiteFromHandoff(handoff, config, project, { tags = [], writes =
     ...(handoff.title ? { title: handoff.title } : {}),
     ...(Object.keys(target).length ? { target } : {}),
     goal: handoff.request?.goal,
+    ...(handoff.attempt ? { attempt: handoff.attempt } : {}),
     ...(tags.length ? { tags } : {}),
     writes: !!writes,
     ...(Object.keys(credentials).length ? { credentials } : {}),
@@ -114,9 +124,7 @@ export function suiteFromHandoff(handoff, config, project, { tags = [], writes =
     scenarios: scenarios.map(({ name, steps, expected }) => ({ name, steps, expected })),
     ...(limitations.length ? { limitations } : {}),
   };
-  const result = suiteSchema.safeParse(suite);
-  if (!result.success) throw new Error(`The run cannot be saved as a suite: ${result.error.issues.map(i => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ')}`);
-  return result.data;
+  return validateDefinition({ data: suite }, suiteSchema, 'saved suite');
 }
 
 /** The handoff a saved suite runs with today: its own fields over toad.yaml's. */
@@ -144,7 +152,7 @@ export function saveSuiteFromRun(project, run, name, { tags = [], writes = false
   const suites = join(folder, 'suites');
   ensureDirectory(suites);
   plainDirectory(suites, '.toad/suites');
-  for (const file of [`${name}.yaml`, `${name}.yml`, `${name}.recordings`]) {
+  for (const file of [`${name}.yaml`, `${name}.yml`, `${name}.recordings`, `${name}.recording-context.json`]) {
     if (present(join(suites, file))) throw new Error(`.toad/suites/${file} already exists; choose another name, or remove it first`);
   }
 
@@ -155,6 +163,7 @@ export function saveSuiteFromRun(project, run, name, { tags = [], writes = false
     try {
       const envelope = readRecordingFile(join(dir, 'recording', `${scenarioId(scenario.name)}.json`));
       describeRecording(envelope, suite.kind, scenario, { ...context, scenario });
+      if (Buffer.byteLength(recordingText(envelope), 'utf8') > 65536) return { name: scenario.name, recording: 'none' };
       copies.push(envelope);
       return { name: scenario.name, recording: 'recorded' };
     } catch { return { name: scenario.name, recording: 'none' }; }
@@ -167,35 +176,43 @@ export function saveSuiteFromRun(project, run, name, { tags = [], writes = false
     if (copies.length) {
       mkdirSync(recordings, { mode: 0o755 });
       created = true;
-      for (const envelope of copies) writeFileSync(join(recordings, `${envelope.scenarioId}.json`), JSON.stringify(envelope) + '\n', { flag: 'wx', mode: 0o644 });
+      for (const envelope of copies) {
+        writeRecordingContext(project, name, envelope, context.handoff.target?.url);
+        writeFileSync(join(recordings, `${envelope.scenarioId}.json`), recordingText(envelope), { flag: 'wx', mode: 0o644 });
+      }
     }
-    const header = `# Saved from run ${basename(dir)} with \`toad suites save\`. Commit it${copies.length ? ` with ${name}.recordings/` : ''}; it holds no secrets.\n`;
+    const header = `# Saved from run ${basename(dir)} with \`toad suites save\`. Commit it${copies.length ? ` with ${name}.recordings/${suite.kind !== 'cli' ? ` and ${name}.recording-context.json` : ''}` : ''}; it holds no secrets.\n`;
     writeFileSync(file, header + stringify(suite, { lineWidth: 0 }), { flag: 'wx', mode: 0o644 });
   } catch (error) {
-    if (created) rmSync(recordings, { recursive: true, force: true });
+    if (created) {
+      rmSync(recordings, { recursive: true, force: true });
+      rmSync(join(suites, `${name}.recording-context.json`), { force: true });
+    }
     throw error;
   }
-  return { suite: file, recordings: copies.length ? recordings : null, scenarios };
+  return { suite: file, recordings: copies.length ? recordings : null, context: copies.length && suite.kind !== 'cli' ? join(suites, `${name}.recording-context.json`) : null, scenarios };
 }
 
 /**
  * Each scenario's saved recording: recorded (with readable steps), stale or
- * none, and the warnings for anything stale, unexpected or orphaned. Reads only.
+ * none, plus context/orphan warnings and hard definition diagnostics. Reads only.
  * With `envelopes`, a recorded scenario also carries the checked envelope.
  */
 export function inspectSuite(project, suite, config, { envelopes = false } = {}) {
+  if (typeof suite.name !== 'string' || !SUITE_NAME.test(suite.name)) throw new Error('Invalid suite name');
   const rel = `.toad/suites/${suite.name}.recordings`;
   const dir = join(project, '.toad', 'suites', `${suite.name}.recordings`);
   const none = () => suite.scenarios.map(() => ({ status: 'none' }));
   const warnings = [];
+  const errors = [];
   let entries;
   try {
     // lstat: a symlinked folder is never followed. Files are opened O_NOFOLLOW.
     if (!lstatSync(dir).isDirectory() || realpathSync(dir) !== dir) throw new Error('not a plain folder');
     entries = readdirSync(dir).sort();
   } catch (error) {
-    if (error.code === 'ENOENT') return { recordings: none(), warnings };
-    return { recordings: none(), warnings: [`${rel} is not a plain folder; its recordings are ignored`] };
+    if (error.code === 'ENOENT') return { recordings: none(), warnings, errors };
+    return { recordings: none(), warnings: [`${rel} is not a plain folder; its recordings are ignored`], errors: definitionError(null, { code: 'read' }, { file: dir, remedy: 'Replace this with a plain recording folder, or remove it and re-record.' }).diagnostics };
   }
   const files = new Map();
   for (const entry of entries) {
@@ -204,6 +221,9 @@ export function inspectSuite(project, suite, config, { envelopes = false } = {})
     else warnings.push(`${rel}/${entry}: not a recording file; ignored`);
   }
   const handoff = effectiveHandoff(suite, config, project);
+  let originalContext;
+  try { originalContext = readRecordingContext(project, suite.name); }
+  catch (error) { errors.push(...(error.diagnostics ?? definitionError(null, { code: 'read' }, { file: `.toad/suites/${suite.name}.recording-context.json`, remedy: 'Restore or remove invalid recording context and re-record.' }).diagnostics)); }
   const recordings = suite.scenarios.map(scenario => {
     const id = scenarioId(scenario.name), entry = files.get(id);
     if (!entry) return { status: 'none' };
@@ -212,15 +232,29 @@ export function inspectSuite(project, suite, config, { envelopes = false } = {})
       warnings.push(`${suite.name} › ${scenario.name}: the saved recording is stale (${STALE[reason]}); it is ignored`);
       return { status: 'stale', reason };
     };
+    const invalid = error => {
+      const diagnostics = error.diagnostics ?? definitionError(null, { code: 'read' }, { file: join(dir, entry), remedy: 'Use a regular recording file below 64 KiB without symlinks, or re-record.' }).diagnostics;
+      errors.push(...diagnostics);
+      return { ...stale('invalid'), diagnostics };
+    };
     let value;
-    try { value = readRecordingFile(join(dir, entry)); } catch { return stale('invalid'); }
-    if (!value || typeof value !== 'object' || value.version !== 1 || value.status !== 'recorded' || value.scenarioId !== id) return stale('invalid');
+    try { value = readRecordingFile(join(dir, entry)); validateRecording(value); }
+    catch (error) { return invalid(error); }
+    if (value.scenarioId !== id) return invalid(recordingError(value, ['scenarioId']));
+    // Check confinement even when intent is stale; context mismatch cannot hide corruption.
+    if (suite.kind === value.kind && !recordingUnder(value, handoff.target?.url)) {
+      if (originalContext && originalTargetMatches(originalContext, value)) return stale('target');
+      return invalid(recordingError(value, ['payload', value.kind === 'web' ? 'steps' : 'url'], 'unsafe', 'Recording is outside the current target with no matching original-target provenance. Review the target and re-record; do not edit identity hashes.'));
+    }
     if (value.kind !== suite.kind || value.intentHash !== intentHash(suite.kind, scenario)) return stale('changed');
     try { return { status: 'recorded', steps: describeRecording(value, suite.kind, scenario, { handoff, scenario }), ...(envelopes ? { envelope: value } : {}) }; }
-    catch { return stale('unsupported'); }
+    catch (error) {
+      if (error.diagnostics?.every(d => d.code === 'context')) return stale('unsupported');
+      return invalid(error);
+    }
   });
   for (const entry of files.values()) warnings.push(`${rel}/${entry}: no scenario of ${suite.name} has this id (orphan); ignored`);
-  return { recordings, warnings };
+  return { recordings, warnings, errors };
 }
 
 /** Recording folders in .toad/suites with no suite of that name. */
@@ -249,11 +283,13 @@ export function suiteOverview(project) {
   catch (error) { return { suites: [], warnings: [], error: error.message }; }
   const warnings = [];
   const list = suites.map(suite => {
-    const { recordings, warnings: own } = inspectSuite(project, suite, config);
+    const { recordings, warnings: own, errors } = inspectSuite(project, suite, config);
     warnings.push(...own);
     return {
+      ...(errors.length ? { diagnostics: errors } : {}),
+      edits: `${EDITS[suite.kind]} Assertion weakening requires review; complete-scenario capture is tester-attested, not a semantic proof.`,
       name: suite.name, kind: suite.kind, title: suite.title ?? null, tags: suite.tags ?? [], writes: !!suite.writes,
-      scenarios: suite.scenarios.map((s, i) => ({ name: s.name, steps: s.steps, expected: s.expected, recording: recordings[i] })),
+      scenarios: suite.scenarios.map((s, i) => ({ name: s.name, steps: s.steps, expected: s.expected, scenarioId: scenarioId(s.name), intentHash: intentHash(suite.kind, s), recordingFile: `.toad/suites/${suite.name}.recordings/${scenarioId(s.name)}.json`, recording: recordings[i] })),
     };
   });
   return { suites: list, warnings: [...warnings, ...orphanFolders(project, suites)] };

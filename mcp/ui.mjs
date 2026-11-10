@@ -9,14 +9,15 @@
  * localhost only; run artifacts can contain sensitive data.
  */
 import { createServer } from 'node:http';
-import { readdirSync, readFileSync, existsSync, lstatSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync, existsSync, lstatSync, statSync, realpathSync } from 'node:fs';
 import { dirname, join, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { listProjects } from './projects.mjs';
 import { VERSION } from './agent.mjs';
-import { resultsOf, scenarioResults } from './results.mjs';
+import { overallVerdict, resultsOf, scenarioResults } from './results.mjs';
 import { recordingStatus } from './recordings.mjs';
 import { suiteOverview } from './suite-recordings.mjs';
+import { readExecutionRecords } from '../agent/tools/toad-execution.mjs';
 
 const HOST = '127.0.0.1';
 const PAGE = join(dirname(fileURLToPath(import.meta.url)), 'ui.html');
@@ -57,7 +58,7 @@ function requireRun(project, id) {
   const decoded = decodeURIComponent(id);
   if (decoded === '.' || decoded === '..' || decoded.includes('/') || decoded.includes('\\')) throw httpError(404, 'Run not found');
   const dir = join(project.runs, decoded);
-  if (!existsSync(dir) || !lstatSync(dir).isDirectory()) throw httpError(404, 'Run not found');
+  if (!existsSync(dir) || !lstatSync(dir).isDirectory() || lstatSync(dir).isSymbolicLink() || realpathSync(dir) !== dir) throw httpError(404, 'Run not found');
   return dir;
 }
 
@@ -102,10 +103,16 @@ function replayOf(value) {
   for (const [name, p] of Object.entries(value.proposed ?? {})) {
     if (!p || typeof p !== 'object') continue;
     proposed[name] = { steps: steps(p.steps) ?? [], previous: steps(p.previous), diff: Array.isArray(p.diff) ? p.diff.filter(l => str(l, 9000)).slice(0, 200) : [], updated: p.updated === true };
+    const hash = v => typeof v === 'string' && /^[a-f0-9]{64}$/.test(v);
+    const v = p.provenance;
+    if (v?.version === 1 && ['scenarioId', 'intentHash', 'contextHash', 'proposedHash'].every(k => hash(v[k])) && (v.savedHash === null || hash(v.savedHash))) proposed[name].provenance = Object.fromEntries(['version', 'scenarioId', 'intentHash', 'contextHash', 'savedHash', 'proposedHash'].map(k => [k, v[k]]));
+    const f = p.failure;
+    if (typeof f?.run === 'string' && /^[A-Za-z0-9_.-]{1,200}$/.test(f.run) && Array.isArray(f.executionIds) && f.executionIds.length <= 100 && f.executionIds.every(id => typeof id === 'string' && /^[a-f0-9-]{36}$/.test(id)) && Array.isArray(f.assertions) && f.assertions.length <= 100 && f.assertions.every(a => str(a))) proposed[name].failure = { run: f.run, executionIds: f.executionIds, assertions: f.assertions };
   }
+  const results = Object.fromEntries(Object.entries(value.results ?? {}).filter(([name, result]) => str(name, 500) && ['PASS', 'FAIL', 'ERROR'].includes(result)));
   const accept = str(value.accept, 300);
   const prior = str(value.priorRun, 200);
-  return { suite: str(value.suite, 200), modes, proposed, ...(prior && /^[A-Za-z0-9_.-]+$/.test(prior) ? { priorRun: prior } : {}), ...(accept && /^toad suites accept [A-Za-z0-9_.-]+ --suite [A-Za-z0-9_.-]+$/.test(accept) ? { accept } : {}) };
+  return { suite: str(value.suite, 200), modes, proposed, ...(Object.keys(results).length ? { results } : {}), ...(prior && /^[A-Za-z0-9_.-]+$/.test(prior) ? { priorRun: prior } : {}), ...(accept && /^toad suites accept [A-Za-z0-9_.-]+ --suite [A-Za-z0-9_.-]+$/.test(accept) ? { accept } : {}) };
 }
 
 /**
@@ -127,6 +134,7 @@ function summary(project, id) {
     : 'interrupted';
   const ended = report ? Date.parse(saved?.finished ?? '') || mtime(reportPath) : null;
   // The server records the verdict it read; older runs only have the report.
+  const aggregate = replayOf(saved?.replay)?.results;
   const verdict = state === 'failed' ? 'ERROR' : state !== 'finished' ? state.toUpperCase()
     : saved?.verdict ?? /^[#*\s]*Verdict[*:\s]*?(?:\n\s*)*[*\s]*(PASS|FAIL|ERROR)\b/im.exec(report)?.[1]?.toUpperCase() ?? 'UNKNOWN';
   return {
@@ -134,7 +142,7 @@ function summary(project, id) {
     started, ended, duration: started && ended ? ended - started : null,
     kind: handoff?.kind ?? '', title: titleOf(handoff), goal: handoff?.request?.goal ?? '', target: targetOf(handoff),
     scenarios: handoff?.request?.scenarios?.length ?? 0,
-    results: saved?.scenarios ?? (report ? scenarioResults(handoff?.request?.scenarios, resultsOf(report)) : []),
+    results: (saved?.scenarios ?? (report ? scenarioResults(handoff?.request?.scenarios, resultsOf(report)) : [])).map(s => ({ ...s, result: overallVerdict(s.result, aggregate?.[s.name] ? [{ result: aggregate[s.name] }] : []) })),
     ...(saved?.error ? { error: saved.error } : {}),
     // Who started it (a coding agent over MCP, or `toad run`), and how.
     origin: saved?.origin ?? 'mcp',
@@ -142,7 +150,7 @@ function summary(project, id) {
     ...(saved?.models ? { models: saved.models } : {}),
     ...(saved?.sandbox ? { sandbox: saved.sandbox } : {}),
     ...(replayOf(saved?.replay) ? { replay: replayOf(saved.replay) } : {}),
-    verdict, status: /^Status:\s*(\S+)/m.exec(report)?.[1] ?? (state === 'finished' ? 'unknown' : state), state,
+    verdict: aggregate ? overallVerdict(verdict, Object.values(aggregate).map(result => ({ result }))) : verdict, status: /^Status:\s*(\S+)/m.exec(report)?.[1] ?? (state === 'finished' ? 'unknown' : state), state,
   };
 }
 
@@ -184,7 +192,7 @@ function detail(project, id) {
   const recordings = (handoff.request?.scenarios ?? []).map(s => recordingStatus(dir, handoff.kind, s));
   return {
     ...summary(project, id), projectPath: project.path,
-    handoff, recordings,
+    handoff, recordings, execution: readExecutionRecords(dir),
     report: readText(join(dir, 'reports', 'report.md')),
     files: receiptFiles(dir),
     newer: runs[at - 1] ?? null, older: runs[at + 1] ?? null,
@@ -197,7 +205,15 @@ function serveFile(res, project, id, rel) {
   if (decoded.startsWith('/') || decoded.includes('\\') || decoded.split('/').includes('..')) throw httpError(400, 'Invalid path');
   const target = join(dir, decoded);
   let st;
-  try { st = lstatSync(target); } catch { throw httpError(404, 'File not found'); }
+  try {
+    let current = dir;
+    for (const part of decoded.split('/')) {
+      if (!part || part === '.') throw new Error();
+      current = join(current, part);
+      if (lstatSync(current).isSymbolicLink()) throw new Error();
+    }
+    st = lstatSync(target);
+  } catch { throw httpError(404, 'File not found'); }
   if (!st.isFile()) throw httpError(404, 'Not a file');
   const data = readFileSync(target);
   res.writeHead(200, {

@@ -51,6 +51,15 @@ orchestrator:
     needs is missing, say so as a missing prerequisite, apart from product
     failures.
 
+    For a native owned attempt, pass its supplied workspace ID and exact scenario
+    name to the tester. Do not rerun fixture hooks, prepare another workspace or
+    retry the scenario internally; native finalization owns teardown. Require unique
+    receipt names for every operation, including probes/retries. A successful tool
+    call is not a scenario assertion: CLI/API exploratory completion must cite an
+    explicit evidence-linked attestation. Preserve observed machine FAIL over later
+    investigation or replacement proposals; required evidence/completion errors block
+    PASS, while optional diagnostics only warn.
+
     Report only what the testers observed. Never invent, soften or repair a
     result, and keep every receipt path (screenshots, command records)
     exactly as a tester gave it. If a scenario could not be run (the site or
@@ -79,13 +88,17 @@ agents:
         cli:prepare-network-scenario,
         cli:run-command,
         cli:run-command-with-input,
-        cli:run-structured-command
+        cli:run-structured-command,
+        cli:attest-scenario
       ]
     skills: [ cli-test-scenario ]
     prompt: |
       You test one scenario of a command-line program, exactly as given, and
       report what you observed. Follow the cli-test-scenario skill. Never
       claim a step passed without evidence from a recorded command.
+      Bind every command to the exact scenarioName. For exploratory completion,
+      use cli_attest_scenario with {scenarioName,result,executionIds} referencing
+      completed operation IDs. Tool success alone never verifies a scenario.
   - name: api-tester
     description: Runs one HTTP API test scenario and reports pass or fail with
       every request recorded as a receipt
@@ -97,13 +110,17 @@ agents:
         cli:prepare-network-scenario,
         cli:run-command,
         cli:run-command-with-input,
-        cli:run-structured-api
+        cli:run-structured-api,
+        cli:attest-scenario
       ]
     skills: [ api-test-scenario ]
     prompt: |
       You test one scenario of an HTTP API, exactly as given, and report what
       you observed. Follow the api-test-scenario skill. Never claim a step
       passed without evidence from a recorded request.
+      Bind every command to the exact scenarioName. For exploratory completion,
+      use cli_attest_scenario with {scenarioName,result,executionIds} referencing
+      completed operation IDs. Tool success alone never verifies a scenario.
 skills:
   - name: web-test-scenario
     description: How to run one web test scenario with the Playwright MCP and record
@@ -111,11 +128,45 @@ skills:
     body: |
       # Running a web test scenario
 
-      The handoff target URL is authoritative. Resolve root-relative paths
-      against it, never an older URL. Prefer root-relative goto paths such as
-      /pricing in the structured tool; it binds and enforces the effective
-      target. Describe reusable scenarios with target-relative paths, without
-      changing their expected text.
+      When the request supplies a native owned attempt ID, fixture preparation has
+      already run exactly once. Use that ID for every command; preparation tools
+      return the same workspace rather than cloning again. Do not run before/after
+      commands yourself, change workdir, remove the workspace, or retry the scenario
+      internally. Native finalization owns teardown, including after cancellation.
+      Collect failure receipts and any available diagnostics BEFORE returning (cleanup
+      may destroy fixtures). Hook workspaces are disposable, not retained evidence.
+      Hook-bearing scenarios cannot be recorded or replayed; normal structured
+      assertions/attestations still apply. Web fixture commands are native sandbox
+      commands only: they grant no shell tools or browser-cookie/reset scripts to
+      the web tester. No persistent daemon or remote-state isolation is promised.
+
+
+      The handoff's target URL is authoritative. Resolve root-relative paths against
+      that URL, never an older URL. For structured execution prefer `goto` paths
+      such as `/pricing`; the tool binds them to the effective run target and refuses
+      off-target navigation. Use target-relative paths when describing reusable
+      scenarios. Do not rewrite expected text to make an assertion pass.
+
+      In instrumented project runs, FIRST call `browser_toad_bind_scenario` with
+      `scenarioName` copied exactly from the request. Bind once per tester/browser
+      session; never reuse a session for a different scenario. For a goal-only request,
+      provide the explicit bounded scenario name you derived. Binding errors are ERROR,
+      not product FAIL. If this tool is absent (direct/legacy launch), proceed normally.
+      A successful browser tool operation is not a scenario assertion; report your
+      observed conclusions as tester-attested and cite the evidence. For the structured
+      web command, always supply `scenarioName` (or the same exact name in capture).
+
+      For the native tool argument `request`, supply the serialized JSON object
+      below as text. Do not include a filename, shell command, Markdown fences or
+      literal `JSON.stringify(...)`. Replace placeholders with actual request values;
+      keep the object serialized inside the string-valued `request` argument.
+
+      ```json
+      {"receipts":"RECEIPTS","name":"01-check","scenarioName":"EXACT_NAME","payload":{"steps":[{"action":"goto","url":"/"},{"action":"expectText","target":{"role":"heading","name":"Invoice"},"contains":"Invoice"}]}}
+      ```
+
+      Use only supported actions and actual observed locators/expected literals.
+      The example is illustrative, not permission to change the scenario intent.
 
       1. Open the URL. If it fails to load, stop: the scenario is ERROR, with
          the error and a screenshot if a page rendered.
@@ -124,6 +175,10 @@ skills:
          selectors.
       3. Login secrets are given by name. Type the name, never a value; the
          browser fills in the real value. Never ask for or reveal a secret.
+         Selected registered values can be redacted by the native browser transport;
+         unknown/unselected page values, screenshots and arbitrary encodings are not
+         automatically protected. Do not probe password values or persist page dumps
+         containing sensitive content. Report missing selected references as ERROR.
       4. After each step, check the expected outcome against the snapshot.
          Wait for content that loads late before deciding.
       5. Take a screenshot at each checkpoint, and always at the moment a step
@@ -158,6 +213,48 @@ skills:
     body: |
       # Running a CLI test scenario
 
+      When the request supplies a native owned attempt ID, fixture preparation has
+      already run exactly once. Use that ID for every command; preparation tools
+      return the same workspace rather than cloning again. Do not run before/after
+      commands yourself, change workdir, remove the workspace, or retry the scenario
+      internally. Native finalization owns teardown, including after cancellation.
+      Collect failure receipts and any available diagnostics BEFORE returning (cleanup
+      may destroy fixtures). Hook workspaces are disposable, not retained evidence.
+      Hook-bearing scenarios cannot be recorded or replayed; normal structured
+      assertions/attestations still apply. Web fixture commands are native sandbox
+      commands only: they grant no shell tools or browser-cookie/reset scripts to
+      the web tester. No persistent daemon or remote-state isolation is promised.
+
+
+      In project runs, copy the exact requested scenario name (not the workspace UUID).
+      Shell tools use the `scenario_name` argument; structured JSON and attestation
+      requests use `scenarioName`. Preparation tools take workdir/URL, not that field. Structured CLI/API requests also take
+      `scenarioName`; `capture.scenarioName` binds it when recording. For goal-only
+      runs use an explicit bounded name. Commands return an execution ID. Normal shell
+      commands and HTTP requests produce operation evidence, not machine scenario
+      assertions. After comparing observations with every expectation, call
+      `cli_attest_scenario` with `{scenarioName:EXACT_NAME,result:"PASS"|"FAIL"|"ERROR",
+      executionIds:[ID,...]}` referencing 1-9 completed operations for that scenario.
+      This is labeled tester-attested, not machine verified. Missing completion is
+      ERROR, never PASS. Use structured assertions whenever appropriate, regardless
+      of recording eligibility; do not weaken expectations to make them pass.
+      A failed saved assertion stays FAIL after investigation or replacement capture.
+      Do not use an attestation or report formatting to override a machine failure.
+
+      For the native tool argument `request`, supply the serialized JSON object
+      below as text. Do not include a filename, shell command, Markdown fences or
+      literal `JSON.stringify(...)`. Replace placeholders with actual request values;
+      keep the object serialized inside the string-valued `request` argument.
+
+      ```json
+      {"scenario":"SCENARIO_UUID","receipts":"RECEIPTS","name":"01-check","program":"node","args":["invoice.mjs"],"expect":{"exitCode":0,"stdout":{"contains":"6"}},"scenarioName":"EXACT_NAME"}
+      ```
+
+      Use the returned UUID as `scenario`, never the
+      workspace path. Do not invent `scenarioId`, `expectedExitCode`, `expectedStdout`,
+      `command` or `expected` fields. Adapt the assertion to the actual scenario;
+      this example is not permission to replace the requested intent.
+
       1. Prepare a scenario for the requested project. If the scenario requires
          network access, use the network preparation tool with a non-mutating
          HTTP(S) endpoint. Otherwise use ordinary preparation. An infrastructure
@@ -168,7 +265,10 @@ skills:
       3. Check the program is available, then execute the scenario's steps in
          order. Put recorded evidence for one scenario under the supplied
          receipts folder, in a scenario-specific subfolder. Name each command
-         NN-what-it-does, numbering from 01. Use the input-enabled command
+         NN-what-it-does, numbering from 01. Each receipt name must be unique in its
+         folder, including probes/retries: existing receipts are never overwritten and
+         a duplicate leaves required evidence incomplete (ERROR). Use a new name.
+         Use the input-enabled command
          when needed. The workspace is scratch space, not evidence.
          Commands run with `/bin/sh`, not bash: use POSIX shell only (no
          `${PIPESTATUS[@]}`, `[[ ]]`, arrays or `source`), or run
@@ -210,6 +310,49 @@ skills:
     body: |
       # Running an API test scenario
 
+      When the request supplies a native owned attempt ID, fixture preparation has
+      already run exactly once. Use that ID for every command; preparation tools
+      return the same workspace rather than cloning again. Do not run before/after
+      commands yourself, change workdir, remove the workspace, or retry the scenario
+      internally. Native finalization owns teardown, including after cancellation.
+      Collect failure receipts and any available diagnostics BEFORE returning (cleanup
+      may destroy fixtures). Hook workspaces are disposable, not retained evidence.
+      Hook-bearing scenarios cannot be recorded or replayed; normal structured
+      assertions/attestations still apply. Web fixture commands are native sandbox
+      commands only: they grant no shell tools or browser-cookie/reset scripts to
+      the web tester. No persistent daemon or remote-state isolation is promised.
+
+
+      In project runs, copy the exact requested scenario name (not the workspace UUID).
+      Shell tools use the `scenario_name` argument; structured JSON and attestation
+      requests use `scenarioName`. Preparation tools take workdir/URL, not that field. Structured CLI/API requests also take
+      `scenarioName`; `capture.scenarioName` binds it when recording. For goal-only
+      runs use an explicit bounded name. Commands return an execution ID. Normal shell
+      commands and HTTP requests produce operation evidence, not machine scenario
+      assertions. After comparing observations with every expectation, call
+      `cli_attest_scenario` with `{scenarioName:EXACT_NAME,result:"PASS"|"FAIL"|"ERROR",
+      executionIds:[ID,...]}` referencing 1-9 completed operations for that scenario.
+      This is labeled tester-attested, not machine verified. Missing completion is
+      ERROR, never PASS. Use structured assertions whenever appropriate, regardless
+      of recording eligibility; do not weaken expectations to make them pass.
+      A failed saved assertion stays FAIL after investigation or replacement capture.
+      Do not use an attestation or report formatting to override a machine failure.
+
+      For the native tool argument `request`, supply the serialized JSON object
+      below as text. Do not include a filename, shell command, Markdown fences or
+      literal `JSON.stringify(...)`. Replace placeholders with actual request values;
+      keep the object serialized inside the string-valued `request` argument.
+
+      ```json
+      {"scenario":"SCENARIO_UUID","receipts":"RECEIPTS","name":"01-request","payload":{"method":"GET","url":"http://127.0.0.1:3000/","headers":{"accept":"application/json"},"body":"","expect":{"status":200,"body":{"contains":"6"}}},"scenarioName":"EXACT_NAME"}
+      ```
+
+      All five payload keys (`method`, `url`, `headers`, `body`, `expect`) are required;
+      use `body:""` for no body, never null or omission. Headers use lower-case
+      `accept`/`content-type` only. `scenario` is the returned UUID, not a workspace
+      path. Adapt expected status/body to the actual scenario; do not copy these
+      illustrative expectations over its intent.
+
       1. Prepare a scenario with the network preparation tool, passing the API
          URL to use from inside the sandbox (the request says when it differs
          from the API's own URL). Any HTTP answer means the API is reachable;
@@ -221,14 +364,17 @@ skills:
          scenario touches first (`grep`, `sed -n`, or `node -e` for JSON),
          and check status codes, content types and required fields against
          it.
-      3. When recording is enabled and one credential-free request plus status/body
-         assertion cover the entire scenario, use cli_run_structured_api with
-         scenario, receipts, name, payload {method,url,headers,body,expect:{status,
-         body:{equals:STRING or contains:STRING}}}, and capture {scenarioName,
-         complete:true}. Only trusted non-secret fixtures and accept/content-type
-         headers are supported; the sandbox needs Node with fetch. Never weaken
-         a scenario to record it. Otherwise send one request per recorded command, numbered NN-what-it-does
-         from 01, under the receipts folder in a scenario-specific subfolder:
+      3. When the lead enables recording and one credential-free request and explicit
+         status/body assertion cover the entire scenario, use `cli_run_structured_api`
+         with `{scenario,receipts,name,payload:{method,url,headers,body,expect:{status,
+         body:{equals:STRING}}},capture:{scenarioName:EXACT_NAME,complete:true}}`.
+         Body checks may instead use `contains`. Only accept/content-type headers and
+         trusted non-secret literals are supported; the sandbox needs Node with fetch.
+         Do not attest complete for partial checks or weaken scenarios to record them.
+         Otherwise send one request per recorded command, numbered NN-what-it-does
+         from 01, under the receipts folder in a scenario-specific subfolder.
+         Use a unique receipt name for every probe/retry; duplicate names never
+         overwrite evidence and cause ERROR. For example:
          `curl -sS -i --max-time 30 -X METHOD "$URL/path"`, with
          `-H 'Content-Type: application/json' --data @body.json` or the
          input-enabled command for a body. `-i` keeps the status line and
@@ -283,7 +429,9 @@ integrations:
           "{receipts}",
           "{name}",
           "{scenario}",
-          "{command}"
+          "{command}",
+          --scenario-name,
+          "{scenario_name}"
         ]
       approve: false
     - name: run-command-with-input
@@ -298,8 +446,15 @@ integrations:
           "{name}",
           "{scenario}",
           "{command}",
-          "{input:file}"
+          "{input:file}",
+          --scenario-name,
+          "{scenario_name}"
         ]
+      approve: false
+    - name: attest-scenario
+      description: Explicit CLI/API tester-attested completion linked to executionIds; not a machine assertion
+      command: node
+      args: [ tools/toad-attest.mjs, "{request:file}" ]
       approve: false
     - name: run-structured-command
       description: Run one program with explicit arguments and assert its exit code

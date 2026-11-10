@@ -113,7 +113,7 @@ test('target fields toad.yaml already sets are left out of the saved suite', t =
   assert.deepEqual(suite.target, { workdir: '.' });
 });
 
-test('stale, malformed and orphaned recordings are warnings, never errors, and reading writes nothing', t => {
+test('stale and orphaned recordings warn, invalid recordings carry diagnostics, and reading writes nothing', t => {
   const { project, run, suites } = fixture(t);
   saveSuiteFromRun(project, ID, 'smoke');
   const yaml = join(suites, 'smoke.yaml'), original = readFileSync(yaml, 'utf8');
@@ -139,7 +139,8 @@ test('stale, malformed and orphaned recordings are warnings, never errors, and r
   writeFileSync(file, '{');
   assert.deepEqual(statuses(), ['stale:invalid', 'none']);
   writeFileSync(file, JSON.stringify({ ...JSON.parse(envelope), payload: { ...PAYLOAD, program: '-c' } }));
-  assert.deepEqual(statuses(), ['stale:unsupported', 'none']);
+  assert.deepEqual(statuses(), ['stale:invalid', 'none']);
+  assert.ok(suiteOverview(project).suites[0].diagnostics.length);
   unlinkSync(file);
   symlinkSync(join(run, 'recording', `${scenarioId(A.name)}.json`), file);
   assert.deepEqual(statuses(), ['stale:invalid', 'none']);

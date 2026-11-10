@@ -9,16 +9,20 @@
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { readdirSync, readFileSync, statSync, lstatSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { executionScenarioId, readExecutionRecords } from '../agent/tools/toad-execution.mjs';
+import { readdirSync, readFileSync, statSync, lstatSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { z } from 'zod';
+import { runScenarioLifecycle } from './scenario-lifecycle.mjs';
+import { attemptSchema, providerCredentialName, HOOK_RECORDING_REASON } from './attempt-schema.mjs';
+import { definitionDocument, definitionError, validateDefinition } from './definition-diagnostics.mjs';
 import { resolveSecretReferences } from './project-secrets.mjs';
 import { chooseSandbox, isReservedSecretName } from '../agent/tools/toad-sandbox.mjs';
 import { privateDir, toadDirs } from '../agent/tools/toad-dirs.mjs';
 import { acquireSlot } from './slots.mjs';
 import { overallVerdict, resultsOf, scenarioResults, verdictOf } from './results.mjs';
-import { checkIgnore, ensureDirectory, pathEntries, projectFolder, readProjectConfig, registerProject, withDefaults } from './projects.mjs';
-import { finalizeCliCandidates, finalizeWebCandidates } from './recordings.mjs';
+import { checkIgnore, ensureDirectory, pathEntries, projectFolder, readProjectConfig, readRegular, registerProject, withDefaults } from './projects.mjs';
+import { finalizeCliCandidates, finalizeWebCandidates, markNotRecordable } from './recordings.mjs';
 import { agentFor, resolveAgent, resolveModels, workflowCommand, workflowEnv } from './agent.mjs';
 
 export const NOT_SET_UP = 'The Toad agent is not set up on this machine. Run `toad setup`, then retry.';
@@ -203,6 +207,14 @@ export async function runTest(text, input, ctx, { attachImages, projectRun, secr
     delete env.TOAD_EXEC_JSON;
     delete env.TOAD_RECORDING_ENABLED;
     delete env.TOAD_WEB_TARGET_URL;
+    for (const key of Object.keys(env)) if (key.startsWith('TOAD_ATTEMPT_')) delete env[key];
+    for (const key of ['TOAD_EXECUTION_RUN_DIR', 'TOAD_EXECUTION_SCENARIOS', 'TOAD_EXECUTION_SCENARIO_NAME', 'TOAD_EXECUTION_MODE', 'TOAD_EXECUTION_KIND', 'TOAD_EXECUTION_EXPECT', 'TOAD_EXECUTION_PHASE']) delete env[key];
+    if (projectRun && input.handoff) {
+      env.TOAD_EXECUTION_KIND = input.handoff.kind;
+      env.TOAD_EXECUTION_RUN_DIR = projectRun;
+      env.TOAD_EXECUTION_SCENARIOS = JSON.stringify((input.handoff.request.scenarios ?? []).map(s => s.name));
+      env.TOAD_EXECUTION_MODE = 'agent';
+    }
     if (webTarget) env.TOAD_WEB_TARGET_URL = webTarget;
     if (cliRecording) env.TOAD_RECORDING_ENABLED = { api: 'api-v1', web: 'web-v1' }[input.handoff?.kind] ?? 'cli-v1';
     if (cliPath?.length) env.TOAD_CLI_PATH = JSON.stringify(cliPath);
@@ -224,10 +236,14 @@ export async function runTest(text, input, ctx, { attachImages, projectRun, secr
     const stop = () => budget.abort();
     ctx.signal.addEventListener('abort', stop, { once: true });
     let overBudget = false, spent = 0;
-    const meter = sessions && setInterval(() => {
+    const checkBudget = () => {
       spent = sessionCost(sessions);
       if (maxCost !== undefined && spent > maxCost && !overBudget) { overBudget = true; message = 'Stopping: over the spending limit…'; budget.abort(); }
-    }, 2000);
+    };
+    const meter = sessions && setInterval(checkBudget, 2000);
+    // Hook workflows share this one run deadline and cost meter, not one allowance each.
+    const runDeadline = input.handoff?.attempt && setTimeout(() => budget.abort(), Number(env.TOAD_TEST_TIMEOUT_MS) || run.timeoutMinutes * 60000);
+    if (ctx.signal.aborted) budget.abort();
     let base, result;
     try {
       if (setup?.commands?.length) {
@@ -239,8 +255,11 @@ export async function runTest(text, input, ctx, { attachImages, projectRun, secr
         else env.TOAD_BASE_SCENARIO = prepared.id;
         message = 'Testing…';
       }
-      result ??= await runWorkflow(agent, run, budget.signal, tick, env, sessions ? ['--session-dir', sessions] : []);
+      result ??= input.handoff?.attempt
+        ? await runHookScenarios(agent, run, input.handoff, env, folder, budget.signal, tick, sessions, secretValues ?? {}, checkBudget)
+        : await runWorkflow(agent, run, budget.signal, tick, env, sessions ? ['--session-dir', sessions] : []);
     } finally {
+      if (runDeadline) clearTimeout(runDeadline);
       if (meter) clearInterval(meter);
       ctx.signal.removeEventListener('abort', stop);
       if (base) rmSync(base, { recursive: true, force: true });
@@ -267,15 +286,93 @@ export async function runTest(text, input, ctx, { attachImages, projectRun, secr
 /** Run one Toad tool command (toad-exec) in the agent folder. */
 function toolCommand(agent, args, env, signal) {
   return new Promise(done => {
+    if (signal?.aborted) return done({ code: 2, out: '', err: 'Cancelled before command launch' });
     const child = spawn(process.execPath, [join(agent, 'tools', 'toad-exec.mjs'), ...args], { cwd: agent, env, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '', err = '';
     child.stdout.setEncoding('utf8').on('data', d => { out += d; });
     child.stderr.setEncoding('utf8').on('data', d => { err += d; });
     const cancel = () => child.kill('SIGTERM');
     signal?.addEventListener('abort', cancel, { once: true });
+    if (signal?.aborted) cancel();
     child.on('error', error => { err += error.message; });
     child.on('close', code => { signal?.removeEventListener('abort', cancel); done({ code, out, err }); });
   });
+}
+
+/** Native ownership for hook-bearing scenarios; the specialist never owns finally. */
+async function runHookScenarios(agent, run, h, env, folder, signal, tick, sessions, secretValues, checkBudget) {
+  const results = [], notes = [];
+  let status = 'ok', processCleanupIncomplete = false;
+  const hooks = h.attempt;
+  const workdir = h.kind === 'web' ? hooks.workdir : h.target.workdir;
+  for (const scenario of h.request.scenarios) {
+    checkBudget();
+    let snapshot;
+    const lifecycle = await runScenarioLifecycle({ ...hooks, signal, timeoutSeconds: hooks.timeout_seconds ?? 120, cleanupTimeoutSeconds: hooks.cleanup_timeout_seconds ?? 30 }, {
+      async prepare(mainSignal) {
+        const dir = join(runDir(), 'attempts');
+        ensureDirectory(dir);
+        const prepared = await toolCommand(agent, ['prepare', workdir], env, mainSignal);
+        const id = /Scenario ID: (\S+)/.exec(prepared.out)?.[1];
+        const workspace = /Workspace: (.+)/.exec(prepared.out)?.[1]?.trim();
+        if (!id || !workspace) return null;
+        const contextEnv = { ...env, TOAD_ATTEMPT_ID: id, TOAD_ATTEMPT_SOURCE: workdir, TOAD_EXECUTION_SCENARIO_NAME: scenario.name, TOAD_EXECUTION_SCENARIOS: JSON.stringify([scenario.name]) };
+        return { id, workspace, env: contextEnv };
+      },
+      async command(context, phase, command, index, commandSignal) {
+        if (!context.hookFile) {
+          context.secretDir ??= mkdtempSync(join(privateDir(join(toadDirs().runtime, 'secrets')), 'toad-hooks-'));
+          const file = join(context.secretDir, 'selected.json');
+          const selected = Object.fromEntries((hooks.credentials ?? []).map(name => [name, secretValues[name]]));
+          writeFileSync(file, JSON.stringify(selected), { flag: 'wx', mode: 0o600 });
+          context.hookFile = file;
+        }
+        const hookEnv = { ...context.env, TOAD_CLI_SECRETS_FILE: context.hookFile, TOAD_EXECUTION_PHASE: phase, TOAD_EXEC_JSON: '1', TOAD_COMMAND_TIMEOUT_S: String(phase === 'after' ? hooks.cleanup_timeout_seconds ?? 30 : hooks.timeout_seconds ?? 120) };
+        delete hookEnv.TOAD_EXECUTION_EXPECT;
+        const commandResult = await toolCommand(agent, ['run', join(folder, 'attempts', context.id, phase), `${String(index + 1).padStart(2, '0')}-${phase}`, context.id, command], hookEnv, commandSignal);
+        try {
+          const fact = JSON.parse(commandResult.out);
+          return commandResult.code === 0 && fact.exitCode === 0 && fact.executionOutcome === 'completed' && !fact.evidenceError;
+        } catch { return false; }
+      },
+      async product(context, mainSignal) {
+        const product = await runWorkflow(agent, { ...run, request: `${run.request}\nScenario for this attempt ONLY:\nScenarios:\n1. "${scenario.name}": ${scenario.steps}; expected: ${scenario.expected}\nNative fixture preparation is complete. Owned scenario ID: ${context.id}. Workspace: ${context.workspace}. Do not rerun before/after hooks. Use this ID, not a fresh workspace. Capture failure evidence before returning. Report only this scenario.` }, mainSignal, tick, context.env, sessions ? ['--session-dir', sessions] : []);
+        context.processCleanupIncomplete = product.cleanup === 'incomplete';
+        processCleanupIncomplete ||= context.processCleanupIncomplete;
+        return product;
+      },
+      capture(context, product) {
+        const evidence = readExecutionRecords(runDir());
+        const attemptRecords = evidence.records.filter(r => r.scenarioName === scenario.name);
+        const incomplete = evidence.errors.length > 0 || attemptRecords.some(r => !r.evidenceComplete);
+        const records = attemptRecords.filter(r => !r.phase);
+        const reported = scenarioResults([scenario], resultsOf(product?.answer))[0].result;
+        const failed = reported === 'FAIL' || records.some(r => r.outcome === 'FAIL' || r.steps.some(s => s.assertion?.result === 'FAIL'));
+        snapshot = { scenarioName: scenario.name, attemptId: context.id, capturedAt: new Date().toISOString(), result: failed ? 'FAIL' : !incomplete && product?.status === 'ok' ? reported : 'ERROR', executionIds: records.map(r => r.id) };
+        const redact = text => Object.values(secretValues).filter(Boolean).sort((a, b) => b.length - a.length).reduce((out, value) => out.split(value).join('[REDACTED]'), text);
+        writeFileSync(join(runDir(), 'reports', `${context.id}.md`), redact(product?.answer ?? 'No product report: fixture preparation or product execution did not complete.'), { flag: 'wx', mode: 0o600 });
+        // Metadata is outside receipts and contains facts only, never the model's raw text.
+        writeFileSync(join(runDir(), 'attempts', `${context.id}.json`), JSON.stringify(snapshot) + '\n', { flag: 'wx', mode: 0o600 });
+        if (incomplete) throw new Error('Required attempt evidence is incomplete');
+      },
+      close(context, { retain }) {
+        if (context.secretDir) rmSync(context.secretDir, { recursive: true, force: true });
+        const evidence = readExecutionRecords(runDir());
+        if (!retain && !context.processCleanupIncomplete && !evidence.errors.length && !evidence.records.some(r => r.attemptId === context.id && !r.evidenceComplete)) rmSync(context.workspace, { recursive: true, force: true });
+      },
+    });
+    const failed = snapshot?.result === 'FAIL';
+    const error = lifecycle.executionError || lifecycle.preparationError || lifecycle.cleanupError || lifecycle.evidenceError || lifecycle.cancelled || lifecycle.product?.status !== 'ok';
+    results.push({ name: scenario.name, result: failed ? 'FAIL' : error ? 'ERROR' : snapshot?.result ?? 'ERROR' });
+    if (error) {
+      status = signal.aborted ? 'cancelled' : 'fixture_error';
+      notes.push(`${scenario.name}: ${lifecycle.preparationError ? 'fixture preparation failed; product skipped; ' : ''}${lifecycle.executionError ? 'product execution errored; ' : ''}${lifecycle.cleanupUnavailable ? 'cleanup unavailable: no owned sandbox; ' : ''}${lifecycle.cleanupError ? 'fixture cleanup failed or exceeded its separate deadline; ' : ''}${lifecycle.evidenceError ? 'failure evidence unavailable; workspace retained; ' : ''}${lifecycle.cancelled ? 'attempt cancelled or timed out; ' : ''}`);
+    }
+  }
+  const verdict = overallVerdict('PASS', results);
+  return { status, answer: [`Verdict: ${verdict}`, 'Results:', ...results.map(s => `- ${s.result} | ${s.name}`), '', ...notes].join('\n'), cleanup: processCleanupIncomplete || notes.some(n => n.includes('cleanup failed') || n.includes('cleanup unavailable')) ? 'incomplete' : 'complete' };
+
+  function runDir() { return env.TOAD_EXECUTION_RUN_DIR; }
 }
 
 /**
@@ -287,6 +384,8 @@ function toolCommand(agent, args, env, signal) {
 async function runSetup(agent, { commands, workdir, names = [] }, env, folder, signal) {
   const setupEnv = { ...env, TOAD_COMMAND_TIMEOUT_S: String(Number(env.TOAD_SETUP_TIMEOUT_S ?? 900)) };
   delete setupEnv.TOAD_BASE_SCENARIO;
+  // Setup is run-level infrastructure, not an unattributed scenario operation.
+  for (const key of Object.keys(setupEnv)) if (key.startsWith('TOAD_EXECUTION_')) delete setupEnv[key];
   const failure = (why, receipt) => ({
     status: 'setup_failed', cleanup: 'complete', message: '',
     answer: ['Verdict: ERROR', 'Results:', ...(names.length ? names : ['Setup']).map(name => `- ERROR | ${name}`), '',
@@ -320,14 +419,47 @@ export function writeState(run, fields) {
 /** Map a workflow result, and the receipts it left, onto a tool result. */
 function finish(input, result, folder, { attachImages, projectRun }) {
   const scenarios = scenarioResults(input.handoff?.request?.scenarios ?? input.scenarios, resultsOf(result.answer));
-  // A run stopped for its spending limit is an error whatever it reported so far.
-  const verdict = result.status === 'cost_limit' ? 'ERROR' : overallVerdict(verdictOf(result.answer), scenarios);
+  const execution = projectRun && input.handoff ? readExecutionRecords(projectRun) : null;
+  const failedRecord = r => r.outcome === 'FAIL' || r.assertion?.result === 'FAIL' || r.steps.some(s => s.assertion?.result === 'FAIL');
+  // An evidenced tester conclusion of ERROR is distinct from an operation or
+  // assertion that could not execute. Keep the scenario ERROR, not infrastructure.
+  const attestedError = r => r.operation === 'attestScenario' && !r.phase && r.evidenceComplete && r.finishedAt && r.outcome === 'ERROR' && r.assertion?.kind === 'agentAttestation' && r.assertion.result === 'ERROR' && r.verification?.source === 'agent';
+  let incomplete = !!execution && (scenarios.some(s => s.missing) || execution.errors.length > 0 || !execution.records.length || execution.records.some(r => !r.evidenceComplete || ['running', 'cancelled'].includes(r.outcome) || r.outcome === 'ERROR' && !attestedError(r) || r.steps.some(s => s.assertion?.result === 'ERROR')));
+  if (execution) {
+    if (!scenarios.length && input.handoff.kind !== 'web') {
+      for (const name of new Set(execution.records.map(r => r.scenarioName))) {
+        const records = execution.records.filter(r => r.scenarioName === name);
+        const completed = records.filter(r => !r.phase && r.verification && r.evidenceComplete && r.finishedAt);
+        if (!completed.some(r => ['PASS', 'FAIL'].includes(r.outcome) || attestedError(r))) incomplete = true;
+        scenarios.push({ name, result: records.some(failedRecord) ? 'FAIL' : completed.some(r => r.outcome === 'PASS') ? 'PASS' : 'ERROR' });
+      }
+    }
+    for (const scenario of scenarios) {
+      const records = execution.records.filter(r => r.scenarioId === executionScenarioId(scenario.name));
+      if (records.some(failedRecord)) scenario.result = 'FAIL';
+      else if (scenario.result === 'PASS' && !records.some(r => !r.phase && r.evidenceComplete && r.finishedAt !== null && ['completed', 'PASS'].includes(r.outcome) && (r.kind === 'web' || !!r.verification))) {
+        scenario.result = 'ERROR';
+        incomplete = true;
+      }
+    }
+  }
+  if (incomplete) {
+    for (const s of scenarios) if (s.result === 'PASS') s.result = 'ERROR';
+    result = { ...result, status: result.status === 'ok' ? 'evidence_error' : result.status, message: [result.message, 'Required execution evidence or explicit scenario completion is incomplete'].filter(Boolean).join('. ') };
+  }
+  const observedFailure = execution?.records.some(failedRecord);
+  // Spending limits cannot hide an already observed product failure.
+  const verdict = overallVerdict(observedFailure ? 'FAIL' : result.status === 'cost_limit' ? 'ERROR' : incomplete && verdictOf(result.answer) !== 'FAIL' ? 'ERROR' : verdictOf(result.answer), scenarios);
   const cost = result.cost !== undefined ? { cost: Number(result.cost.toFixed(6)) } : {};
   if (projectRun) {
     writeState(projectRun, { state: 'finished', finished: new Date().toISOString(), verdict, status: result.status, ...(result.cleanup ? { cleanup: result.cleanup } : {}), scenarios, ...cost });
     try {
       const handoff = JSON.parse(readFileSync(join(projectRun, 'handoff.yaml'), 'utf8'));
-      if (handoff?.kind === 'web') finalizeWebCandidates(projectRun, handoff, scenarios);
+      if (handoff?.attempt) {
+        for (const scenario of handoff.request.scenarios) {
+          try { markNotRecordable(projectRun, handoff.kind, scenario, 'attempt-hooks'); } catch {}
+        }
+      } else if (handoff?.kind === 'web') finalizeWebCandidates(projectRun, handoff, scenarios);
       else finalizeCliCandidates(projectRun, handoff, scenarios);
     } catch { /* Capture never changes the test result. */ }
   }
@@ -384,6 +516,7 @@ export const handoffSchema = z.object({
     setup: z.array(z.string().min(1)).max(20).optional().describe('cli/api: shell commands Toad runs once in the sandbox before any scenario, e.g. installing a pinned tool; every scenario starts from the result'),
   }).strict().optional()
     .describe('Omitted fields come from the project\'s .toad/toad.yaml'),
+  attempt: attemptSchema.optional(),
   request: z.object({ goal: z.string().min(1), scenarios }).strict(),
   credentials: z.record(z.string(), valueOrEnv).optional(),
   limitations: z.array(z.string()).optional(),
@@ -405,6 +538,35 @@ function apiTarget({ url, workdir, spec }, env) {
   lines.push(`Working folder, copied into the sandbox, with the API's description and test fixtures: ${workdir}.`);
   if (spec) lines.push(`The OpenAPI description is ${spec} in that folder; check responses against it.`);
   return lines;
+}
+
+/** Static definition checks shared by project execution and CLI preflight. */
+export function validateProjectHandoff(h, { suite } = {}) {
+  validateDefinition({ data: h }, handoffSchema, 'handoff');
+  h = { ...h, target: h.target ?? {} };
+  const fail = (path, explanation, remedy) => {
+    const document = suite?.path ? definitionDocument(readRegular(suite.path), suite.path) : null;
+    throw definitionError(document, { path }, { file: suite?.path ?? 'handoff', explanation, remedy });
+  };
+  if (h.attempt) {
+    const names = (h.request.scenarios ?? []).map(s => s.name.trim().toLowerCase());
+    if (new Set(names).size !== names.length) fail(['request', 'scenarios'], 'Attempt scenario names must be distinct', 'Supply one unique name per scenario.');
+    if (!h.request.scenarios?.length) fail(['request', 'scenarios'], 'Attempt hooks require explicit named scenarios', 'Supply request.scenarios before using attempt hooks.');
+    if (h.kind === 'web' && !h.attempt.workdir) fail(['attempt', 'workdir'], 'Web hooks require an explicit trusted fixture workdir', 'Set attempt.workdir to the trusted fixture folder; no host shell or browser scripts are provided.');
+    if (h.kind !== 'web' && h.attempt.workdir) {
+      let same = false;
+      try { same = realpathSync(h.attempt.workdir) === realpathSync(h.target.workdir); } catch {}
+      if (!same) fail(['attempt', 'workdir'], 'Hooks must use the tested workspace', 'Omit attempt.workdir or set it equal to target.workdir.');
+    }
+    const selected = h.attempt.credentials ?? [];
+    if (new Set(selected).size !== selected.length || selected.some(name => isReservedSecretName(name) || providerCredentialName(name) || !Object.values(h.credentials ?? {}).some(ref => ref.env === name))) fail(['attempt', 'credentials'], 'Invalid hook credential selection', 'Select distinct non-reserved application names from handoff.credentials; never select model/provider keys.');
+    if (Object.values(h.credentials ?? {}).some(ref => isReservedSecretName(ref.env) || providerCredentialName(ref.env))) fail(['credentials'], 'Unsafe credential reference for a hook-bearing run', 'Use application-only credential references, not reserved or provider keys.');
+  }
+  if ((h.kind === 'web' || h.kind === 'api') && !h.target.url) fail(['target', 'url'], 'Missing effective target URL', `Set target.url in the suite/handoff or ${h.kind}.url in .toad/toad.yaml.`);
+  if (h.kind === 'cli' && (!h.target.workdir || !h.target.program)) fail(['target', !h.target.workdir ? 'workdir' : 'program'], 'Missing CLI target', 'Set target.workdir and target.program in the suite/handoff, or cli defaults in .toad/toad.yaml.');
+  if (h.kind !== 'web' && Object.values(h.credentials ?? {}).some(ref => isReservedSecretName(ref.env))) fail(['credentials'], 'Reserved credential environment reference', 'Use a non-reserved application credential environment name.');
+  if (h.kind === 'web' && (h.target.setup?.length || h.target.path?.length || h.allow_installs)) fail(h.allow_installs ? ['allow_installs'] : ['target', h.target.setup?.length ? 'setup' : 'path'], 'Unsupported web execution option', 'Remove setup, path and allow_installs from web definitions; they apply only to CLI/API.');
+  return h;
 }
 
 /**
@@ -439,17 +601,14 @@ export function resolveCredentials(folder, credentials, { fromEnv = [], env = pr
 export async function runProject(input, ctx, options = {}) {
   const { env = process.env, envNames = [], sandbox, models, maxCost, origin = 'mcp', onRun, log } = options;
   const folder = projectFolder(input.project_path);
+  input = { ...input, handoff: validateDefinition({ data: input.handoff }, handoffSchema, 'handoff') };
   if (!lstatSync(folder).isDirectory() || !lstatSync(join(folder, 'runs')).isDirectory()) throw new Error('Run setup_project first');
   checkIgnore(join(folder, '.gitignore'));
   const config = readProjectConfig(folder);
   const h = withDefaults(input.handoff, config, dirname(folder));
   input = { ...input, timeout_minutes: input.timeout_minutes ?? config.timeout_minutes };
   registerProject(dirname(folder));
-  if (h.kind === 'web' && !h.target.url) throw new Error('A web handoff requires target.url, in the handoff or as web.url in .toad/toad.yaml');
-  if (h.kind === 'cli' && (!h.target.workdir || !h.target.program)) throw new Error('A CLI handoff requires target.workdir and target.program, in the handoff or under cli: in .toad/toad.yaml');
-  if (h.kind === 'api' && !h.target.url) throw new Error('An API handoff requires target.url, in the handoff or as api.url in .toad/toad.yaml');
-  if (h.kind !== 'web' && Object.values(h.credentials ?? {}).some(ref => isReservedSecretName(ref.env))) throw new Error(`${h.kind.toUpperCase()} credentials contain a reserved environment name`);
-  if (h.kind === 'web' && (h.target.setup?.length || h.target.path?.length || h.allow_installs)) throw new Error('setup, path and allow_installs apply to cli and api handoffs; a web test runs in a browser');
+  validateProjectHandoff(h);
   const secretValues = resolveCredentials(folder, h.credentials, { fromEnv: envNames, env });
   const runEnv = sandbox ? { ...env, TOAD_CLI_SANDBOX: sandbox } : env;
   // The models: options, then toad.yaml, then the user's; another set runs on a copy of the agent.
@@ -478,15 +637,16 @@ export async function runProject(input, ctx, options = {}) {
 }
 
 async function projectRun(input, ctx, h, run, secretValues, { agent, env, maxCost }) {
-  const unsandboxed = h.kind !== 'web' && env.TOAD_CLI_SANDBOX === 'none';
+  const unsandboxed = (h.kind !== 'web' || h.attempt) && env.TOAD_CLI_SANDBOX === 'none';
   const target = h.kind === 'web' ? [`Test ${h.target.url}.`, 'This is the authoritative target for every navigation. Resolve root-relative paths such as /pricing against this target. Do not use a different origin or an older target. Pass root-relative goto URLs to cli_run_structured_web; it resolves and enforces the effective target.']
     : h.kind === 'api' ? apiTarget(h.target, env)
       : [`Test the command-line program in the working folder ${h.target.workdir}.`, `Invoke it as: ${h.target.program}`];
-  const cliRecording = ['cli', 'api', 'web'].includes(h.kind) && !Object.keys(h.credentials ?? {}).length && !h.allow_installs && !h.target.setup?.length && !h.target.path?.length;
-  const text = [request(target, { what: h.request.goal, scenarios: h.request.scenarios }),
+  const cliRecording = !h.attempt && ['cli', 'api', 'web'].includes(h.kind) && !Object.keys(h.credentials ?? {}).length && !h.allow_installs && !h.target.setup?.length && !h.target.path?.length;
+  const text = [request(target, { what: h.request.goal, scenarios: h.attempt ? [] : h.request.scenarios }),
     ...(cliRecording && h.kind === 'api' ? ['For one-request scenarios use cli_run_structured_api with payload {method,url,headers,body,expect:{status,body:{equals:STRING or contains:STRING}}}, plus scenario ID, receipts, name and capture:{scenarioName:EXACT_NAME,complete:true}. The tool requires Node with fetch in the sandbox. Headers support only accept and content-type. No credentials or sensitive literals. Attest complete only when this request and assertion cover the whole scenario; otherwise use normal tools.'] : []),
     ...(cliRecording && h.kind === 'web' ? ['For a scenario fully covered by navigation, clicks, fills and explicit checks, a web-tester may run it with cli_run_structured_web: receipts (the scenario folder), name (e.g. 01-structured), payload {steps:[...]} and capture:{scenarioName:EXACT_NAME,complete:true}. Steps: {action:"goto",url}, {action:"click",target}, {action:"fill",target,value}, {action:"expectVisible",target}, {action:"expectText",target,contains}, {action:"expectUrl",path}; target is {role,name}, {label} or {text}, matched exactly. Start with goto under the app URL and end with a check. Only trusted, non-secret literals; never sign-in, password or token fields. Attest complete only when the steps and checks cover the whole scenario, and run it once, as the scenario\'s only structured run; otherwise use the browser tools. Do not weaken the scenario to record it.'] : []),
     ...(cliRecording && h.kind === 'cli' ? ['For a scenario fully testable by one structured CLI command and explicit exit-code and stdout assertion, use cli_run_structured_command with capture.scenarioName set to the exact scenario name and capture.complete true. Use it as the only command receipt in that scenario. Set complete true only if this one action and assertion cover every step and expected outcome. Only trusted, non-secret literal data is supported. Otherwise use normal tools; do not weaken the scenario to record it.'] : []),
+    ...(h.attempt ? [`${HOOK_RECORDING_REASON}. Native preparation owns one disposable workspace per attempt. Do not run hooks yourself or create another workspace. The supplied scenario ID must be used for all commands; collect failure evidence before returning. No persistent daemons. Web hooks do not grant browser testers shell tools.`] : []),
     ...(h.credentials ? [`Credential roles and secret names: ${JSON.stringify(h.credentials)}. ${h.kind === 'web' ? 'Use each env name as the Playwright secret name' : 'Use each env name as a shell environment variable'}; never print its value.`] : []),
     ...(unsandboxed ? ['There is no sandbox on this machine (--sandbox none): commands run directly on the host in a copy of the working folder, which is their current directory. Use relative paths, not /work, and $HOME, not /home/tester.'] : []),
     ...(h.target.setup?.length ? [`Setup already ran in the sandbox, so every prepared scenario starts with its result: ${h.target.setup.map(c => `\`${c}\``).join('; ')}.`] : []),
@@ -499,9 +659,9 @@ async function projectRun(input, ctx, h, run, secretValues, { agent, env, maxCos
   // Pi keeps this run's sessions (the lead's and each tester's) with the run, which is how its cost is known.
   const sessions = join(run, 'sessions');
   ensureDirectory(sessions);
-  const result = await runTest(text, input, ctx, {
+  const result = await runTest(text, { ...input, handoff: h }, ctx, {
     attachImages: h.kind === 'web' && input.screenshots !== 'paths', projectRun: run, secretValues,
-    cliImage: h.kind === 'web' ? undefined : h.target.image, cliPath: h.kind === 'web' ? undefined : h.target.path, cliRecording, webTarget: h.kind === 'web' ? h.target.url : undefined, setup, agent, env, maxCost, sessions,
+    cliImage: h.kind === 'web' && !h.attempt ? undefined : h.target.image, cliPath: h.kind === 'web' ? undefined : h.target.path, cliRecording, webTarget: h.kind === 'web' ? h.target.url : undefined, setup, agent, env, maxCost, sessions,
   });
   result.content[0].text += `\n\nHandoff: ${join(run, 'handoff.yaml')}\nReport: ${join(run, 'reports', 'report.md')}`;
   result.structuredContent.run = run;

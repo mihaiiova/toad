@@ -2,12 +2,20 @@
 import { replayCliPayload } from './toad-cli-recording.mjs';
 const keys = (v, names) => v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).sort().join(',') === names.slice().sort().join(',');
 const text = v => typeof v === 'string' && v.length <= 1024 && !v.includes('\0');
-export function validApiPayload(p) {
-  if (!keys(p, ['method', 'url', 'headers', 'body', 'expect']) || !['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD'].includes(p.method) || !text(p.url) || !text(p.body) || !keys(p.expect, ['status', 'body']) || !Number.isInteger(p.expect.status) || p.expect.status < 100 || p.expect.status > 599) return false;
-  try { const u = new URL(p.url); if (!['http:', 'https:'].includes(u.protocol) || u.username || u.password || u.hash) return false; } catch { return false; }
-  if (!p.headers || typeof p.headers !== 'object' || Array.isArray(p.headers) || Object.keys(p.headers).length > 10 || Object.entries(p.headers).some(([k,v]) => !['accept', 'content-type'].includes(k) || !text(v) || /[\r\n]/.test(v))) return false;
-  return !!((keys(p.expect.body, ['equals']) && text(p.expect.body.equals)) || (keys(p.expect.body, ['contains']) && text(p.expect.body.contains) && p.expect.body.contains.length));
+/** The first invalid structural path; also used by author-facing diagnostics. */
+export function apiPayloadIssue(p) {
+  if (!keys(p, ['method', 'url', 'headers', 'body', 'expect'])) return [];
+  if (!['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD'].includes(p.method)) return ['method'];
+  if (!text(p.url)) return ['url'];
+  try { const u = new URL(p.url); if (!['http:', 'https:'].includes(u.protocol) || u.username || u.password || u.hash) return ['url']; } catch { return ['url']; }
+  if (!text(p.body)) return ['body'];
+  if (!p.headers || typeof p.headers !== 'object' || Array.isArray(p.headers) || Object.keys(p.headers).length > 10 || Object.entries(p.headers).some(([k,v]) => !['accept', 'content-type'].includes(k) || !text(v) || /[\r\n]/.test(v))) return ['headers'];
+  if (!keys(p.expect, ['status', 'body'])) return ['expect'];
+  if (!Number.isInteger(p.expect.status) || p.expect.status < 100 || p.expect.status > 599) return ['expect', 'status'];
+  if (!(keys(p.expect.body, ['equals']) && text(p.expect.body.equals) || keys(p.expect.body, ['contains']) && text(p.expect.body.contains) && p.expect.body.contains.length)) return ['expect', 'body'];
+  return null;
 }
+export function validApiPayload(p) { return apiPayloadIssue(p) === null; }
 // This fixed script runs inside the existing scenario sandbox. Response size,
 // redirects and time are bounded; URLs and literals are data, never source.
 const SCRIPT = `const p=JSON.parse(process.argv[1]);
@@ -26,7 +34,7 @@ export function apiDescription(p) {
   return [{ action: `${p.method} ${p.url}; headers ${JSON.stringify(p.headers)}; body ${JSON.stringify(p.body)}`, assertion: `HTTP ${p.expect.status}; body ${JSON.stringify(p.expect.body)}` }];
 }
 export function replayApiPayload(p, options) {
-  const result = replayCliPayload(apiCliPayload(p), options);
+  const result = replayCliPayload(apiCliPayload(p), { ...options, env: { ...(options?.env ?? process.env), TOAD_EXECUTION_KIND: 'api', TOAD_EXECUTION_EXPECT: JSON.stringify(p.expect) } });
   if ([2, 126, 127].includes(result.actual.exitCode)) throw new Error('HTTP replay infrastructure or prerequisite error');
   return result;
 }
