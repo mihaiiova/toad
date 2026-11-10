@@ -32,6 +32,15 @@ When a scenario fails or errors because a program, package or module it
 needs is missing, say so as a missing prerequisite, apart from product
 failures.
 
+For a native owned attempt, pass its supplied workspace ID and exact scenario
+name to the tester. Do not rerun fixture hooks, prepare another workspace or
+retry the scenario internally; native finalization owns teardown. Require unique
+receipt names for every operation, including probes/retries. A successful tool
+call is not a scenario assertion: CLI/API exploratory completion must cite an
+explicit evidence-linked attestation. Preserve observed machine FAIL over later
+investigation or replacement proposals; required evidence/completion errors block
+PASS, while optional diagnostics only warn.
+
 Report only what the testers observed. Never invent, soften or repair a
 result, and keep every receipt path (screenshots, command records)
 exactly as a tester gave it. If a scenario could not be run (the site or

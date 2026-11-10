@@ -50,6 +50,9 @@ if (allowed !== undefined && !isAbsolute(allowed)) fail('TOAD_RECEIPTS_DIR must 
 const receiptsDir = resolve(root, receipts), receiptsRoot = allowed ? resolve(allowed) : resolve(root, 'data/receipts');
 if (receiptsDir !== receiptsRoot && !receiptsDir.startsWith(receiptsRoot + sep)) fail(`the receipts folder must be inside ${receiptsRoot}`);
 if (!/^[a-z0-9][a-z0-9-]{0,99}$/.test(name)) fail('invalid receipt name');
+// The workspace identity becomes the execution session/attempt ID. Diagnose
+// malformed identities before record validation can mask them as name errors.
+if (!/^[0-9a-f-]{36}$/.test(id)) fail('invalid scenario ID; use the UUID returned by prepare, not a workspace path or scenario name');
 try {
   const context = executionContext({ ...process.env, TOAD_EXECUTION_KIND: process.env.TOAD_EXECUTION_KIND ?? 'cli' }, scenarioName);
   if (context) {

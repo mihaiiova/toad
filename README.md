@@ -515,10 +515,11 @@ Review both, then commit them yourself.
   false unless you pass `--writes`.
 - A recording is copied only when the run's recording is valid (see
   [Run-local recordings](#run-local-recordings)) and still valid under the
-  suite as saved. Today that means a single structured CLI command or a single
-  structured API request, in a suite with no `credentials`, `allow_installs`,
-  `target.setup` or `target.path` (its own or from `toad.yaml`). Web
-  scenarios have no recordings yet. Every other scenario is saved without one.
+  suite as saved. Today that means a single structured CLI command, a single
+  structured API request, or a supported structured web scenario, in a suite
+  with no `credentials`, `allow_installs`, `target.setup`, `target.path` or
+  `attempt` hooks (its own or from `toad.yaml`). Every other scenario is saved
+  without one.
 - A recording is the run's envelope as it was: the program, arguments and
   expected output, or the request and expected response. It holds no secret
   values, because the codecs refuse credential-bearing runs, but it holds
@@ -1052,9 +1053,17 @@ container selection is refused, never silently downgraded.
 
 `manifest.json` retains planned/observed outcomes, versions, models, evidence,
 recorded cost, incomplete/unexecuted cases and scoring denominators. Fake Pi is
-**harness-only**, never evidence of agent quality. A real paid baseline is
-**pending separate authorization**, not fabricated. Ordinary `npm test` includes
-offline fixture/scorer/harness contracts without keys or browser download.
+**harness-only**, never evidence of agent quality. The [first paid baseline](docs/evaluation-baseline-2026-11-09.md)
+ran on `5caf372` with fixture v1: it was incomplete, with 14 missing-evidence
+cases and one synthetic-secret leak. [Offline repairs](docs/evaluation-baseline-2026-11-09-diagnosis.md)
+cover native command registration and the selected-secret fixture contract;
+the [fixture-v2 Luna rerun](docs/evaluation-baseline-2026-11-10.md) executed all
+21 cases but remained incomplete (10 evidence errors, 11/21 credited correct,
+no sentinel leaks detected). Further paid runs need fresh explicit model and
+cost/time/scenario authorization. Changing models is supported, but changes
+the comparison as well as the runtime repairs. Ordinary
+`npm test` includes offline fixture/scorer/harness contracts without keys or
+browser download; installed-only native tests can skip without their prerequisites.
 See [the evaluation guide](docs/evaluations.md) for usage, fixture ground truth,
 reference-failure provenance, budgets and measurement limitations.
 
@@ -1077,9 +1086,11 @@ edits the model fields of a checkout's agent in the same way.
 
 ### Releasing
 
-`.github/workflows/test.yml` runs the tests on Linux, macOS and Windows for
-every push. Installs come from GitHub for now: `main` is the latest, and each
-release is a tag that installs and CI jobs can pin (`github:mihaiiova/toad#v0.8.0`).
+`.github/workflows/test.yml` runs tests on Linux and macOS for pull requests
+and pushes to `main`; native Windows CI is currently paused. Installs can come
+from GitHub: `main` is the latest, and published release tags are installable
+and pinnable (for example `github:mihaiiova/toad#v0.8.0`). A version bump alone
+is not a published release.
 Release a version with:
 
 ```sh
@@ -1115,8 +1126,8 @@ attempt:
   after:
     - node fixtures/cleanup.mjs
   credentials: [APP_FIXTURE_TOKEN] # subset of handoff/suite credential references
-  timeout_seconds: 120            # whole attempt; 1–900 seconds
-  cleanup_timeout_seconds: 30     # all after commands; separate 1–120 second budget
+  timeout_seconds: 120            # default 120; prepare + before + product; 1–900
+  cleanup_timeout_seconds: 30     # default 30; all after commands; separate 1–120
   writes: true                   # explicitly declares remote create/change/delete
 ```
 

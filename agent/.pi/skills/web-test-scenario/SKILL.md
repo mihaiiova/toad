@@ -33,6 +33,18 @@ A successful browser tool operation is not a scenario assertion; report your
 observed conclusions as tester-attested and cite the evidence. For the structured
 web command, always supply `scenarioName` (or the same exact name in capture).
 
+For the native tool argument `request`, supply the serialized JSON object
+below as text. Do not include a filename, shell command, Markdown fences or
+literal `JSON.stringify(...)`. Replace placeholders with actual request values;
+keep the object serialized inside the string-valued `request` argument.
+
+```json
+{"receipts":"RECEIPTS","name":"01-check","scenarioName":"EXACT_NAME","payload":{"steps":[{"action":"goto","url":"/"},{"action":"expectText","target":{"role":"heading","name":"Invoice"},"contains":"Invoice"}]}}
+```
+
+Use only supported actions and actual observed locators/expected literals.
+The example is illustrative, not permission to change the scenario intent.
+
 1. Open the URL. If it fails to load, stop: the scenario is ERROR, with
    the error and a screenshot if a page rendered.
 2. Before each action, take an accessibility snapshot and act on the
@@ -40,6 +52,10 @@ web command, always supply `scenarioName` (or the same exact name in capture).
    selectors.
 3. Login secrets are given by name. Type the name, never a value; the
    browser fills in the real value. Never ask for or reveal a secret.
+   Selected registered values can be redacted by the native browser transport;
+   unknown/unselected page values, screenshots and arbitrary encodings are not
+   automatically protected. Do not probe password values or persist page dumps
+   containing sensitive content. Report missing selected references as ERROR.
 4. After each step, check the expected outcome against the snapshot.
    Wait for content that loads late before deciding.
 5. Take a screenshot at each checkpoint, and always at the moment a step

@@ -18,8 +18,9 @@ commands only: they grant no shell tools or browser-cookie/reset scripts to
 the web tester. No persistent daemon or remote-state isolation is promised.
 
 
-In project runs, pass `scenarioName` copied exactly from the requested scenario
-on every command (not the workspace UUID). Structured CLI/API requests also take
+In project runs, copy the exact requested scenario name (not the workspace UUID).
+Shell tools use the `scenario_name` argument; structured JSON and attestation
+requests use `scenarioName`. Preparation tools take workdir/URL, not that field. Structured CLI/API requests also take
 `scenarioName`; `capture.scenarioName` binds it when recording. For goal-only
 runs use an explicit bounded name. Commands return an execution ID. Normal shell
 commands and HTTP requests produce operation evidence, not machine scenario
@@ -32,6 +33,20 @@ of recording eligibility; do not weaken expectations to make them pass.
 A failed saved assertion stays FAIL after investigation or replacement capture.
 Do not use an attestation or report formatting to override a machine failure.
 
+For the native tool argument `request`, supply the serialized JSON object
+below as text. Do not include a filename, shell command, Markdown fences or
+literal `JSON.stringify(...)`. Replace placeholders with actual request values;
+keep the object serialized inside the string-valued `request` argument.
+
+```json
+{"scenario":"SCENARIO_UUID","receipts":"RECEIPTS","name":"01-check","program":"node","args":["invoice.mjs"],"expect":{"exitCode":0,"stdout":{"contains":"6"}},"scenarioName":"EXACT_NAME"}
+```
+
+Use the returned UUID as `scenario`, never the
+workspace path. Do not invent `scenarioId`, `expectedExitCode`, `expectedStdout`,
+`command` or `expected` fields. Adapt the assertion to the actual scenario;
+this example is not permission to replace the requested intent.
+
 1. Prepare a scenario for the requested project. If the scenario requires
    network access, use the network preparation tool with a non-mutating
    HTTP(S) endpoint. Otherwise use ordinary preparation. An infrastructure
@@ -42,7 +57,10 @@ Do not use an attestation or report formatting to override a machine failure.
 3. Check the program is available, then execute the scenario's steps in
    order. Put recorded evidence for one scenario under the supplied
    receipts folder, in a scenario-specific subfolder. Name each command
-   NN-what-it-does, numbering from 01. Use the input-enabled command
+   NN-what-it-does, numbering from 01. Each receipt name must be unique in its
+   folder, including probes/retries: existing receipts are never overwritten and
+   a duplicate leaves required evidence incomplete (ERROR). Use a new name.
+   Use the input-enabled command
    when needed. The workspace is scratch space, not evidence.
    Commands run with `/bin/sh`, not bash: use POSIX shell only (no
    `${PIPESTATUS[@]}`, `[[ ]]`, arrays or `source`), or run

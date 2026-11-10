@@ -188,12 +188,19 @@ function fakeAgent(root) {
   writeFileSync(program, `#!/usr/bin/env node
 import fs from 'node:fs'; import path from 'node:path';
 import { fakeExecutionEvidence } from ${JSON.stringify(new URL('./fake-web-evidence.mjs', import.meta.url).href)};
+import { executionContext, beginExecution, finishExecution, operationReceipt, attestScenario } from ${JSON.stringify(new URL('../../agent/tools/toad-execution.mjs', import.meta.url).href)};
 const args = process.argv.slice(2), sessions = args[args.indexOf('--session-dir') + 1];
 const names = JSON.parse(process.env.TOAD_EXECUTION_SCENARIOS);
 const classes = ${JSON.stringify(Object.fromEntries(evaluationCases().map(e => [e.id, e.expectedClass])))};
 fs.writeFileSync(path.join(sessions,'lead.jsonl'), JSON.stringify({type:'message',message:{role:'assistant',provider:'fixture',model:'offline',usage:{cost:{total:0.001}}}})+'\\n');
 const lines = names.map(name => '- ' + classes[name] + ' | ' + name);
-fakeExecutionEvidence(process.env, lines.join('\\n'));
+if (['cli','api'].includes(process.env.TOAD_EXECUTION_KIND) && names.every(name => classes[name] === 'ERROR')) {
+  for (const name of names) {
+    const h = beginExecution(executionContext(process.env, name), 'runCommand');
+    finishExecution(h, { outcome: 'completed', artifacts: [operationReceipt(h, 'completed')], evidenceComplete: true });
+    attestScenario(process.env, { scenarioName: name, result: 'ERROR', executionIds: [h.record.id] });
+  }
+} else fakeExecutionEvidence(process.env, lines.join('\\n'));
 const verdict = names.some(n=>classes[n]==='FAIL')?'FAIL':names.some(n=>classes[n]==='ERROR')?'ERROR':'PASS';
 console.log(JSON.stringify({type:'agent_end',messages:[{role:'assistant',stopReason:'stop',content:[{type:'text',text:['Verdict: '+verdict,'Results:',...lines].join('\\n')}]}]}));
 `, { mode: 0o755 });
@@ -216,6 +223,17 @@ test('existing runProject/fake-Pi seam, real CLI/API reference replay and fake b
   assert.equal(manifest.score.incomplete, 0);
   assert.equal(manifest.unknownCostCases, 0);
   assert.ok(manifest.observations.every(o => o.observedModels.includes('fixture/offline')));
+  const { readExecutionRecords } = await import('../../agent/tools/toad-execution.mjs');
+  for (const e of manifest.expected.filter(e => e.kind !== 'web' && e.expectedClass === 'ERROR')) {
+    const o = manifest.observations.find(o => o.id === e.id);
+    assert.equal(o.status, 'ok');
+    assert.equal(o.classification, 'ERROR');
+    assert.equal(o.infrastructureFailure, false);
+    assert.equal(o.complete, true, 'actual evaluator mapping preserves evidenced ERROR completion');
+    assert.equal(manifest.score.cases.find(c => c.id === e.id).correct, true);
+    const evidence = readExecutionRecords(join(root, 'evaluation', o.run));
+    assert.ok(evidence.records.some(r => r.assertion?.kind === 'agentAttestation' && r.outcome === 'ERROR' && r.evidenceComplete));
+  }
   for (const e of manifest.expected.filter(e => e.preserveOriginalFailure)) {
     const o = manifest.observations.find(o => o.id === e.id);
     assert.equal(o.originalAssertionFailed, true);

@@ -18,8 +18,9 @@ commands only: they grant no shell tools or browser-cookie/reset scripts to
 the web tester. No persistent daemon or remote-state isolation is promised.
 
 
-In project runs, pass `scenarioName` copied exactly from the requested scenario
-on every command (not the workspace UUID). Structured CLI/API requests also take
+In project runs, copy the exact requested scenario name (not the workspace UUID).
+Shell tools use the `scenario_name` argument; structured JSON and attestation
+requests use `scenarioName`. Preparation tools take workdir/URL, not that field. Structured CLI/API requests also take
 `scenarioName`; `capture.scenarioName` binds it when recording. For goal-only
 runs use an explicit bounded name. Commands return an execution ID. Normal shell
 commands and HTTP requests produce operation evidence, not machine scenario
@@ -31,6 +32,21 @@ ERROR, never PASS. Use structured assertions whenever appropriate, regardless
 of recording eligibility; do not weaken expectations to make them pass.
 A failed saved assertion stays FAIL after investigation or replacement capture.
 Do not use an attestation or report formatting to override a machine failure.
+
+For the native tool argument `request`, supply the serialized JSON object
+below as text. Do not include a filename, shell command, Markdown fences or
+literal `JSON.stringify(...)`. Replace placeholders with actual request values;
+keep the object serialized inside the string-valued `request` argument.
+
+```json
+{"scenario":"SCENARIO_UUID","receipts":"RECEIPTS","name":"01-request","payload":{"method":"GET","url":"http://127.0.0.1:3000/","headers":{"accept":"application/json"},"body":"","expect":{"status":200,"body":{"contains":"6"}}},"scenarioName":"EXACT_NAME"}
+```
+
+All five payload keys (`method`, `url`, `headers`, `body`, `expect`) are required;
+use `body:""` for no body, never null or omission. Headers use lower-case
+`accept`/`content-type` only. `scenario` is the returned UUID, not a workspace
+path. Adapt expected status/body to the actual scenario; do not copy these
+illustrative expectations over its intent.
 
 1. Prepare a scenario with the network preparation tool, passing the API
    URL to use from inside the sandbox (the request says when it differs
@@ -51,7 +67,9 @@ Do not use an attestation or report formatting to override a machine failure.
    trusted non-secret literals are supported; the sandbox needs Node with fetch.
    Do not attest complete for partial checks or weaken scenarios to record them.
    Otherwise send one request per recorded command, numbered NN-what-it-does
-   from 01, under the receipts folder in a scenario-specific subfolder:
+   from 01, under the receipts folder in a scenario-specific subfolder.
+   Use a unique receipt name for every probe/retry; duplicate names never
+   overwrite evidence and cause ERROR. For example:
    `curl -sS -i --max-time 30 -X METHOD "$URL/path"`, with
    `-H 'Content-Type: application/json' --data @body.json` or the
    input-enabled command for a body. `-i` keeps the status line and

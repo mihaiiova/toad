@@ -421,13 +421,16 @@ function finish(input, result, folder, { attachImages, projectRun }) {
   const scenarios = scenarioResults(input.handoff?.request?.scenarios ?? input.scenarios, resultsOf(result.answer));
   const execution = projectRun && input.handoff ? readExecutionRecords(projectRun) : null;
   const failedRecord = r => r.outcome === 'FAIL' || r.assertion?.result === 'FAIL' || r.steps.some(s => s.assertion?.result === 'FAIL');
-  let incomplete = !!execution && (scenarios.some(s => s.missing) || execution.errors.length > 0 || !execution.records.length || execution.records.some(r => !r.evidenceComplete || ['running', 'ERROR', 'cancelled'].includes(r.outcome) || r.steps.some(s => s.assertion?.result === 'ERROR')));
+  // An evidenced tester conclusion of ERROR is distinct from an operation or
+  // assertion that could not execute. Keep the scenario ERROR, not infrastructure.
+  const attestedError = r => r.operation === 'attestScenario' && !r.phase && r.evidenceComplete && r.finishedAt && r.outcome === 'ERROR' && r.assertion?.kind === 'agentAttestation' && r.assertion.result === 'ERROR' && r.verification?.source === 'agent';
+  let incomplete = !!execution && (scenarios.some(s => s.missing) || execution.errors.length > 0 || !execution.records.length || execution.records.some(r => !r.evidenceComplete || ['running', 'cancelled'].includes(r.outcome) || r.outcome === 'ERROR' && !attestedError(r) || r.steps.some(s => s.assertion?.result === 'ERROR')));
   if (execution) {
     if (!scenarios.length && input.handoff.kind !== 'web') {
       for (const name of new Set(execution.records.map(r => r.scenarioName))) {
         const records = execution.records.filter(r => r.scenarioName === name);
         const completed = records.filter(r => !r.phase && r.verification && r.evidenceComplete && r.finishedAt);
-        if (!completed.some(r => r.outcome === 'PASS')) incomplete = true;
+        if (!completed.some(r => ['PASS', 'FAIL'].includes(r.outcome) || attestedError(r))) incomplete = true;
         scenarios.push({ name, result: records.some(failedRecord) ? 'FAIL' : completed.some(r => r.outcome === 'PASS') ? 'PASS' : 'ERROR' });
       }
     }

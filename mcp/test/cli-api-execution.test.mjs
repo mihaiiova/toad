@@ -88,6 +88,17 @@ test('required receipt failure gives ERROR after pass but cannot erase an observ
   assert.throws(() => attestScenario(f.env, { scenarioName: NAME, result: 'PASS', executionIds: [record.id] }));
 });
 
+test('a workspace path used as scenario ID reports the ID contract, not a name-binding error', async t => {
+  const f = fixture(t);
+  const result = await f.execute('toad-exec.mjs', ['run', f.receipts, '01-path', f.project, 'true', '--scenario-name', NAME]);
+  assert.equal(result.code, 2);
+  assert.match(result.stderr, /scenario ID.*UUID.*prepare/i);
+  assert.doesNotMatch(result.stderr, /bind an exact scenarioName/);
+  assert.equal(readExecutionRecords(f.run).records.length, 0);
+  assert.ok(readExecutionRecords(f.run).errors.length, 'invalid operation binding still blocks completion');
+  assert.equal(existsSync(join(f.receipts, '01-path.txt')), false);
+});
+
 test('unbound/foreign names and symlink receipts fail closed, without creating external evidence', async t => {
   const f = fixture(t), scenario = await prepare(f);
   const unbound = await f.execute('toad-exec.mjs', ['run', f.receipts, '01-no', scenario, 'true']);
